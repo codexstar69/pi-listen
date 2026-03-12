@@ -439,7 +439,7 @@ function startStreamingSession(
 	// Use smaller buffer (-b 4096) for lower latency audio capture.
 	const recProc = spawn("rec", [
 		"-q",
-		"--buffer", "1024",           // smaller buffer = lower capture latency
+		"--buffer", "4096",           // 4096 bytes prevents CoreAudio buffer overruns
 		"-c", String(CHANNELS),
 		"-b", "16",
 		"-e", "signed-integer",
@@ -449,7 +449,10 @@ function startStreamingSession(
 	], { stdio: ["pipe", "pipe", "pipe"] });
 
 	recProc.stderr?.on("data", (d: Buffer) => {
-		voiceDebug("SoX stderr:", d.toString().trim());
+		const msg = d.toString().trim();
+		// Suppress CoreAudio buffer overrun spam — only log once
+		if (msg.includes("buffer overrun")) return;
+		voiceDebug("SoX stderr:", msg);
 	});
 
 	const wsUrl = buildDeepgramWsUrl(config);
@@ -908,7 +911,11 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function setVoiceState(newState: VoiceState) {
+		const prev = voiceState;
 		voiceState = newState;
+		if (prev !== newState) {
+			voiceDebug(`STATE: ${prev} → ${newState}`, { stack: new Error().stack?.split("\n").slice(1, 4).map(s => s.trim()).join(" | ") });
+		}
 		updateVoiceStatus();
 	}
 
