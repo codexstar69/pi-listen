@@ -1045,10 +1045,9 @@ export default function (pi: ExtensionAPI) {
 		if (!ctx?.hasUI) return;
 
 		(showRecordingWidget as any)._frame = 0;
-		(showRecordingWidget as any)._hasTranscript = false;
+		(showRecordingWidget as any)._liveText = "";
 
 		const animTimer = setInterval(() => {
-			if ((showRecordingWidget as any)?._hasTranscript) return;
 			(showRecordingWidget as any)._frame = ((showRecordingWidget as any)._frame || 0) + 1;
 			showRecordingWidgetFrame(target, (showRecordingWidget as any)._frame);
 		}, 150);
@@ -1092,17 +1091,32 @@ export default function (pi: ExtensionAPI) {
 						? theme.fg("dim", "Ctrl+Shift+B stop")
 						: theme.fg("dim", "Release SPACE");
 
-					// Build line content, truncate to fit
+					// Build main recording line
 					const content = ` ${dot} ${label} ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`;
 					const stripped = content.replace(/\x1b\[[^m]*m/g, "").length;
 					const pad = Math.max(0, maxW - stripped);
 
 					const border = theme.fg("border", "─".repeat(maxW));
-					return [
+					const lines = [
 						border,
 						content + " ".repeat(pad),
-						border,
 					];
+
+					// If there's a live transcript, show a preview line
+					const liveText = (showRecordingWidget as any)?._liveText;
+					if (liveText && liveText.trim()) {
+						const maxTextW = Math.max(0, maxW - 6);
+						const preview = liveText.length > maxTextW
+							? "…" + liveText.slice(-(maxTextW - 1))
+							: liveText;
+						const textLine = ` ${theme.fg("dim", "▍")} ${theme.fg("text", preview)}`;
+						const textStripped = textLine.replace(/\x1b\[[^m]*m/g, "").length;
+						const textPad = Math.max(0, maxW - textStripped);
+						lines.push(textLine + " ".repeat(textPad));
+					}
+
+					lines.push(border);
+					return lines;
 				},
 			};
 		}, { placement: "aboveEditor" });
@@ -1115,9 +1129,9 @@ export default function (pi: ExtensionAPI) {
 	function updateLiveTranscriptWidget(interim: string, finals: string[]) {
 		if (!ctx?.hasUI) return;
 
-		// Stop the waveform animation — live transcript takes over
-		(showRecordingWidget as any)._hasTranscript = true;
-		clearRecordingAnimTimer();
+		// DON'T stop the waveform animation — keep it running!
+		// We still want the ● REC waveform + timer to show.
+		// Just update the editor text with the live transcript.
 
 		const finalized = finals.join(" ");
 		const displayText = finalized + (interim ? (finalized ? " " : "") + interim : "");
@@ -1128,27 +1142,9 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.setEditorText(prefix + displayText);
 		}
 
-		// Keep a minimal recording indicator widget
-		ctx.ui.setWidget("voice-recording", (tui, theme) => {
-			return {
-				invalidate() {},
-				render(width: number): string[] {
-					const maxW = Math.max(0, Math.min(width - 4, 56));
-					const elapsed = Math.round((Date.now() - recordingStart) / 1000);
-					const timeStr = `${elapsed}s`;
-
-					const dotPulse = Math.sin(Date.now() / 400) > -0.3;
-					const dot = dotPulse ? theme.fg("error", "●") : theme.fg("muted", "○");
-
-					const content = ` ${dot} ${theme.fg("accent", "REC")} ${theme.fg("muted", timeStr)} ${theme.fg("dim", "Release SPACE to finalize")}`;
-					const stripped = content.replace(/\x1b\[[^m]*m/g, "").length;
-					const pad = Math.max(0, maxW - stripped);
-
-					const border = theme.fg("border", "─".repeat(maxW));
-					return [border, content + " ".repeat(pad), border];
-				},
-			};
-		}, { placement: "aboveEditor" });
+		// Update the waveform widget to also show a transcript preview line
+		// but keep the full animation running (don't replace it)
+		(showRecordingWidget as any)._liveText = displayText;
 	}
 
 	// ─── Finalizing Widget ──────────────────────────────────────────────────
