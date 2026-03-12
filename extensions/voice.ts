@@ -1144,19 +1144,6 @@ export default function (pi: ExtensionAPI) {
 						content + " ".repeat(pad),
 					];
 
-					// If there's a live transcript, show a preview line
-					const liveText = (showRecordingWidget as any)?._liveText;
-					if (liveText && liveText.trim()) {
-						const maxTextW = Math.max(0, maxW - 6);
-						const preview = liveText.length > maxTextW
-							? "…" + liveText.slice(-(maxTextW - 1))
-							: liveText;
-						const textLine = ` ${theme.fg("dim", "▍")} ${theme.fg("text", preview)}`;
-						const textStripped = textLine.replace(/\x1b\[[^m]*m/g, "").length;
-						const textPad = Math.max(0, maxW - textStripped);
-						lines.push(textLine + " ".repeat(textPad));
-					}
-
 					lines.push(border);
 					return lines;
 				},
