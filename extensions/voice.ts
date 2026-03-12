@@ -1260,6 +1260,13 @@ export default function (pi: ExtensionAPI) {
 					// ── DISTINGUISH SILENCE VS NO SPEECH ──
 					hideWidget();
 					playSound("error");
+					// Full state reset on empty result
+					spaceConsumed = false;
+					spaceDownTime = null;
+					spacePressCount = 0;
+					holdConfirmed = false;
+					clearHoldTimer();
+					clearReleaseTimer();
 					if (!meta.hadAudio) {
 						ctx?.ui.notify("Microphone captured no audio. Check mic permissions.", "error");
 					} else if (!meta.hadSpeech) {
@@ -1302,6 +1309,13 @@ export default function (pi: ExtensionAPI) {
 					}
 				}
 				playSound("stop");
+				// Full state reset on successful completion
+				spaceConsumed = false;
+				spaceDownTime = null;
+				spacePressCount = 0;
+				holdConfirmed = false;
+				clearHoldTimer();
+				clearReleaseTimer();
 				setVoiceState("idle");
 			},
 			onError: (err) => {
@@ -1309,28 +1323,32 @@ export default function (pi: ExtensionAPI) {
 				clearRecordingAnimTimer();
 				hideWidget();
 
-				// ── TRANSIENT FAILURE RETRY ──
-				// On WebSocket error during rapid push-to-talk re-press, auto-retry
-				if (retryAttempts < MAX_RETRY_ATTEMPTS) {
-					retryAttempts++;
-					ctx?.ui.notify(`Voice connection error — retrying (${retryAttempts}/${MAX_RETRY_ATTEMPTS})…`, "warning");
-					setTimeout(() => {
-						if (voiceState !== "idle") {
-							setVoiceState("idle");
-						}
-						startStreamingRecording(target).catch(() => {
-							setVoiceState("idle");
-						});
-					}, RETRY_DELAY_MS);
-					return;
-				}
+				// ── STOP THE LOOP ──
+				// On error, fully reset ALL hold state so incoming key-repeat
+				// events don't immediately restart another warmup→record cycle.
+				spaceConsumed = false;
+				spaceDownTime = null;
+				spacePressCount = 0;
+				holdConfirmed = false;
+				clearHoldTimer();
+				clearReleaseTimer();
+				clearWarmupWidget();
+				retryAttempts = 0;  // Don't auto-retry — just report the error
 
-				ctx?.ui.notify(`STT error: ${err}`, "error");
+				ctx?.ui.notify(`Voice error: ${err}`, "error");
+				playSound("error");
 				setVoiceState("idle");
 			},
 		});
 
 		if (!session) {
+			// startStreamingSession returned null — reset ALL state
+			spaceConsumed = false;
+			spaceDownTime = null;
+			spacePressCount = 0;
+			holdConfirmed = false;
+			clearHoldTimer();
+			clearReleaseTimer();
 			setVoiceState("idle");
 			return false;
 		}
