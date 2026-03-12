@@ -990,6 +990,22 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	// ─── Dedicated setup command (discoverable in /command list) ──────────────
+
+	pi.registerCommand("voice-setup", {
+		description: "Configure voice input — select backend, model, and language",
+		handler: async (_args, cmdCtx) => {
+			ctx = cmdCtx;
+			const diagnostics = scanEnvironment(TRANSCRIBE_SCRIPT);
+			const result = await runVoiceOnboarding(cmdCtx, config, diagnostics);
+			if (!result) {
+				cmdCtx.ui.notify("Voice setup cancelled.", "warning");
+				return;
+			}
+			await finalizeAndSaveSetup(cmdCtx, result.config, result.selectedScope, result.summaryLines, "setup-command");
+		},
+	});
+
 	pi.registerCommand("btw:new", {
 		description: "Start a fresh BTW thread",
 		handler: async (args, cmdCtx) => {
