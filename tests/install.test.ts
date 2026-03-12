@@ -53,7 +53,7 @@ describe("buildProvisioningPlan", () => {
 
 		const plan = buildProvisioningPlan(config, diagnostics);
 
-		expect(plan.manualSteps).toContain("Set DEEPGRAM_API_KEY before using Deepgram API mode");
+		expect(plan.manualSteps).toContain("Set DEEPGRAM_API_KEY — get a free key at https://dpgr.am/pi-voice ($200 free credits)");
 	});
 
 	test("returns ready state when dependencies already exist", () => {

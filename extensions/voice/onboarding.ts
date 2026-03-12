@@ -140,7 +140,7 @@ export async function runVoiceOnboarding(
 ): Promise<OnboardingResult | undefined> {
 	const modeChoice = await ctx.ui.select("How do you want to use speech-to-text?", [
 		"Recommended for me",
-		"Cloud API (fastest setup)",
+		"Cloud API (fastest setup — free $200 credits from Deepgram)",
 		"Local download (offline / private)",
 	]);
 	if (!modeChoice) return undefined;
@@ -168,6 +168,77 @@ export async function runVoiceOnboarding(
 		if (!cloudSelection) return undefined;
 		backend = cloudSelection.backend;
 		model = cloudSelection.model;
+
+		// ─── Deepgram API key setup ──────────────────────────────
+		if (backend === "deepgram" && !diagnostics.hasDeepgramKey) {
+			const keyAction = await ctx.ui.select(
+				"Deepgram API key not found. What would you like to do?",
+				[
+					"Paste API key now",
+					"I'll set it up later (ask pi to help or export DEEPGRAM_API_KEY=...)",
+				],
+			);
+			if (!keyAction) return undefined;
+
+			if (keyAction.startsWith("Paste")) {
+				ctx.ui.notify(
+					[
+						"Get your free Deepgram API key:",
+						"  → https://dpgr.am/pi-voice",
+						"  (Sign up → $200 free credits, no card needed)",
+						"",
+						"Paste your key below:",
+					].join("\n"),
+					"info",
+				);
+				const apiKey = await ctx.ui.input("DEEPGRAM_API_KEY");
+				if (apiKey && apiKey.trim().length > 10) {
+					const trimmedKey = apiKey.trim();
+					// Write to ~/.env.secrets if it exists, else ~/.zshrc
+					const fs = await import("node:fs");
+					const os = await import("node:os");
+					const home = os.homedir();
+					const envSecretsPath = `${home}/.env.secrets`;
+					const zshrcPath = `${home}/.zshrc`;
+					const exportLine = `export DEEPGRAM_API_KEY="${trimmedKey}"`;
+
+					const targetFile = fs.existsSync(envSecretsPath) ? envSecretsPath : zshrcPath;
+					const existing = fs.existsSync(targetFile) ? fs.readFileSync(targetFile, "utf-8") : "";
+
+					if (existing.includes("DEEPGRAM_API_KEY")) {
+						// Replace existing line
+						const updated = existing.replace(/^export DEEPGRAM_API_KEY=.*$/m, exportLine);
+						fs.writeFileSync(targetFile, updated);
+					} else {
+						fs.appendFileSync(targetFile, `\n${exportLine}\n`);
+					}
+
+					// Also set for current process so daemon can use it immediately
+					process.env.DEEPGRAM_API_KEY = trimmedKey;
+					diagnostics.hasDeepgramKey = true;
+
+					ctx.ui.notify(
+						`API key saved to ${targetFile}\nActive in this session. New terminals will pick it up automatically.`,
+						"info",
+					);
+				} else if (apiKey !== undefined && apiKey !== null) {
+					ctx.ui.notify(
+						"Key looks too short — skipped. You can set it later:\n  export DEEPGRAM_API_KEY=\"your-key\"",
+						"warning",
+					);
+				}
+			} else {
+				ctx.ui.notify(
+					[
+						"No problem! When you're ready:",
+						"  1. Get a key → https://dpgr.am/pi-voice ($200 free credits)",
+						"  2. Run: export DEEPGRAM_API_KEY=\"your-key\"",
+						"  3. Or ask pi: \"help me set up my Deepgram API key\"",
+					].join("\n"),
+					"info",
+				);
+			}
+		}
 	} else {
 		const localSelection = await chooseBackendAndModel(
 			ctx,

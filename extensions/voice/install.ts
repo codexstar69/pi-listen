@@ -18,7 +18,7 @@ export function buildProvisioningPlan(config: VoiceConfig, diagnostics: Environm
 
 	if (config.mode === "api") {
 		if (config.backend === "deepgram" && !diagnostics.hasDeepgramKey) {
-			manualSteps.push("Set DEEPGRAM_API_KEY before using Deepgram API mode");
+			manualSteps.push("Set DEEPGRAM_API_KEY — get a free key at https://dpgr.am/pi-voice ($200 free credits)");
 		}
 	} else {
 		if (!diagnostics.hasPython) {

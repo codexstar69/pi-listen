@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.11] - 2026-03-12
+
+### Improved
+- **Deepgram API key setup in onboarding** — option to paste key directly in terminal during setup (auto-saved to `~/.env.secrets` or `~/.zshrc`)
+- Shows signup URL with **$200 free credits** callout (`https://dpgr.am/pi-voice`)
+- "I'll set it up later" path with clear next-step instructions
+- Manual steps in summary now include the signup link and free credits info
+
 ## [1.0.10] - 2026-03-12
 
 ### Added
@@ -101,6 +109,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - VAD (Voice Activity Detection) pre-filtering via Silero
 - Auto-idle shutdown for daemon (5-minute timeout)
 
+[1.0.11]: https://github.com/codexstar69/pi-listen/compare/v1.0.10...v1.0.11
 [1.0.10]: https://github.com/codexstar69/pi-listen/compare/v1.0.9...v1.0.10
 [1.0.9]: https://github.com/codexstar69/pi-listen/compare/v1.0.8...v1.0.9
 [1.0.8]: https://github.com/codexstar69/pi-listen/compare/v1.0.7...v1.0.8
