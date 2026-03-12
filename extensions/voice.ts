@@ -1031,17 +1031,14 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function buildPremiumWave(frame: number, width: number, level: number): string {
-		const len = Math.max(6, Math.min(width, 10));
-		const chars = ["·", "▁", "▂", "▃", "▄", "▅", "▆"];
-		const values: string[] = [];
-		for (let i = 0; i < len; i++) {
-			const centerBias = 1 - Math.abs(i - (len - 1) / 2) / len;
-			const motion = (Math.sin(frame * 0.42 + i * 0.95) + 1) / 2;
-			const amp = Math.max(0.06, Math.min(1, level * (0.45 + centerBias * 0.55) + motion * 0.18));
-			const idx = Math.max(0, Math.min(chars.length - 1, Math.round(amp * (chars.length - 1))));
-			values.push(chars[idx]);
-		}
-		return values.join("");
+		const patternsQuiet = ["▁▂▃▂▁", "▁▁▂▃▂", "▂▃▂▁▁", "▁▂▁▂▃"];
+		const patternsMid = ["▂▄▅▄▂", "▃▅▄▂▃", "▄▅▄▃▂", "▂▃▅▄▃"];
+		const patternsLoud = ["▄▆▇▆▄", "▅▇▆▄▅", "▆▇▆▅▄", "▄▅▇▆▅"];
+		const source = level > 0.38 ? patternsLoud : level > 0.14 ? patternsMid : patternsQuiet;
+		const base = source[frame % source.length];
+		const len = Math.max(5, Math.min(width, 8));
+		if (len <= base.length) return base.slice(0, len);
+		return (base + "▁".repeat(len)).slice(0, len);
 	}
 
 	function showWarmupWidget() {
@@ -1050,10 +1047,10 @@ export default function (pi: ExtensionAPI) {
 		const startTime = Date.now();
 		const useCat = config.catAnimation !== false;
 		const catFrames = [
-			"/ᐠ - ˕ -マ",
-			"/ᐠ . ˕ .マ",
-			"/ᐠ o ˕ oマ",
-			"/ᐠ◕ ˕ ◕マ",
+			"╭( - - )╮",
+			"╭( · · )╮",
+			"╭( • • )╮",
+			"╭( ● ● )╮",
 		];
 
 		const renderWarmup = () => {
@@ -1068,7 +1065,7 @@ export default function (pi: ExtensionAPI) {
 					render(width: number): string[] {
 						const maxW = Math.max(0, Math.min(width - 4, 62));
 						const border = theme.fg("border", "─".repeat(maxW));
-						const meterLen = Math.max(6, Math.min(12, maxW - 34));
+						const meterLen = Math.max(5, Math.min(8, maxW - 38));
 						const filled = Math.round(progress * meterLen);
 						const meter = theme.fg("accent", "▬".repeat(filled)) + theme.fg("muted", "─".repeat(meterLen - filled));
 						const hint = theme.fg("dim", remainingSecs > 1 ? `${remainingSecs}s` : "ready");
@@ -1080,7 +1077,7 @@ export default function (pi: ExtensionAPI) {
 						}
 
 						const cat = catFrames[Math.min(catFrames.length - 1, Math.floor(progress * catFrames.length))];
-						const content = ` ${theme.fg("muted", "○")} ${theme.fg("accent", cat)} ${theme.fg("accent", meter)} ${hint}`;
+						const content = ` ${theme.fg("muted", "○")} ${theme.fg("accent", cat)} ${theme.fg("muted", "~")} ${theme.fg("accent", meter)} ${hint}`;
 						const stripped = stripAnsi(content).length;
 						return [border, content + " ".repeat(Math.max(0, maxW - stripped)), border];
 					},
@@ -1126,7 +1123,7 @@ export default function (pi: ExtensionAPI) {
 					const border = theme.fg("border", "─".repeat(maxW));
 					const dotPulse = Math.sin(Date.now() / 420) > -0.15;
 					const dot = dotPulse ? theme.fg("error", "●") : theme.fg("muted", "○");
-					const wave = buildPremiumWave(frame, Math.max(8, Math.min(10, maxW - 36)), audioLevelSmoothed);
+					const wave = buildPremiumWave(frame, Math.max(5, Math.min(7, maxW - 42)), audioLevelSmoothed);
 					const hint = target === "btw"
 						? theme.fg("dim", "Ctrl+Shift+B stop")
 						: theme.fg("dim", "Release SPACE");
@@ -1138,19 +1135,19 @@ export default function (pi: ExtensionAPI) {
 						return [border, content + " ".repeat(Math.max(0, maxW - stripped)), border];
 					}
 
-					const blinkPhase = Math.floor(Date.now() / 160) % 30;
+					const blinkPhase = Math.floor(Date.now() / 180) % 28;
 					const blink = blinkPhase === 0 || blinkPhase === 1;
 					const loud = audioLevelSmoothed > 0.42;
 					const mid = audioLevelSmoothed > 0.14;
 					const cat = blink
-						? "/ᐠ - ˕ -マ"
+						? "╭( - - )╮"
 						: loud
-							? "/ᐠ◕ ˕ ◕マ"
+							? "╭( ● ● )╮"
 							: mid
-								? "/ᐠo ˕ oマ"
-								: "/ᐠ . ˕ .マ";
-					const tail = loud ? ["~", "˷", "~", "˷"][frame % 4] : ["~", " ", "~", " "][frame % 4];
-					const content = ` ${dot} ${theme.fg("accent", cat)}${theme.fg("muted", tail)}  ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`;
+								? "╭( • • )╮"
+								: "╭( · · )╮";
+					const tail = loud ? ["~", "⁓", "~", "⁓"][frame % 4] : ["~", " ", "~", " "][frame % 4];
+					const content = ` ${dot} ${theme.fg("accent", cat)} ${theme.fg("muted", tail)}  ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`;
 					const stripped = stripAnsi(content).length;
 					return [border, content + " ".repeat(Math.max(0, maxW - stripped)), border];
 				},
