@@ -1723,9 +1723,14 @@ export default function (pi: ExtensionAPI) {
 											holdConfirmed = false;
 											setVoiceState("idle");
 										}
-									}).catch(() => {
+									}).catch((err) => {
+										voiceDebug('startVoiceRecording THREW', { error: String(err) });
 										spaceConsumed = false;
-										setVoiceState("idle");
+										spaceDownTime = null;
+										spacePressCount = 0;
+										holdConfirmed = false;
+										errorCooldownUntil = Date.now() + 5000;
+										setVoiceState('idle');
 									});
 								} else {
 									spaceDownTime = null;
@@ -1823,9 +1828,14 @@ export default function (pi: ExtensionAPI) {
 										holdConfirmed = false;
 										setVoiceState("idle");
 									}
-								}).catch(() => {
+								}).catch((err) => {
+									voiceDebug('startVoiceRecording THREW', { error: String(err) });
 									spaceConsumed = false;
-									setVoiceState("idle");
+									spaceDownTime = null;
+									spacePressCount = 0;
+									holdConfirmed = false;
+									errorCooldownUntil = Date.now() + 5000;
+									setVoiceState('idle');
 								});
 							} else {
 								spaceDownTime = null;
@@ -1886,9 +1896,14 @@ export default function (pi: ExtensionAPI) {
 										// The next SPACE key-repeat event will do it.
 										// Re-arming here causes false stops because
 										// the timer fires during the async gap.
-									}).catch(() => {
+									}).catch((err) => {
+										voiceDebug('startVoiceRecording THREW', { error: String(err) });
 										spaceConsumed = false;
-										setVoiceState("idle");
+										spaceDownTime = null;
+										spacePressCount = 0;
+										holdConfirmed = false;
+										errorCooldownUntil = Date.now() + 5000;
+										setVoiceState('idle');
 									});
 								} else {
 									spaceDownTime = null;
