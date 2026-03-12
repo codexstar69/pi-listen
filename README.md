@@ -1,5 +1,9 @@
 # pi-listen
 
+<p align="center">
+  <img src="assets/banner.png" alt="pi-listen — Voice input for the Pi coding agent" width="100%" />
+</p>
+
 **Voice input and side-channel conversations for [Pi](https://github.com/mariozechner/pi-coding-agent).**
 
 [![npm version](https://img.shields.io/npm/v/@codexstar/pi-listen.svg)](https://www.npmjs.com/package/@codexstar/pi-listen)
