@@ -416,6 +416,21 @@ def detect_backend() -> str:
     return "none"
 
 
+def resolve_backend_and_model(requested_backend: str | None, requested_model: str | None) -> tuple[str, str | None]:
+    backend = detect_backend() if requested_backend in (None, "auto") else requested_backend
+    if backend == "none" or backend not in BACKENDS:
+        return backend, requested_model
+
+    info = BACKENDS[backend]
+    if requested_model in (None, ""):
+        return backend, info["default_model"]
+
+    if requested_backend in (None, "auto") and requested_model not in info["models"]:
+        return backend, info["default_model"]
+
+    return backend, requested_model
+
+
 def main():
     parser = argparse.ArgumentParser(description="Local & cloud STT transcriber for pi-voice")
     parser.add_argument("audio_file", nargs="?", help="Path to audio file (WAV)")
@@ -460,7 +475,7 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    backend = args.backend or detect_backend()
+    backend, model = resolve_backend_and_model(args.backend, args.model)
     if backend == "none":
         print(json.dumps({
             "error": "No STT backend found",
@@ -469,7 +484,6 @@ def main():
         sys.exit(1)
 
     info = BACKENDS[backend]
-    model = args.model or info["default_model"]
 
     try:
         result = info["fn"](args.audio_file, model, args.language)

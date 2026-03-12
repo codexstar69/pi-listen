@@ -1,6 +1,7 @@
 node_modules/
 .DS_Store
 .ralph/
+.bug-hunter/
 *.pyc
 __pycache__/
 .npm/

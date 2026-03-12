@@ -27,7 +27,7 @@ import traceback
 
 # Add our own directory to path so we can import transcribe module
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from transcribe import BACKENDS, detect_backend
+from transcribe import BACKENDS, resolve_backend_and_model
 
 
 # ─── Config ──────────────────────────────────────────────────────────────────
@@ -245,8 +245,9 @@ class DaemonServer:
             }
 
         elif cmd == "load":
-            backend = req.get("backend") or detect_backend()
-            model = req.get("model") or BACKENDS.get(backend, {}).get("default_model", "small")
+            backend, model = resolve_backend_and_model(req.get("backend"), req.get("model"))
+            if backend == "none" or backend not in BACKENDS:
+                return {"status": "error", "error": "No STT backend found"}
             return self.cache.load(backend, model)
 
         elif cmd == "transcribe":
@@ -258,8 +259,9 @@ class DaemonServer:
 
             # Auto-load if not loaded yet
             if not self.cache.backend_name:
-                backend = req.get("backend") or detect_backend()
-                model = req.get("model") or BACKENDS.get(backend, {}).get("default_model", "small")
+                backend, model = resolve_backend_and_model(req.get("backend"), req.get("model"))
+                if backend == "none" or backend not in BACKENDS:
+                    return {"status": "error", "error": "No STT backend found"}
                 load_result = self.cache.load(backend, model)
                 if load_result.get("status") == "error":
                     return load_result
