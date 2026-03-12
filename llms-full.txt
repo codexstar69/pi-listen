@@ -1,0 +1,194 @@
+# pi-listen — Full Context for LLMs
+
+> Complete documentation for AI assistants working with the pi-listen codebase.
+
+## Package Identity
+
+- **Name:** pi-listen
+- **npm:** https://www.npmjs.com/package/pi-listen
+- **GitHub:** https://github.com/codexstar69/pi-listen
+- **License:** MIT
+- **Type:** Pi coding agent extension (pi-package)
+- **Languages:** TypeScript (extension), Python (daemon/transcription)
+
+---
+
+## What pi-listen Does
+
+pi-listen adds voice input capabilities to the Pi coding agent CLI:
+
+1. **Hold-to-talk:** User holds SPACE with an empty editor → audio is recorded via SoX → transcribed via a local or cloud STT backend → text injected into the editor.
+2. **Persistent daemon:** A Python daemon (`daemon.py`) keeps STT models warm in memory, communicating with the TypeScript extension via Unix domain sockets using newline-delimited JSON.
+3. **BTW side conversations:** Users can ask quick side questions via `/btw <message>` or by holding Ctrl+Shift+B to voice-record a side question. These are answered by the current LLM model in a separate thread without interrupting the main agent task.
+4. **Multi-backend support:** 5 STT backends — faster-whisper (local, recommended), moonshine (local, lightweight), whisper-cpp (local, CLI), Deepgram (cloud API), Parakeet (NVIDIA NeMo).
+5. **Guided onboarding:** First-run wizard detects the user's environment, recommends the best backend/model, and validates the setup.
+
+---
+
+## Architecture
+
+```
+Pi CLI (Node.js)
+  └── extensions/voice.ts (main extension)
+        ├── extensions/voice/config.ts (settings management)
+        ├── extensions/voice/diagnostics.ts (environment scanning)
+        ├── extensions/voice/onboarding.ts (setup wizard)
+        └── extensions/voice/install.ts (provisioning plans)
+        │
+        │ Unix Domain Socket (newline-delimited JSON)
+        ▼
+  daemon.py (persistent Python process)
+        └── transcribe.py (multi-backend STT engine)
+```
+
+### Communication Protocol
+
+The daemon listens on a Unix domain socket. Messages are newline-delimited JSON:
+
+**Commands:**
+```json
+{"cmd": "ping"}
+{"cmd": "status"}
+{"cmd": "load", "backend": "faster-whisper", "model": "small"}
+{"cmd": "transcribe", "audio": "/path/to/file.wav", "language": "en", "vad": true}
+{"cmd": "shutdown"}
+{"cmd": "backends"}
+```
+
+**Responses:** Single-line JSON followed by newline.
+
+### Socket Path
+
+Generated from SHA-1 hash of `{scope, cwd, backend, model}` truncated to 12 hex chars:
+```
+/tmp/pi-voice-<hash>.sock
+```
+
+---
+
+## File Reference
+
+### TypeScript (Extension)
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `extensions/voice.ts` | ~1140 | Main extension: recording (SoX), daemon IPC, hold-to-talk, BTW conversations, UI widgets, command handlers, lifecycle management |
+| `extensions/voice/config.ts` | ~206 | VoiceConfig type, loading from global/project settings, migration from older schema versions, socket path generation |
+| `extensions/voice/diagnostics.ts` | ~212 | scanEnvironment() — detects Python, SoX, Homebrew, Deepgram key, available backends. recommendVoiceSetup() — suggests best backend/model based on preferences |
+| `extensions/voice/onboarding.ts` | ~315 | runVoiceOnboarding() interactive wizard, model option labeling, backend selection, scope selection, provisioning summary |
+| `extensions/voice/install.ts` | ~62 | buildProvisioningPlan() — generates install commands and manual steps needed for a given config |
+
+### Python (Daemon & Transcription)
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `daemon.py` | ~516 | Unix socket server, ModelCache (thread-safe model loading), DaemonServer (accept/handle clients, idle timeout, auto-shutdown), VAD via Silero, CLI interface (start/stop/status/ping/transcribe/load) |
+| `transcribe.py` | ~497 | BACKENDS registry with 5 backends, each with: availability check, model list, installed model detection, transcribe function. resolve_backend_and_model() for auto-detection. CLI interface for standalone use. |
+
+### Tests
+
+| File | Tests | Covers |
+|------|-------|--------|
+| `tests/config.test.ts` | 8 | Config loading, migration, socket paths, onboarding state |
+| `tests/diagnostics.test.ts` | 6 | Recommendations for different preference profiles |
+| `tests/onboarding.test.ts` | 7 | Onboarding flow, model option labeling |
+| `tests/install.test.ts` | 4 | Provisioning plan generation |
+| `tests/auto-resolution.test.ts` | 4 | Backend/model auto-detection |
+| `tests/model-selection.test.ts` | 3 | Model-aware recommendations |
+| `tests/setup-scripts.test.ts` | 3 | Bootstrap script validation |
+| `tests/transcribe-metadata.test.ts` | 2 | Backend registry metadata |
+
+---
+
+## Configuration Schema
+
+```typescript
+interface VoiceConfig {
+  version: 2;                    // Schema version
+  enabled: boolean;              // Voice input on/off
+  language: string;              // Language code (e.g., "en", "auto")
+  mode: "auto" | "local" | "api"; // Backend category
+  backend: VoiceBackend;         // Specific backend or "auto"
+  model: string;                 // Model name (e.g., "small", "nova-3")
+  scope: "global" | "project";  // Where settings are saved
+  btwEnabled: boolean;           // BTW side conversations on/off
+  onboarding: {
+    completed: boolean;
+    schemaVersion: number;
+    completedAt?: string;        // ISO 8601
+    lastValidatedAt?: string;
+    source?: "first-run" | "setup-command" | "migration" | "repair";
+    skippedAt?: string;          // Suppresses prompt for 24h
+  };
+}
+```
+
+Type: `VoiceBackend = "faster-whisper" | "moonshine" | "whisper-cpp" | "deepgram" | "parakeet" | "auto"`
+
+---
+
+## Commands Reference
+
+| Command | Description |
+|---------|-------------|
+| `/voice` | Toggle voice on/off |
+| `/voice on` | Enable voice |
+| `/voice off` | Disable voice |
+| `/voice setup` | Run onboarding wizard |
+| `/voice reconfigure` | Re-run setup |
+| `/voice test` | Test microphone + STT pipeline |
+| `/voice info` | Show config + daemon status |
+| `/voice doctor` | Diagnose issues with repair suggestions |
+| `/voice backends` | List all available backends with install status |
+| `/voice daemon` | Start daemon |
+| `/voice daemon stop` | Stop daemon |
+| `/voice daemon status` | Show daemon status |
+| `/btw <msg>` | Side conversation |
+| `/btw:new [msg]` | Fresh thread |
+| `/btw:clear` | Dismiss widget |
+| `/btw:inject` | Push thread to main agent |
+| `/btw:summarize` | Summarize then inject |
+
+---
+
+## Keybindings
+
+| Key | Context | Action |
+|-----|---------|--------|
+| `SPACE` (hold) | Empty editor, Kitty terminal | Record → transcribe → inject into editor |
+| `Ctrl+Shift+V` | Any terminal | Toggle recording on/off |
+| `Ctrl+Shift+B` (hold) | Kitty terminal | Record → auto-send as BTW question |
+
+---
+
+## STT Backends
+
+| Backend | Type | Default Model | Install |
+|---------|------|---------------|---------|
+| faster-whisper | local | small | `pip install faster-whisper` |
+| moonshine | local | moonshine/base | `pip install useful-moonshine[onnx]` |
+| whisper-cpp | local | small | `brew install whisper-cpp` |
+| deepgram | cloud | nova-3 | `DEEPGRAM_API_KEY` env var |
+| parakeet | local | nvidia/parakeet-tdt-0.6b-v2 | `pip install nemo_toolkit[asr]` |
+
+Auto-detection priority: faster-whisper → moonshine → whisper-cpp → deepgram → parakeet.
+
+---
+
+## Known Issues (as of v1.0.3)
+
+1. **ensureDaemon race (BUG-3, Low):** Concurrent callers can both spawn daemons. The daemon's own socket guard prevents two from binding, but the loser waits 10s. Needs in-memory promise lock.
+2. **Silent model override (BUG-13, Low):** When backend='auto' and model doesn't match the detected backend's model list, the model is silently replaced with the default. Needs a user-facing warning.
+
+---
+
+## Development
+
+```bash
+bun install              # Install dependencies
+bun run test             # 37 tests
+bun run typecheck        # TypeScript check
+bun run check            # Full verification
+```
+
+Tests use Bun's built-in test runner. Python files are compiled-checked via `python3 -m py_compile`.

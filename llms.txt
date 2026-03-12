@@ -1,0 +1,59 @@
+# pi-listen
+
+> Voice input and side-channel conversations for the Pi coding agent CLI.
+
+## Overview
+
+pi-listen is a Pi extension that adds hands-free voice-to-text input and BTW (by-the-way) side conversations to the Pi coding agent. It supports 5 STT backends (faster-whisper, moonshine, whisper-cpp, Deepgram, Parakeet) with a persistent daemon for zero cold-start transcription.
+
+## Core Documentation
+
+- [README](https://github.com/codexstar69/pi-listen/blob/main/README.md): Installation, usage, architecture
+- [Backends](https://github.com/codexstar69/pi-listen/blob/main/docs/backends.md): STT backend comparison and setup
+- [Troubleshooting](https://github.com/codexstar69/pi-listen/blob/main/docs/troubleshooting.md): Common issues and solutions
+- [Contributing](https://github.com/codexstar69/pi-listen/blob/main/CONTRIBUTING.md): Development setup and guidelines
+- [Security](https://github.com/codexstar69/pi-listen/blob/main/SECURITY.md): Security policy and audit results
+- [Changelog](https://github.com/codexstar69/pi-listen/blob/main/CHANGELOG.md): Release history
+- [License](https://github.com/codexstar69/pi-listen/blob/main/LICENSE): MIT
+
+## Key Components
+
+- `extensions/voice.ts`: Main extension — recording, daemon IPC, BTW, UI
+- `extensions/voice/config.ts`: Configuration loading, saving, migration
+- `extensions/voice/diagnostics.ts`: Environment scanning, backend detection
+- `extensions/voice/onboarding.ts`: Interactive first-run setup wizard
+- `extensions/voice/install.ts`: Provisioning plan builder
+- `daemon.py`: Persistent STT daemon with warm model cache
+- `transcribe.py`: Multi-backend transcription engine
+
+## Features
+
+- Hold-to-talk voice input (spacebar or Ctrl+Shift+V)
+- Persistent STT daemon for zero cold-start latency
+- 5 STT backends: faster-whisper, moonshine, whisper-cpp, Deepgram (cloud), Parakeet
+- BTW side conversations for parallel questions
+- Guided first-run onboarding
+- Global and project-scoped configuration
+- macOS and Windows bootstrap scripts
+- VAD (Voice Activity Detection) pre-filtering
+
+## API
+
+### Commands
+- `/voice [on|off|test|info|setup|reconfigure|doctor|backends|daemon]`
+- `/btw <message>` — Side conversation
+- `/btw:new`, `/btw:clear`, `/btw:inject`, `/btw:summarize`
+
+### Keybindings
+- `SPACE` (hold, empty editor) — Record to editor
+- `Ctrl+Shift+V` — Toggle recording
+- `Ctrl+Shift+B` (hold) — Record to BTW
+
+### Configuration
+Settings in `~/.pi/agent/settings.json` or `<project>/.pi/settings.json` under the `voice` key.
+
+## Installation
+
+```
+pi install npm:pi-listen
+```

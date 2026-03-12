@@ -5,3 +5,4 @@ node_modules/
 *.pyc
 __pycache__/
 .npm/
+.npmrc
