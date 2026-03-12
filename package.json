@@ -1,5 +1,5 @@
 {
-  "name": "pi-voice",
+  "name": "pi-listen",
   "version": "1.0.0",
   "description": "Voice input, first-run onboarding, and side-channel BTW conversations for Pi",
   "type": "module",
@@ -12,13 +12,13 @@
     "release:dry": "bun run check && bun publish --dry-run",
     "release": "bun run check && bun publish --access public"
   },
-  "homepage": "https://github.com/codexstar69/pi-voice",
+  "homepage": "https://github.com/codexstar69/pi-listen",
   "repository": {
     "type": "git",
-    "url": "https://github.com/codexstar69/pi-voice.git"
+    "url": "https://github.com/codexstar69/pi-listen.git"
   },
   "bugs": {
-    "url": "https://github.com/codexstar69/pi-voice/issues"
+    "url": "https://github.com/codexstar69/pi-listen/issues"
   },
   "peerDependencies": {
     "@mariozechner/pi-ai": "*",

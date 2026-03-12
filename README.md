@@ -1,8 +1,8 @@
-# pi-voice
+# pi-listen
 
 Voice input and side-channel voice workflows for Pi.
 
-`pi-voice` adds:
+`pi-listen` adds:
 - **hold-to-talk voice input** for the Pi editor
 - a persistent **STT daemon** to keep local models warm
 - multiple STT backend options, including **local** and **cloud/API** paths
@@ -45,15 +45,19 @@ You can record or type short side questions and keep them in a lightweight threa
 Install as a Pi package:
 
 ```bash
-pi install /path/to/pi-voice
+pi install npm:pi-listen
 ```
 
-Or install from your package source once it is published.
+For local development, you can also install from a path:
+
+```bash
+pi install /path/to/pi-listen
+```
 
 ## Setup experience
 
 ### Automatic first-run onboarding
-On the first interactive session after install, `pi-voice` now prompts to start setup.
+On the first interactive session after install, `pi-listen` now prompts to start setup.
 
 The onboarding flow asks:
 - whether you want **API** or **Local** speech-to-text
@@ -107,7 +111,7 @@ Current local backends in the package:
 
 Availability depends on what is installed on the machine.
 
-For local paths, `pi-voice` now distinguishes between:
+For local paths, `pi-listen` now distinguishes between:
 - **backend available** — the package/CLI exists
 - **model already installed** — a specific model appears ready now
 - **download required** — backend exists but the chosen model is not yet present
