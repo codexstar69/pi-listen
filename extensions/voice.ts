@@ -400,17 +400,12 @@ function buildDeepgramWsUrl(config: VoiceConfig): string {
 		encoding: ENCODING,
 		sample_rate: String(SAMPLE_RATE),
 		channels: String(CHANNELS),
-		// Faster endpointing for snappy response (was 300ms)
 		endpointing: "200",
-		utterance_end_ms: "800",
+		utterance_end_ms: "1000",
 		language: config.language || "en",
 		model: config.model || "nova-3",
 		smart_format: "true",
 		interim_results: "true",
-		// no_delay: don't wait for smart_format lookahead — emit immediately
-		no_delay: "true",
-		// VAD events for better silence detection
-		vad_events: "true",
 	});
 	return `${DEEPGRAM_WS_URL}?${params.toString()}`;
 }
@@ -474,6 +469,20 @@ function startStreamingSession(
 		onError: callbacks.onError,
 	};
 
+	// Handle HTTP error responses before WebSocket upgrade (e.g., 400 Bad Request, 401 Unauthorized)
+	(ws as any).on("unexpected-response", (_req: any, res: any) => {
+		let body = "";
+		res.on("data", (d: Buffer) => { body += d.toString(); });
+		res.on("end", () => {
+			voiceDebug("WebSocket unexpected-response", { status: res.statusCode, body });
+			if (!session.closed) {
+				session.onError(`Deepgram HTTP ${res.statusCode}: ${body.slice(0, 200)}`);
+				session.closed = true;
+				try { recProc.kill("SIGTERM"); } catch {}
+			}
+		});
+	});
+
 	ws.onopen = () => {
 		voiceDebug("WebSocket onopen → streaming audio");
 		try { ws.send(JSON.stringify({ type: "KeepAlive" })); } catch {}
@@ -524,9 +533,10 @@ function startStreamingSession(
 	};
 
 	ws.onerror = (ev) => {
-		voiceDebug("WebSocket onerror", { readyState: ws.readyState });
+		const errMsg = (ev as any)?.message || (ev as any)?.error?.message || "unknown";
+		voiceDebug("WebSocket onerror", { readyState: ws.readyState, error: errMsg });
 		if (!session.closed) {
-			session.onError("WebSocket connection error");
+			session.onError(`WebSocket error: ${errMsg}`);
 		}
 	};
 
