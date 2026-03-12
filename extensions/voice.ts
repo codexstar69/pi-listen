@@ -620,6 +620,7 @@ export default function (pi: ExtensionAPI) {
 	let retryAttempts = 0;
 	let lastStopTime = 0;    // For corruption guard
 	let recordingStartedAt = 0; // When recording actually started (for grace period)
+	let editorTextBeforeVoice = ""; // Snapshot of editor text before recording started
 
 	// Hold-to-talk state
 	let kittyReleaseDetected = false;
@@ -920,9 +921,10 @@ export default function (pi: ExtensionAPI) {
 		const finalized = finals.join(" ");
 		const displayText = finalized + (interim ? (finalized ? " " : "") + interim : "");
 
-		// Show live text directly in the editor input
+		// Show live text directly in the editor input (prepend any existing text)
 		if (displayText.trim()) {
-			ctx.ui.setEditorText(displayText);
+			const prefix = editorTextBeforeVoice ? editorTextBeforeVoice + " " : "";
+			ctx.ui.setEditorText(prefix + displayText);
 		}
 
 		// Keep a minimal recording indicator widget
@@ -1005,6 +1007,9 @@ export default function (pi: ExtensionAPI) {
 		recordingStart = Date.now();
 		retryAttempts = 0;
 
+		// Snapshot editor text before voice overwrites it with live transcript
+		editorTextBeforeVoice = ctx?.hasUI ? (ctx.ui.getEditorText() || "") : "";
+
 		if (isDeepgramStreaming(config)) {
 			return startStreamingRecording(target);
 		} else {
@@ -1071,8 +1076,10 @@ export default function (pi: ExtensionAPI) {
 					handleBtw(fullText);
 				} else {
 					if (ctx?.hasUI) {
-						const existing = ctx.ui.getEditorText();
-						ctx.ui.setEditorText(existing ? existing + " " + fullText : fullText);
+						// The editor already has the live transcript via updateLiveTranscriptWidget.
+						// Just set the final text (with original prefix) — don't append again.
+						const prefix = editorTextBeforeVoice ? editorTextBeforeVoice + " " : "";
+						ctx.ui.setEditorText(prefix + fullText);
 						const elapsed = ((Date.now() - recordingStart) / 1000).toFixed(1);
 						ctx.ui.notify(
 							`STT (${elapsed}s): ${fullText.slice(0, 80)}${fullText.length > 80 ? "..." : ""}`,
