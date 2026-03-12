@@ -114,9 +114,9 @@ const SAMPLE_RATE = 16000;        // Target sample rate for Deepgram
 const CHANNELS = 1;
 const ENCODING = "linear16";
 const DEEPGRAM_WS_URL = "wss://api.deepgram.com/v1/listen";
-const KEEPALIVE_INTERVAL_MS = 5000;
-const FINALIZE_SAFETY_TIMEOUT_MS = 3000;
-const FINALIZE_NO_DATA_TIMEOUT_MS = 800;
+const KEEPALIVE_INTERVAL_MS = 8000;
+const FINALIZE_SAFETY_TIMEOUT_MS = 5000;  // Max wait for remaining transcripts after CloseStream
+const FINALIZE_NO_DATA_TIMEOUT_MS = 1500; // If no data for 1.5s after CloseStream, assume done
 const MAX_RECORDING_SECS = 120;
 
 // Hold-to-talk timing
@@ -401,7 +401,7 @@ function buildDeepgramWsUrl(config: VoiceConfig): string {
 		encoding: ENCODING,
 		sample_rate: String(SAMPLE_RATE),
 		channels: String(CHANNELS),
-		endpointing: "200",
+		endpointing: "300",
 		utterance_end_ms: "1000",
 		language: config.language || "en",
 		model: config.model || "nova-3",
@@ -420,12 +420,15 @@ function startStreamingSession(
 	},
 ): StreamingSession | null {
 	const apiKey = resolveDeepgramApiKey(config);
+	voiceDebug("startStreamingSession", { hasApiKey: !!apiKey, backend: config.backend });
 	if (!apiKey) {
+		voiceDebug("startStreamingSession → no API key, calling onError");
 		callbacks.onError("DEEPGRAM_API_KEY not set");
 		return null;
 	}
 
 	if (!commandExists("rec")) {
+		voiceDebug("startStreamingSession → no SoX, calling onError");
 		callbacks.onError("Voice requires SoX. Install: brew install sox");
 		return null;
 	}
@@ -1210,6 +1213,7 @@ export default function (pi: ExtensionAPI) {
 	// ─── Voice: Start / Stop (Streaming or Legacy) ───────────────────────────
 
 	async function startVoiceRecording(target: "editor" | "btw" = "editor"): Promise<boolean> {
+		voiceDebug("startVoiceRecording called", { target, voiceState, isDeepgram: isDeepgramStreaming(config), hasUI: !!ctx?.hasUI });
 		if (!ctx?.hasUI) return false;
 
 		// ── SESSION CORRUPTION GUARD ──
@@ -1245,6 +1249,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function startStreamingRecording(target: "editor" | "btw"): Promise<boolean> {
+		voiceDebug("startStreamingRecording called", { target, configBackend: config.backend, hasKey: !!resolveDeepgramApiKey(config) });
 		setVoiceState("recording");
 
 		const session = startStreamingSession(config, {
