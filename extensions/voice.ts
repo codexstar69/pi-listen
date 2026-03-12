@@ -1024,13 +1024,21 @@ export default function (pi: ExtensionAPI) {
 
 	// ─── Warmup Widget ──────────────────────────────────────────────────────
 	//
-	// During the hold threshold, show a smooth progress bar with pulsing dot.
-	// No emojis. Clean, minimal, professional.
+	// Cute cat wakes up and gets ready to listen.
 
 	function showWarmupWidget() {
 		if (!ctx?.hasUI) return;
 
 		const startTime = Date.now();
+
+		// Cat face animations during warmup (sleepy → alert)
+		const catFrames = [
+			"(=｡ω｡=)ᶻᶻ",   // sleeping
+			"(=｡ω｡=)ᶻ ",    // stirring
+			"(=｡ω｡=)  ",    // waking
+			"(=^ω^=)  ",    // awake, happy
+			"(=ΦωΦ=)  ",    // alert, ears up — ready!
+		];
 
 		const renderWarmup = () => {
 			if (!ctx?.hasUI) return;
@@ -1043,23 +1051,23 @@ export default function (pi: ExtensionAPI) {
 					invalidate() {},
 					render(width: number): string[] {
 						const maxW = Math.max(0, Math.min(width - 4, 56));
-						const barLen = Math.max(8, maxW - 16);
+
+						// Pick cat frame based on progress
+						const catIdx = Math.min(catFrames.length - 1, Math.floor(progress * catFrames.length));
+						const cat = catFrames[catIdx];
+
+						// Progress bar
+						const barLen = Math.max(4, maxW - cat.length - 10);
 						const filled = Math.round(progress * barLen);
 						const empty = barLen - filled;
-
-						// Pulsing dot at the progress edge
-						const pulse = Math.sin(Date.now() / 150) > 0;
-						const dot = pulse ? theme.fg("accent", "●") : theme.fg("muted", "○");
-
 						const filledBar = theme.fg("accent", "━".repeat(filled));
 						const emptyBar = theme.fg("muted", "─".repeat(empty));
-						const bar = filledBar + dot + emptyBar;
 
 						const hint = remainingSecs > 1
-							? theme.fg("dim", ` ${remainingSecs}s...`)
-							: theme.fg("accent", " Go!");
+							? theme.fg("dim", `${remainingSecs}s`)
+							: theme.fg("accent", "Go!");
 
-						const content = ` ${bar}${hint}`;
+						const content = ` ${theme.fg("accent", cat)} ${filledBar}${emptyBar} ${hint}`;
 						const stripped = content.replace(/\x1b\[[^m]*m/g, "").length;
 						const pad = Math.max(0, maxW - stripped);
 
@@ -1079,9 +1087,19 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	// ─── Recording Widget ───────────────────────────────────────────────────
-	// Simple, compact status bar. Live text goes to the editor input.
+	// Cute cat listens to you with reactive ears and tail.
 
 	const waveBlocks = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+
+	// Cat ear animations react to audio level
+	const catEars = [
+		["╭", "╮"],  // relaxed
+		["╱", "╲"],  // perked
+		["┃", "┃"],  // straight up (loud)
+	];
+
+	// Tail animations cycle
+	const catTails = ["~", "∼", "≈", "∼"];
 
 	function showRecordingWidget(target: "editor" | "btw") {
 		if (!ctx?.hasUI) return;
@@ -1111,8 +1129,23 @@ export default function (pi: ExtensionAPI) {
 					const secs = elapsed % 60;
 					const timeStr = mins > 0 ? `${mins}:${String(secs).padStart(2, "0")}` : `${secs}s`;
 
-					// Reactive waveform — 10 chars max
-					const waveLen = Math.max(0, Math.min(10, maxW - 20));
+					// Cat face reacts to audio level
+					const earIdx = audioLevelSmoothed > 0.5 ? 2 : audioLevelSmoothed > 0.15 ? 1 : 0;
+					const [lEar, rEar] = catEars[earIdx];
+					const tailChar = catTails[frame % catTails.length];
+
+					// Eyes blink occasionally (every ~4 seconds for 2 frames)
+					const blinkCycle = Math.floor(Date.now() / 150) % 28;
+					const isBlinking = blinkCycle === 0 || blinkCycle === 1;
+
+					// Mouth reacts to audio
+					const mouth = audioLevelSmoothed > 0.3 ? "ω" : audioLevelSmoothed > 0.1 ? "ᴥ" : "·";
+					const eyes = isBlinking ? "– –" : audioLevelSmoothed > 0.4 ? "◉ ◉" : "● ●";
+
+					const cat = `${lEar}(${eyes})${rEar}${mouth}`;
+
+					// Small reactive waveform
+					const waveLen = Math.max(0, Math.min(6, maxW - 30));
 					let wave = "";
 					for (let i = 0; i < waveLen; i++) {
 						const phase = (frame * 0.3 + i * 0.6);
@@ -1122,19 +1155,13 @@ export default function (pi: ExtensionAPI) {
 						wave += waveBlocks[idx];
 					}
 
-					// Pulsing record dot
+					// Pulsing dot
 					const dotPulse = Math.sin(Date.now() / 400) > -0.3;
 					const dot = dotPulse ? theme.fg("error", "●") : theme.fg("muted", "○");
-					const label = target === "btw"
-						? theme.fg("accent", "BTW")
-						: theme.fg("accent", "REC");
 
-					const hint = target === "btw"
-						? theme.fg("dim", "Ctrl+Shift+B stop")
-						: theme.fg("dim", "Release SPACE");
+					const hint = theme.fg("dim", "Release SPACE");
 
-					// Build main recording line
-					const content = ` ${dot} ${label} ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`;
+					const content = ` ${dot} ${theme.fg("accent", cat)}${theme.fg("muted", tailChar)} ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`;
 					const stripped = content.replace(/\x1b\[[^m]*m/g, "").length;
 					const pad = Math.max(0, maxW - stripped);
 
