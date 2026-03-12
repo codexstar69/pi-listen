@@ -1024,21 +1024,35 @@ export default function (pi: ExtensionAPI) {
 
 	// ─── Warmup Widget ──────────────────────────────────────────────────────
 	//
-	// Cat wakes up and gets ready to listen. Or minimal progress bar.
+	// Premium minimal cat: calm, clean, and subtle.
+
+	function stripAnsi(text: string): string {
+		return text.replace(/\[[^m]*m/g, "");
+	}
+
+	function buildPremiumWave(frame: number, width: number, level: number): string {
+		const len = Math.max(6, Math.min(width, 14));
+		const half = Math.max(3, Math.floor(len / 2));
+		const chars = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+		const values: string[] = [];
+		for (let i = 0; i < half; i++) {
+			const centerWeight = 1 - (Math.abs(i - (half - 1)) / half) * 0.75;
+			const motion = 0.14 + ((Math.sin(frame * 0.38 + i * 0.72) + 1) / 2) * 0.22;
+			const amp = Math.max(0.04, Math.min(1, level * centerWeight + motion));
+			const idx = Math.max(0, Math.min(chars.length - 1, Math.round(amp * (chars.length - 1))));
+			values.push(chars[idx]);
+		}
+		const mirrored = values.concat([...values].reverse().slice(len % 2 === 0 ? 0 : 1));
+		return mirrored.slice(0, len).join("");
+	}
 
 	function showWarmupWidget() {
 		if (!ctx?.hasUI) return;
 
 		const startTime = Date.now();
 		const useCat = config.catAnimation !== false;
-
-		// Cat waking up sequence — paired lines (top=ears, bottom=face)
-		const catWakeUp = [
-			["  ∧,,,∧  ", "( ̳- · - ̳)ᶻᶻ"],  // deep sleep
-			["  ∧,,,∧  ", "( ̳- ω - ̳)ᶻ "],   // stirring
-			["  ∧,,,∧  ", "( ̳◕ ω ◕ ̳)  "],   // eyes open!
-			["  ∧ˊ⩊ˋ∧ ", "( ̳◉ ω ◉ ̳)♪ "],   // fully alert, ready!
-		];
+		const wakeFaces = ["( -.- )", "( .-. )", "( o.o )", "( O.O )"];
+		const ears = "/\\_/\\";
 
 		const renderWarmup = () => {
 			if (!ctx?.hasUI) return;
@@ -1050,50 +1064,23 @@ export default function (pi: ExtensionAPI) {
 				return {
 					invalidate() {},
 					render(width: number): string[] {
-						const maxW = Math.max(0, Math.min(width - 4, 60));
+						const maxW = Math.max(0, Math.min(width - 4, 62));
 						const border = theme.fg("border", "─".repeat(maxW));
+						const meterLen = Math.max(8, Math.min(16, maxW - 28));
+						const filled = Math.round(progress * meterLen);
+						const meter = theme.fg("accent", "●".repeat(filled)) + theme.fg("muted", "·".repeat(meterLen - filled));
+						const hint = remainingSecs > 1 ? `${remainingSecs}s` : "ready";
 
 						if (!useCat) {
-							// Minimal mode: just a progress bar
-							const barLen = Math.max(8, maxW - 16);
-							const filled = Math.round(progress * barLen);
-							const empty = barLen - filled;
-							const pulse = Math.sin(Date.now() / 150) > 0;
-							const dot = pulse ? theme.fg("accent", "●") : theme.fg("muted", "○");
-							const filledBar = theme.fg("accent", "━".repeat(filled));
-							const emptyBar = theme.fg("muted", "─".repeat(empty));
-							const hint = remainingSecs > 1
-								? theme.fg("dim", ` ${remainingSecs}s...`)
-								: theme.fg("accent", " Go!");
-							const content = ` ${filledBar}${dot}${emptyBar}${hint}`;
-							const stripped = content.replace(/\x1b\[[^m]*m/g, "").length;
+							const content = ` ${theme.fg("accent", "MIC")} ${meter} ${theme.fg("dim", hint)}`;
+							const stripped = stripAnsi(content).length;
 							return [border, content + " ".repeat(Math.max(0, maxW - stripped)), border];
 						}
 
-						// Cat mode: two-line cat waking up with progress dots
-						const frameIdx = Math.min(catWakeUp.length - 1, Math.floor(progress * catWakeUp.length));
-						const [topLine, botLine] = catWakeUp[frameIdx];
-
-						// Progress dots
-						const dotCount = Math.max(4, Math.min(12, maxW - 28));
-						const filledDots = Math.round(progress * dotCount);
-						const dots = theme.fg("accent", "◆".repeat(filledDots)) + theme.fg("muted", "◇".repeat(dotCount - filledDots));
-
-						const hint = remainingSecs > 1
-							? theme.fg("dim", ` hold ${remainingSecs}s`)
-							: theme.fg("accent", " ♪ ready!");
-
-						const line1 = ` ${theme.fg("accent", topLine)}`;
-						const line2 = ` ${theme.fg("accent", botLine)} ${dots}${hint}`;
-						const s1 = line1.replace(/\x1b\[[^m]*m/g, "").length;
-						const s2 = line2.replace(/\x1b\[[^m]*m/g, "").length;
-
-						return [
-							border,
-							line1 + " ".repeat(Math.max(0, maxW - s1)),
-							line2 + " ".repeat(Math.max(0, maxW - s2)),
-							border,
-						];
+						const face = wakeFaces[Math.min(wakeFaces.length - 1, Math.floor(progress * wakeFaces.length))];
+						const content = ` ${theme.fg("accent", ears)} ${theme.fg("text", face)}  ${meter} ${theme.fg("dim", hint)}`;
+						const stripped = stripAnsi(content).length;
+						return [border, content + " ".repeat(Math.max(0, maxW - stripped)), border];
 					},
 				};
 			}, { placement: "aboveEditor" });
@@ -1104,9 +1091,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	// ─── Recording Widget ───────────────────────────────────────────────────
-	// Cat listens with reactive expressions. Or minimal bar if catAnimation=false.
-
-	const waveBlocks = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+	// Premium minimal cat mode, with a clean waveform and subtle motion.
 
 	function showRecordingWidget(target: "editor" | "btw") {
 		if (!ctx?.hasUI) return;
@@ -1117,7 +1102,7 @@ export default function (pi: ExtensionAPI) {
 		const animTimer = setInterval(() => {
 			(showRecordingWidget as any)._frame = ((showRecordingWidget as any)._frame || 0) + 1;
 			showRecordingWidgetFrame(target, (showRecordingWidget as any)._frame);
-		}, 150);
+		}, 120);
 
 		(showRecordingWidget as any)._animTimer = animTimer;
 		showRecordingWidgetFrame(target, 0);
@@ -1131,77 +1116,37 @@ export default function (pi: ExtensionAPI) {
 			return {
 				invalidate() {},
 				render(width: number): string[] {
-					const maxW = Math.max(0, Math.min(width - 4, 60));
+					const maxW = Math.max(0, Math.min(width - 4, 62));
 					const elapsed = Math.round((Date.now() - recordingStart) / 1000);
 					const mins = Math.floor(elapsed / 60);
 					const secs = elapsed % 60;
 					const timeStr = mins > 0 ? `${mins}:${String(secs).padStart(2, "0")}` : `${secs}s`;
 					const border = theme.fg("border", "─".repeat(maxW));
-
-					// Pulsing record dot
-					const dotPulse = Math.sin(Date.now() / 400) > -0.3;
+					const dotPulse = Math.sin(Date.now() / 420) > -0.15;
 					const dot = dotPulse ? theme.fg("error", "●") : theme.fg("muted", "○");
-
-					// Waveform
-					const waveLen = Math.max(0, Math.min(8, maxW - 30));
-					let wave = "";
-					for (let i = 0; i < waveLen; i++) {
-						const phase = (frame * 0.3 + i * 0.6);
-						const sinVal = (Math.sin(phase) + 1) / 2;
-						const level = audioLevelSmoothed * 0.7 + sinVal * 0.3;
-						const idx = Math.min(waveBlocks.length - 1, Math.round(level * (waveBlocks.length - 1)));
-						wave += waveBlocks[idx];
-					}
-
+					const wave = buildPremiumWave(frame, Math.max(8, Math.min(14, maxW - 34)), audioLevelSmoothed);
 					const hint = target === "btw"
 						? theme.fg("dim", "Ctrl+Shift+B stop")
 						: theme.fg("dim", "ESC cancel");
 
 					if (!useCat) {
-						// Minimal mode
 						const label = target === "btw" ? theme.fg("accent", "BTW") : theme.fg("accent", "REC");
 						const content = ` ${dot} ${label} ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`;
-						const stripped = content.replace(/\x1b\[[^m]*m/g, "").length;
+						const stripped = stripAnsi(content).length;
 						return [border, content + " ".repeat(Math.max(0, maxW - stripped)), border];
 					}
 
-					// ── Cat mode: reactive two-line cat ──
-					const loud = audioLevelSmoothed > 0.4;
-					const mid = audioLevelSmoothed > 0.12;
-
-					// Ears perk up with volume
-					const ears = loud ? " ∧ˊ⩊ˋ∧ " : mid ? "  ∧,,∧  " : "  ∧,,,∧ ";
-
-					// Eyes: blink every ~5s, widen on loud audio
-					const blinkPhase = Math.floor(Date.now() / 120) % 40;
+					const blinkPhase = Math.floor(Date.now() / 140) % 34;
 					const blink = blinkPhase === 0 || blinkPhase === 1;
-					const eyes = blink ? "– –" : loud ? "◉ ◉" : mid ? "● ●" : "◕ ◕";
+					const loud = audioLevelSmoothed > 0.45;
+					const mid = audioLevelSmoothed > 0.14;
+					const ears = "/\\_/\\";
+					const face = blink ? "( -.- )" : loud ? "( O.O )" : mid ? "( o.o )" : "( ･.･ )";
+					const tail = loud ? ["~", "^", "~", "^"][frame % 4] : ["~", "˷", "~", "˷"][frame % 4];
 
-					// Mouth reacts to speech
-					const mouth = loud ? "▽" : mid ? "ω" : "·";
-
-					// Tail wags faster with more audio
-					const tailFrames = loud ? ["⟋", "|", "⟍", "|"] : ["~", "∽", "~", "∽"];
-					const tail = tailFrames[frame % tailFrames.length];
-
-					// Musical notes float when hearing speech
-					const noteFrames = ["♪", "♫", "♩", " "];
-					const note = mid ? noteFrames[frame % noteFrames.length] : " ";
-
-					const catTop = ears;
-					const catBot = `( ${eyes} )${mouth}${tail}`;
-
-					const line1 = ` ${dot} ${theme.fg("accent", catTop)}  ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${theme.fg("dim", note)}`;
-					const line2 = `   ${theme.fg("accent", catBot)} ${hint}`;
-					const s1 = line1.replace(/\x1b\[[^m]*m/g, "").length;
-					const s2 = line2.replace(/\x1b\[[^m]*m/g, "").length;
-
-					return [
-						border,
-						line1 + " ".repeat(Math.max(0, maxW - s1)),
-						line2 + " ".repeat(Math.max(0, maxW - s2)),
-						border,
-					];
+					const content = ` ${dot} ${theme.fg("accent", ears)} ${theme.fg("text", face)}${theme.fg("muted", tail)}  ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`;
+					const stripped = stripAnsi(content).length;
+					return [border, content + " ".repeat(Math.max(0, maxW - stripped)), border];
 				},
 			};
 		}, { placement: "aboveEditor" });
