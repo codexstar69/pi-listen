@@ -27,7 +27,7 @@ import type {
 	ExtensionCommandContext,
 	MessageRenderOptions,
 } from "@mariozechner/pi-coding-agent";
-import { Theme } from "@mariozechner/pi-coding-agent";
+import type { Theme } from "@mariozechner/pi-coding-agent";
 import { streamSimple } from "@mariozechner/pi-ai";
 import type { AssistantMessageEvent } from "@mariozechner/pi-ai";
 import { isKeyRelease, isKeyRepeat, matchesKey } from "@mariozechner/pi-tui";
