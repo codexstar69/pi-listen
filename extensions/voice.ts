@@ -299,7 +299,7 @@ let legacyRecProcess: ChildProcess | null = null;
 
 function startLegacyRecordingToFile(outPath: string): boolean {
 	if (legacyRecProcess) {
-		legacyRecProcess.kill("SIGTERM");
+		try { legacyRecProcess.kill("SIGTERM"); } catch {}
 		legacyRecProcess = null;
 	}
 	if (!commandExists("rec")) return false;
@@ -316,9 +316,12 @@ function stopLegacyRecording(): Promise<void> {
 	return new Promise((resolve) => {
 		if (!legacyRecProcess) { resolve(); return; }
 		legacyRecProcess.on("close", () => { legacyRecProcess = null; resolve(); });
-		legacyRecProcess.kill("SIGTERM");
+		try { legacyRecProcess.kill("SIGTERM"); } catch {}
 		setTimeout(() => {
-			if (legacyRecProcess) { legacyRecProcess.kill("SIGKILL"); legacyRecProcess = null; }
+			if (legacyRecProcess) {
+				try { legacyRecProcess.kill("SIGKILL"); } catch {}
+				legacyRecProcess = null;
+			}
 			resolve();
 		}, 2000);
 	});
@@ -559,6 +562,10 @@ function stopStreamingSession(session: StreamingSession): void {
 	};
 
 	const noDataCheck = setInterval(() => {
+		if (session.closed) {
+			clearInterval(noDataCheck);
+			return;
+		}
 		if (Date.now() - lastDataTime > FINALIZE_NO_DATA_TIMEOUT_MS) {
 			clearInterval(noDataCheck);
 			if (!session.closed) {
@@ -736,7 +743,10 @@ export default function (pi: ExtensionAPI) {
 			abortSession(activeSession);
 			activeSession = null;
 		}
-		if (legacyRecProcess) { legacyRecProcess.kill("SIGTERM"); legacyRecProcess = null; }
+		if (legacyRecProcess) {
+			try { legacyRecProcess.kill("SIGTERM"); } catch {}
+			legacyRecProcess = null;
+		}
 		if (tempFile) { try { fs.unlinkSync(tempFile); } catch {} tempFile = null; }
 		spaceConsumed = false;
 		spaceDownTime = null;
@@ -744,6 +754,7 @@ export default function (pi: ExtensionAPI) {
 		lastSpacePressTime = 0;
 		holdConfirmed = false;
 		retryAttempts = 0;
+		editorTextBeforeVoice = "";
 		hideWidget();
 		setVoiceState("idle");
 	}
@@ -796,8 +807,8 @@ export default function (pi: ExtensionAPI) {
 				return {
 					invalidate() {},
 					render(width: number): string[] {
-						const maxW = Math.min(width - 4, 56);
-						const barLen = Math.max(8, maxW - 26);
+						const maxW = Math.max(0, Math.min(width - 4, 56));
+						const barLen = Math.max(8, maxW - 16);
 						const filled = Math.round(progress * barLen);
 						const empty = barLen - filled;
 
@@ -813,18 +824,15 @@ export default function (pi: ExtensionAPI) {
 							? theme.fg("dim", ` ${remainingSecs}s...`)
 							: theme.fg("accent", " Go!");
 
-						const topBorder = theme.fg("border", "╭" + "─".repeat(maxW) + "╮");
-						const botBorder = theme.fg("border", "╰" + "─".repeat(maxW) + "╯");
-						const side = (content: string) => {
-							const stripped = content.replace(/\x1b\[[^m]*m/g, "").length;
-							const pad = Math.max(0, maxW - stripped);
-							return theme.fg("border", "│") + content + " ".repeat(pad) + theme.fg("border", "│");
-						};
+						const content = ` ${bar}${hint}`;
+						const stripped = content.replace(/\x1b\[[^m]*m/g, "").length;
+						const pad = Math.max(0, maxW - stripped);
 
+						const border = theme.fg("border", "─".repeat(maxW));
 						return [
-							topBorder,
-							side(` ${bar}${hint}`),
-							botBorder,
+							border,
+							content + " ".repeat(pad),
+							border,
 						];
 					},
 				};
@@ -863,14 +871,14 @@ export default function (pi: ExtensionAPI) {
 			return {
 				invalidate() {},
 				render(width: number): string[] {
-					const maxW = Math.min(width - 4, 56);
+					const maxW = Math.max(0, Math.min(width - 4, 56));
 					const elapsed = Math.round((Date.now() - recordingStart) / 1000);
 					const mins = Math.floor(elapsed / 60);
 					const secs = elapsed % 60;
 					const timeStr = mins > 0 ? `${mins}:${String(secs).padStart(2, "0")}` : `${secs}s`;
 
 					// Reactive waveform — 10 chars max
-					const waveLen = Math.min(10, maxW - 20);
+					const waveLen = Math.max(0, Math.min(10, maxW - 20));
 					let wave = "";
 					for (let i = 0; i < waveLen; i++) {
 						const phase = (frame * 0.3 + i * 0.6);
@@ -932,7 +940,7 @@ export default function (pi: ExtensionAPI) {
 			return {
 				invalidate() {},
 				render(width: number): string[] {
-					const maxW = Math.min(width - 4, 56);
+					const maxW = Math.max(0, Math.min(width - 4, 56));
 					const elapsed = Math.round((Date.now() - recordingStart) / 1000);
 					const timeStr = `${elapsed}s`;
 
@@ -958,11 +966,12 @@ export default function (pi: ExtensionAPI) {
 		let finalizingAnimTimer: ReturnType<typeof setInterval> | null = null;
 
 		const render = () => {
-			ctx!.ui.setWidget("voice-recording", (tui, theme) => {
+			if (!ctx?.hasUI) return;
+			ctx.ui.setWidget("voice-recording", (tui, theme) => {
 				return {
 					invalidate() {},
 					render(width: number): string[] {
-						const maxW = Math.min(width - 4, 56);
+						const maxW = Math.max(0, Math.min(width - 4, 56));
 						const dots = ".".repeat(1 + (Math.floor(Date.now() / 400) % 3));
 						const content = ` ${theme.fg("accent", ">")} ${theme.fg("dim", `Processing${dots}`)}`;
 						const stripped = content.replace(/\x1b\[[^m]*m/g, "").length;
@@ -983,7 +992,7 @@ export default function (pi: ExtensionAPI) {
 	// ─── Voice: Start / Stop (Streaming or Legacy) ───────────────────────────
 
 	async function startVoiceRecording(target: "editor" | "btw" = "editor"): Promise<boolean> {
-		if (!ctx) return false;
+		if (!ctx?.hasUI) return false;
 
 		// ── SESSION CORRUPTION GUARD ──
 		// If we're still finalizing from a previous recording, abort it first.
@@ -1054,7 +1063,7 @@ export default function (pi: ExtensionAPI) {
 						return {
 							invalidate() {},
 							render(width: number): string[] {
-								const maxW = Math.min(width - 4, 56);
+								const maxW = Math.max(0, Math.min(width - 4, 56));
 								const check = theme.fg("accent", "✓");
 								// Truncate preview to fit within maxW
 								const avail = maxW - 4; // "  ✓ "
@@ -1103,7 +1112,9 @@ export default function (pi: ExtensionAPI) {
 						if (voiceState !== "idle") {
 							setVoiceState("idle");
 						}
-						startStreamingRecording(target);
+						startStreamingRecording(target).catch(() => {
+							setVoiceState("idle");
+						});
 					}, RETRY_DELAY_MS);
 					return;
 				}
@@ -1222,8 +1233,9 @@ export default function (pi: ExtensionAPI) {
 			await handleBtw(transcript);
 		} else {
 			if (ctx.hasUI) {
-				const existing = ctx.ui.getEditorText();
-				ctx.ui.setEditorText(existing ? existing + " " + transcript : transcript);
+				// Legacy path: use prefix pattern (same as streaming)
+				const prefix = editorTextBeforeVoice ? editorTextBeforeVoice + " " : "";
+				ctx.ui.setEditorText(prefix + transcript);
 				ctx.ui.notify(
 					`STT (${elapsed}s): ${transcript.slice(0, 80)}${transcript.length > 80 ? "…" : ""}`,
 					"info",
@@ -1460,6 +1472,9 @@ export default function (pi: ExtensionAPI) {
 											holdConfirmed = false;
 											setVoiceState("idle");
 										}
+									}).catch(() => {
+										spaceConsumed = false;
+										setVoiceState("idle");
 									});
 								} else {
 									spaceDownTime = null;
@@ -1557,6 +1572,9 @@ export default function (pi: ExtensionAPI) {
 										holdConfirmed = false;
 										setVoiceState("idle");
 									}
+								}).catch(() => {
+									spaceConsumed = false;
+									setVoiceState("idle");
 								});
 							} else {
 								spaceDownTime = null;
@@ -1617,6 +1635,9 @@ export default function (pi: ExtensionAPI) {
 										// The next SPACE key-repeat event will do it.
 										// Re-arming here causes false stops because
 										// the timer fires during the async gap.
+									}).catch(() => {
+										spaceConsumed = false;
+										setVoiceState("idle");
 									});
 								} else {
 									spaceDownTime = null;
@@ -1714,7 +1735,7 @@ export default function (pi: ExtensionAPI) {
 				}
 
 				if (voiceState === "idle") {
-					startVoiceRecording("btw");
+					startVoiceRecording("btw").catch(() => setVoiceState("idle"));
 					return { consume: true };
 				}
 
@@ -1764,21 +1785,24 @@ export default function (pi: ExtensionAPI) {
 			"",
 		];
 
-		lines.push(`  Q: ${last.question.slice(0, 100)}${last.question.length > 100 ? "…" : ""}`);
+		lines.push(`  Q: ${last.question.slice(0, 70)}${last.question.length > 70 ? "…" : ""}`);
 		const answerLines = last.answer.split("\n");
 		for (const line of answerLines.slice(0, 8)) {
-			lines.push(`  ${line}`);
+			lines.push(`  ${line.slice(0, 74)}`);
 		}
 		if (answerLines.length > 8) lines.push("  …");
 
 		lines.push("");
-		lines.push("  /btw:clear to dismiss | /btw:inject to send to agent");
+		lines.push("  /btw:clear | /btw:inject");
 
 		ctx.ui.setWidget("btw", lines, { placement: "aboveEditor" });
 	}
 
+	// BUG FIX: ctx!.ui could crash if ctx is null after session_switch.
+	// Also BTW answer lines can exceed terminal width.
+
 	async function handleBtw(message: string) {
-		if (!ctx) return;
+		if (!ctx?.hasUI) return;
 
 		btwWidgetVisible = true;
 
@@ -1822,16 +1846,18 @@ export default function (pi: ExtensionAPI) {
 					break;
 				}
 
-				const displayLines: string[] = [
-					` BTW`,
-					"",
-					`  Q: ${message.slice(0, 80)}`,
-					"",
-				];
-				for (const line of answer.split("\n").slice(0, 10)) {
-					displayLines.push(`  ${line}`);
+				if (ctx?.hasUI) {
+					const displayLines: string[] = [
+						` BTW`,
+						"",
+						`  Q: ${message.slice(0, 80)}`,
+						"",
+					];
+					for (const line of answer.split("\n").slice(0, 10)) {
+						displayLines.push(`  ${line.slice(0, 76)}`);
+					}
+					ctx.ui.setWidget("btw", displayLines, { placement: "aboveEditor" });
 				}
-				ctx!.ui.setWidget("btw", displayLines, { placement: "aboveEditor" });
 			}
 
 			const exchange: BtwExchange = {
@@ -1938,6 +1964,8 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_switch", async (_event, switchCtx) => {
+		// Clean up any active recording before switching
+		voiceCleanup();
 		ctx = switchCtx;
 		currentCwd = switchCtx.cwd;
 		const loaded = loadConfigWithSource(switchCtx.cwd);
@@ -1959,12 +1987,18 @@ export default function (pi: ExtensionAPI) {
 		return {
 			invalidate() {},
 			render(width: number): string[] {
-				const maxW = Math.max(width - 4, 20);
-				const q = ex.question.length > maxW ? ex.question.slice(0, maxW) + "…" : ex.question;
-				const a = ex.answer.length > 200 ? ex.answer.slice(0, 200) + "…" : ex.answer;
+				const maxW = Math.max(10, Math.min(width - 8, 56));
+				const q = ex.question.length > maxW ? ex.question.slice(0, maxW - 1) + "…" : ex.question;
+				const aMax = Math.min(maxW, 200);
+				const a = ex.answer.length > aMax ? ex.answer.slice(0, aMax - 1) + "…" : ex.answer;
+				// Wrap long answer lines to prevent terminal overflow
+				const aLines: string[] = [];
+				for (let i = 0; i < a.length; i += maxW) {
+					aLines.push(`BTW A: ${a.slice(i, i + maxW)}`);
+				}
 				return [
 					`BTW Q: ${q}`,
-					`BTW A: ${a}`,
+					...aLines,
 				];
 			},
 		};
@@ -2055,12 +2089,14 @@ export default function (pi: ExtensionAPI) {
 				if (diagnostics.hasSox) {
 					const testFile = path.join(os.tmpdir(), "pi-voice-test.wav");
 					const testProc = spawn("rec", ["-q", "-r", "16000", "-c", "1", "-b", "16", "-d", "1", testFile], { stdio: "pipe" });
+					testProc.on("error", () => {}); // Prevent unhandled error crash
 					await new Promise<void>((resolve) => {
 						testProc.on("close", () => resolve());
-						setTimeout(() => { testProc.kill(); resolve(); }, 2000);
+						setTimeout(() => { try { testProc.kill(); } catch {} resolve(); }, 2000);
 					});
 					if (fs.existsSync(testFile)) {
-						lines.push(`  mic sample: OK (${fs.statSync(testFile).size} bytes)`);
+						const size = fs.statSync(testFile).size;
+						lines.push(`  mic sample: OK (${size} bytes)`);
 						try { fs.unlinkSync(testFile); } catch {}
 					} else {
 						lines.push("  mic sample: missing audio");
