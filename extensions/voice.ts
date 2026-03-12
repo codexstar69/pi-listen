@@ -1024,20 +1024,20 @@ export default function (pi: ExtensionAPI) {
 
 	// ─── Warmup Widget ──────────────────────────────────────────────────────
 	//
-	// Cute cat wakes up and gets ready to listen.
+	// Cat wakes up and gets ready to listen. Or minimal progress bar.
 
 	function showWarmupWidget() {
 		if (!ctx?.hasUI) return;
 
 		const startTime = Date.now();
+		const useCat = config.catAnimation !== false;
 
-		// Cat face animations during warmup (sleepy → alert)
-		const catFrames = [
-			"(=｡ω｡=)ᶻᶻ",   // sleeping
-			"(=｡ω｡=)ᶻ ",    // stirring
-			"(=｡ω｡=)  ",    // waking
-			"(=^ω^=)  ",    // awake, happy
-			"(=ΦωΦ=)  ",    // alert, ears up — ready!
+		// Cat waking up sequence — paired lines (top=ears, bottom=face)
+		const catWakeUp = [
+			["  ∧,,,∧  ", "( ̳- · - ̳)ᶻᶻ"],  // deep sleep
+			["  ∧,,,∧  ", "( ̳- ω - ̳)ᶻ "],   // stirring
+			["  ∧,,,∧  ", "( ̳◕ ω ◕ ̳)  "],   // eyes open!
+			["  ∧ˊ⩊ˋ∧ ", "( ̳◉ ω ◉ ̳)♪ "],   // fully alert, ready!
 		];
 
 		const renderWarmup = () => {
@@ -1050,31 +1050,48 @@ export default function (pi: ExtensionAPI) {
 				return {
 					invalidate() {},
 					render(width: number): string[] {
-						const maxW = Math.max(0, Math.min(width - 4, 56));
+						const maxW = Math.max(0, Math.min(width - 4, 60));
+						const border = theme.fg("border", "─".repeat(maxW));
 
-						// Pick cat frame based on progress
-						const catIdx = Math.min(catFrames.length - 1, Math.floor(progress * catFrames.length));
-						const cat = catFrames[catIdx];
+						if (!useCat) {
+							// Minimal mode: just a progress bar
+							const barLen = Math.max(8, maxW - 16);
+							const filled = Math.round(progress * barLen);
+							const empty = barLen - filled;
+							const pulse = Math.sin(Date.now() / 150) > 0;
+							const dot = pulse ? theme.fg("accent", "●") : theme.fg("muted", "○");
+							const filledBar = theme.fg("accent", "━".repeat(filled));
+							const emptyBar = theme.fg("muted", "─".repeat(empty));
+							const hint = remainingSecs > 1
+								? theme.fg("dim", ` ${remainingSecs}s...`)
+								: theme.fg("accent", " Go!");
+							const content = ` ${filledBar}${dot}${emptyBar}${hint}`;
+							const stripped = content.replace(/\x1b\[[^m]*m/g, "").length;
+							return [border, content + " ".repeat(Math.max(0, maxW - stripped)), border];
+						}
 
-						// Progress bar
-						const barLen = Math.max(4, maxW - cat.length - 10);
-						const filled = Math.round(progress * barLen);
-						const empty = barLen - filled;
-						const filledBar = theme.fg("accent", "━".repeat(filled));
-						const emptyBar = theme.fg("muted", "─".repeat(empty));
+						// Cat mode: two-line cat waking up with progress dots
+						const frameIdx = Math.min(catWakeUp.length - 1, Math.floor(progress * catWakeUp.length));
+						const [topLine, botLine] = catWakeUp[frameIdx];
+
+						// Progress dots
+						const dotCount = Math.max(4, Math.min(12, maxW - 28));
+						const filledDots = Math.round(progress * dotCount);
+						const dots = theme.fg("accent", "◆".repeat(filledDots)) + theme.fg("muted", "◇".repeat(dotCount - filledDots));
 
 						const hint = remainingSecs > 1
-							? theme.fg("dim", `${remainingSecs}s`)
-							: theme.fg("accent", "Go!");
+							? theme.fg("dim", ` hold ${remainingSecs}s`)
+							: theme.fg("accent", " ♪ ready!");
 
-						const content = ` ${theme.fg("accent", cat)} ${filledBar}${emptyBar} ${hint}`;
-						const stripped = content.replace(/\x1b\[[^m]*m/g, "").length;
-						const pad = Math.max(0, maxW - stripped);
+						const line1 = ` ${theme.fg("accent", topLine)}`;
+						const line2 = ` ${theme.fg("accent", botLine)} ${dots}${hint}`;
+						const s1 = line1.replace(/\x1b\[[^m]*m/g, "").length;
+						const s2 = line2.replace(/\x1b\[[^m]*m/g, "").length;
 
-						const border = theme.fg("border", "─".repeat(maxW));
 						return [
 							border,
-							content + " ".repeat(pad),
+							line1 + " ".repeat(Math.max(0, maxW - s1)),
+							line2 + " ".repeat(Math.max(0, maxW - s2)),
 							border,
 						];
 					},
@@ -1087,19 +1104,9 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	// ─── Recording Widget ───────────────────────────────────────────────────
-	// Cute cat listens to you with reactive ears and tail.
+	// Cat listens with reactive expressions. Or minimal bar if catAnimation=false.
 
 	const waveBlocks = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
-
-	// Cat ear animations react to audio level
-	const catEars = [
-		["╭", "╮"],  // relaxed
-		["╱", "╲"],  // perked
-		["┃", "┃"],  // straight up (loud)
-	];
-
-	// Tail animations cycle
-	const catTails = ["~", "∼", "≈", "∼"];
 
 	function showRecordingWidget(target: "editor" | "btw") {
 		if (!ctx?.hasUI) return;
@@ -1118,34 +1125,25 @@ export default function (pi: ExtensionAPI) {
 
 	function showRecordingWidgetFrame(target: "editor" | "btw", frame: number) {
 		if (!ctx?.hasUI) return;
+		const useCat = config.catAnimation !== false;
 
 		ctx.ui.setWidget("voice-recording", (tui, theme) => {
 			return {
 				invalidate() {},
 				render(width: number): string[] {
-					const maxW = Math.max(0, Math.min(width - 4, 56));
+					const maxW = Math.max(0, Math.min(width - 4, 60));
 					const elapsed = Math.round((Date.now() - recordingStart) / 1000);
 					const mins = Math.floor(elapsed / 60);
 					const secs = elapsed % 60;
 					const timeStr = mins > 0 ? `${mins}:${String(secs).padStart(2, "0")}` : `${secs}s`;
+					const border = theme.fg("border", "─".repeat(maxW));
 
-					// Cat face reacts to audio level
-					const earIdx = audioLevelSmoothed > 0.5 ? 2 : audioLevelSmoothed > 0.15 ? 1 : 0;
-					const [lEar, rEar] = catEars[earIdx];
-					const tailChar = catTails[frame % catTails.length];
+					// Pulsing record dot
+					const dotPulse = Math.sin(Date.now() / 400) > -0.3;
+					const dot = dotPulse ? theme.fg("error", "●") : theme.fg("muted", "○");
 
-					// Eyes blink occasionally (every ~4 seconds for 2 frames)
-					const blinkCycle = Math.floor(Date.now() / 150) % 28;
-					const isBlinking = blinkCycle === 0 || blinkCycle === 1;
-
-					// Mouth reacts to audio
-					const mouth = audioLevelSmoothed > 0.3 ? "ω" : audioLevelSmoothed > 0.1 ? "ᴥ" : "·";
-					const eyes = isBlinking ? "– –" : audioLevelSmoothed > 0.4 ? "◉ ◉" : "● ●";
-
-					const cat = `${lEar}(${eyes})${rEar}${mouth}`;
-
-					// Small reactive waveform
-					const waveLen = Math.max(0, Math.min(6, maxW - 30));
+					// Waveform
+					const waveLen = Math.max(0, Math.min(8, maxW - 30));
 					let wave = "";
 					for (let i = 0; i < waveLen; i++) {
 						const phase = (frame * 0.3 + i * 0.6);
@@ -1155,24 +1153,55 @@ export default function (pi: ExtensionAPI) {
 						wave += waveBlocks[idx];
 					}
 
-					// Pulsing dot
-					const dotPulse = Math.sin(Date.now() / 400) > -0.3;
-					const dot = dotPulse ? theme.fg("error", "●") : theme.fg("muted", "○");
+					const hint = target === "btw"
+						? theme.fg("dim", "Ctrl+Shift+B stop")
+						: theme.fg("dim", "ESC cancel");
 
-					const hint = theme.fg("dim", "Release SPACE");
+					if (!useCat) {
+						// Minimal mode
+						const label = target === "btw" ? theme.fg("accent", "BTW") : theme.fg("accent", "REC");
+						const content = ` ${dot} ${label} ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`;
+						const stripped = content.replace(/\x1b\[[^m]*m/g, "").length;
+						return [border, content + " ".repeat(Math.max(0, maxW - stripped)), border];
+					}
 
-					const content = ` ${dot} ${theme.fg("accent", cat)}${theme.fg("muted", tailChar)} ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`;
-					const stripped = content.replace(/\x1b\[[^m]*m/g, "").length;
-					const pad = Math.max(0, maxW - stripped);
+					// ── Cat mode: reactive two-line cat ──
+					const loud = audioLevelSmoothed > 0.4;
+					const mid = audioLevelSmoothed > 0.12;
 
-					const border = theme.fg("border", "─".repeat(maxW));
-					const lines = [
+					// Ears perk up with volume
+					const ears = loud ? " ∧ˊ⩊ˋ∧ " : mid ? "  ∧,,∧  " : "  ∧,,,∧ ";
+
+					// Eyes: blink every ~5s, widen on loud audio
+					const blinkPhase = Math.floor(Date.now() / 120) % 40;
+					const blink = blinkPhase === 0 || blinkPhase === 1;
+					const eyes = blink ? "– –" : loud ? "◉ ◉" : mid ? "● ●" : "◕ ◕";
+
+					// Mouth reacts to speech
+					const mouth = loud ? "▽" : mid ? "ω" : "·";
+
+					// Tail wags faster with more audio
+					const tailFrames = loud ? ["⟋", "|", "⟍", "|"] : ["~", "∽", "~", "∽"];
+					const tail = tailFrames[frame % tailFrames.length];
+
+					// Musical notes float when hearing speech
+					const noteFrames = ["♪", "♫", "♩", " "];
+					const note = mid ? noteFrames[frame % noteFrames.length] : " ";
+
+					const catTop = ears;
+					const catBot = `( ${eyes} )${mouth}${tail}`;
+
+					const line1 = ` ${dot} ${theme.fg("accent", catTop)}  ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${theme.fg("dim", note)}`;
+					const line2 = `   ${theme.fg("accent", catBot)} ${hint}`;
+					const s1 = line1.replace(/\x1b\[[^m]*m/g, "").length;
+					const s2 = line2.replace(/\x1b\[[^m]*m/g, "").length;
+
+					return [
 						border,
-						content + " ".repeat(pad),
+						line1 + " ".repeat(Math.max(0, maxW - s1)),
+						line2 + " ".repeat(Math.max(0, maxW - s2)),
+						border,
 					];
-
-					lines.push(border);
-					return lines;
 				},
 			};
 		}, { placement: "aboveEditor" });
@@ -1541,7 +1570,7 @@ export default function (pi: ExtensionAPI) {
 		voiceDebug("onSpaceReleaseDetected", { voiceState, holdConfirmed, spaceConsumed, spaceDownTime, spacePressCount, timeSinceRecStart: spaceConsumed ? Date.now() - recordingStartedAt : null });
 
 		// If we never confirmed this was a hold (< REPEAT_CONFIRM_COUNT rapid presses),
-		// then it was a TAP → type a space character
+		// then it was a TAP → space already passed through naturally (not consumed)
 		if (!holdConfirmed && voiceState === "idle") {
 			clearHoldTimer();
 			clearWarmupWidget();
@@ -1550,9 +1579,8 @@ export default function (pi: ExtensionAPI) {
 			spaceConsumed = false;
 			spacePressCount = 0;
 			holdConfirmed = false;
-			if (ctx?.hasUI) {
-				ctx.ui.setEditorText((ctx.ui.getEditorText() || "") + " ");
-			}
+			// No need to type a space — the first press was NOT consumed,
+			// so it already reached the focused UI component naturally.
 			return;
 		}
 
@@ -1943,9 +1971,8 @@ export default function (pi: ExtensionAPI) {
 						if (wasInWarmup) setVoiceState("idle");
 						// Only type a space if we weren't already in warmup
 						// (if we were in warmup, user was trying to activate voice, not type)
-						if (!wasInWarmup && ctx?.hasUI) {
-							ctx.ui.setEditorText((ctx.ui.getEditorText() || "") + " ");
-						}
+						// Note: first space already passed through naturally (not consumed)
+						// so we don't need to manually type it here
 						spaceDownTime = null;
 						spacePressCount = 0;
 						holdConfirmed = false;
@@ -1955,9 +1982,9 @@ export default function (pi: ExtensionAPI) {
 				}
 
 				// IDLE — first SPACE press (non-Kitty path)
-				// Do NOT enter warmup. Just record the time.
-				// Release-detect timer fires after RELEASE_DETECT_MS if no
-				// more presses arrive (= tap → type a space).
+				// Do NOT consume — let it pass through to whatever UI is focused
+				// (editor, search box, picker, etc.). Only start consuming after
+				// we confirm it's a hold via REPEAT_CONFIRM_COUNT rapid presses.
 				if (voiceState === "idle") {
 					spaceDownTime = Date.now();
 					spaceConsumed = false;
@@ -1967,14 +1994,15 @@ export default function (pi: ExtensionAPI) {
 
 					resetReleaseDetect();
 
-					return { consume: true };
+					// Don't consume — let the space reach the focused UI component
+					return undefined;
 				}
 
 				if (spaceConsumed) return { consume: true };
 				return undefined;
 			}
 
-			// ── Any other key pressed → cancel potential hold, type a space ──
+			// ── Any other key pressed → cancel potential hold ──
 			if (spaceDownTime && !holdConfirmed && voiceState === "idle") {
 				clearHoldTimer();
 				clearReleaseTimer();
@@ -1982,9 +2010,8 @@ export default function (pi: ExtensionAPI) {
 				spacePressCount = 0;
 				holdConfirmed = false;
 				spaceConsumed = false;
-				if (ctx?.hasUI) {
-					ctx.ui.setEditorText((ctx.ui.getEditorText() || "") + " ");
-				}
+				// No need to insert a space manually — the first space press was
+				// already allowed to pass through to the focused UI component.
 				return undefined;
 			}
 
@@ -2041,12 +2068,47 @@ export default function (pi: ExtensionAPI) {
 				return undefined;
 			}
 
-			// ── Escape key — dismiss BTW widget if showing ──
+			// ── Escape key — clear voice transcript or dismiss BTW widget ──
 			if (matchesKey(data, "escape")) {
+				// During recording: cancel recording and clear transcript
+				if (voiceState === "recording" || voiceState === "warmup" || voiceState === "finalizing") {
+					voiceDebug("Escape pressed → canceling voice");
+					if (activeSession) {
+						abortSession(activeSession);
+						activeSession = null;
+					}
+					clearRecordingAnimTimer();
+					clearWarmupWidget();
+					clearHoldTimer();
+					clearReleaseTimer();
+					hideWidget();
+					if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
+					// Restore editor text to what it was before recording
+					if (ctx?.hasUI) ctx.ui.setEditorText(editorTextBeforeVoice);
+					spaceConsumed = false;
+					spaceDownTime = null;
+					spacePressCount = 0;
+					holdConfirmed = false;
+					playSound("error");
+					setVoiceState("idle");
+					return { consume: true };
+				}
+
+				// In idle: if editor has text from a recent voice transcription, clear it
+				if (voiceState === "idle" && lastStopTime > 0 && (Date.now() - lastStopTime) < 30000) {
+					if (ctx?.hasUI) {
+						const currentText = ctx.ui.getEditorText() || "";
+						if (currentText.trim()) {
+							ctx.ui.setEditorText("");
+							return { consume: true };
+						}
+					}
+				}
+
 				if (btwWidgetVisible && voiceState === "idle") {
 					btwWidgetVisible = false;
 					if (ctx?.hasUI) ctx.ui.setWidget("btw", undefined);
-					return undefined; // Don't consume — let Escape do its normal thing too
+					return undefined;
 				}
 			}
 
@@ -2495,10 +2557,24 @@ export default function (pi: ExtensionAPI) {
 	// ─── /voice command ──────────────────────────────────────────────────────
 
 	pi.registerCommand("voice", {
-		description: "Voice: /voice [on|off|stop|dictate|history|test|info|setup|doctor|backends|daemon]",
+		description: "Voice: /voice [on|off|stop|dictate|history|test|info|setup|doctor|backends|daemon|cat on|cat off]",
 		handler: async (args, cmdCtx) => {
 			ctx = cmdCtx;
 			const sub = (args || "").trim().toLowerCase();
+
+			if (sub === "cat on" || sub === "style cat") {
+				config.catAnimation = true;
+				saveConfig(config, config.scope, currentCwd);
+				cmdCtx.ui.notify("Voice cat animation enabled.", "info");
+				return;
+			}
+
+			if (sub === "cat off" || sub === "style minimal") {
+				config.catAnimation = false;
+				saveConfig(config, config.scope, currentCwd);
+				cmdCtx.ui.notify("Voice minimal widget enabled (cat animation off).", "info");
+				return;
+			}
 
 			if (sub === "on") {
 				config.enabled = true;

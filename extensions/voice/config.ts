@@ -33,6 +33,8 @@ export interface VoiceConfig {
 	onboarding: VoiceOnboardingState;
 	/** Deepgram API key — stored in config so it's available even when env var isn't set */
 	deepgramApiKey?: string;
+	/** Show cute cat animation during recording (default: true). Set false for minimal UI. */
+	catAnimation?: boolean;
 }
 
 export interface LoadedVoiceConfig {
@@ -63,6 +65,7 @@ export const DEFAULT_CONFIG: VoiceConfig = {
 	scope: "global",
 	btwEnabled: true,
 	deepgramApiKey: undefined,
+	catAnimation: true,
 	onboarding: {
 		completed: false,
 		schemaVersion: VOICE_CONFIG_VERSION,
@@ -125,6 +128,7 @@ function migrateConfig(rawVoice: any, source: VoiceConfigSource): VoiceConfig {
 		scope: (rawVoice.scope as VoiceSettingsScope | undefined) ?? (source === "project" ? "project" : "global"),
 		btwEnabled: typeof rawVoice.btwEnabled === "boolean" ? rawVoice.btwEnabled : DEFAULT_CONFIG.btwEnabled,
 		deepgramApiKey: typeof rawVoice.deepgramApiKey === "string" ? rawVoice.deepgramApiKey : undefined,
+		catAnimation: typeof rawVoice.catAnimation === "boolean" ? rawVoice.catAnimation : true,
 		onboarding: normalizeOnboarding(rawVoice.onboarding, fallbackCompleted),
 	};
 }
