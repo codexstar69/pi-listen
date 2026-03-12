@@ -784,7 +784,6 @@ export default function (pi: ExtensionAPI) {
 		if (!ctx?.hasUI) return;
 
 		const startTime = Date.now();
-		let lastRendered = "";
 
 		const renderWarmup = () => {
 			if (!ctx?.hasUI) return;
@@ -796,8 +795,8 @@ export default function (pi: ExtensionAPI) {
 				return {
 					invalidate() {},
 					render(width: number): string[] {
-						const maxW = Math.min(width - 4, 60);
-						const barLen = Math.max(10, maxW - 30);
+						const maxW = Math.min(width - 4, 56);
+						const barLen = Math.max(8, maxW - 26);
 						const filled = Math.round(progress * barLen);
 						const empty = barLen - filled;
 
@@ -810,20 +809,20 @@ export default function (pi: ExtensionAPI) {
 						const bar = filledBar + dot + emptyBar;
 
 						const hint = remainingSecs > 1
-							? theme.fg("dim", `Activating in ${remainingSecs}s...`)
-							: theme.fg("accent", "Activating...");
+							? theme.fg("dim", ` ${remainingSecs}s...`)
+							: theme.fg("accent", " Go!");
 
 						const topBorder = theme.fg("border", "╭" + "─".repeat(maxW) + "╮");
 						const botBorder = theme.fg("border", "╰" + "─".repeat(maxW) + "╯");
 						const side = (content: string) => {
 							const stripped = content.replace(/\x1b\[[^m]*m/g, "").length;
-							const padding = Math.max(0, maxW - stripped);
-							return theme.fg("border", "│") + content + " ".repeat(padding) + theme.fg("border", "│");
+							const pad = Math.max(0, maxW - stripped);
+							return theme.fg("border", "│") + content + " ".repeat(pad) + theme.fg("border", "│");
 						};
 
 						return [
 							topBorder,
-							side(`  ${bar}  ${hint}`),
+							side(` ${bar}${hint}`),
 							botBorder,
 						];
 					},
@@ -836,8 +835,8 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	// ─── Recording Widget ───────────────────────────────────────────────────
+	// Simple, compact status bar. Live text goes to the editor input.
 
-	// Smoother waveform using sine-based amplitude simulation
 	const waveBlocks = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
 
 	function showRecordingWidget(target: "editor" | "btw") {
@@ -846,14 +845,11 @@ export default function (pi: ExtensionAPI) {
 		(showRecordingWidget as any)._frame = 0;
 		(showRecordingWidget as any)._hasTranscript = false;
 
-		// Flash effect — briefly show a brighter border on recording start
-		(showRecordingWidget as any)._flashUntil = Date.now() + 300;
-
 		const animTimer = setInterval(() => {
 			if ((showRecordingWidget as any)?._hasTranscript) return;
 			(showRecordingWidget as any)._frame = ((showRecordingWidget as any)._frame || 0) + 1;
 			showRecordingWidgetFrame(target, (showRecordingWidget as any)._frame);
-		}, 150); // Faster animation for smoother waveform
+		}, 150);
 
 		(showRecordingWidget as any)._animTimer = animTimer;
 		showRecordingWidgetFrame(target, 0);
@@ -861,71 +857,58 @@ export default function (pi: ExtensionAPI) {
 
 	function showRecordingWidgetFrame(target: "editor" | "btw", frame: number) {
 		if (!ctx?.hasUI) return;
-		const isFlashing = Date.now() < ((showRecordingWidget as any)?._flashUntil || 0);
 
 		ctx.ui.setWidget("voice-recording", (tui, theme) => {
 			return {
 				invalidate() {},
 				render(width: number): string[] {
-					const maxW = Math.min(width - 2, 72);
+					const maxW = Math.min(width - 4, 56);
 					const elapsed = Math.round((Date.now() - recordingStart) / 1000);
 					const mins = Math.floor(elapsed / 60);
 					const secs = elapsed % 60;
 					const timeStr = mins > 0 ? `${mins}:${String(secs).padStart(2, "0")}` : `${secs}s`;
 
-					// Reactive waveform based on audio level + sine variation
-					const waveLen = 16;
+					// Reactive waveform — 10 chars max
+					const waveLen = Math.min(10, maxW - 20);
 					let wave = "";
 					for (let i = 0; i < waveLen; i++) {
-						// Combine audio level with sine wave for organic feel
 						const phase = (frame * 0.3 + i * 0.6);
-						const sinVal = (Math.sin(phase) + 1) / 2; // 0-1
+						const sinVal = (Math.sin(phase) + 1) / 2;
 						const level = audioLevelSmoothed * 0.7 + sinVal * 0.3;
 						const idx = Math.min(waveBlocks.length - 1, Math.round(level * (waveBlocks.length - 1)));
 						wave += waveBlocks[idx];
 					}
 
-					const borderColor = isFlashing ? "accent" : "borderAccent";
-					const topBorder = theme.fg(borderColor, "╭" + "─".repeat(maxW) + "╮");
-					const botBorder = theme.fg(borderColor, "╰" + "─".repeat(maxW) + "╯");
-					const pad = (s: string, w: number) => {
-						const visible = s.replace(/\x1b\[[^m]*m/g, "").length;
-						return s + " ".repeat(Math.max(0, w - visible));
-					};
-
 					// Pulsing record dot
 					const dotPulse = Math.sin(Date.now() / 400) > -0.3;
 					const dot = dotPulse ? theme.fg("error", "●") : theme.fg("muted", "○");
-
 					const label = target === "btw"
-						? theme.bold(theme.fg("accent", " BTW "))
-						: theme.bold(theme.fg("accent", " REC "));
-					const waveStyled = theme.fg("accent", wave);
-					const timeStyled = theme.fg("muted", timeStr);
-
-					// Audio level meter in status style
-					const meterLen = 8;
-					const meterFilled = Math.round(audioLevelSmoothed * meterLen);
-					const meter = theme.fg("accent", "█".repeat(meterFilled)) + theme.fg("muted", "░".repeat(meterLen - meterFilled));
-
-					const titleLine = `  ${dot} ${label} ${waveStyled} ${meter} ${timeStyled}`;
+						? theme.fg("accent", "BTW")
+						: theme.fg("accent", "REC");
 
 					const hint = target === "btw"
-						? theme.fg("dim", "  Ctrl+Shift+B to stop")
-						: theme.fg("dim", "  Release SPACE to finalize");
+						? theme.fg("dim", "Ctrl+Shift+B stop")
+						: theme.fg("dim", "Release SPACE");
 
+					// Build line content, truncate to fit
+					const content = ` ${dot} ${label} ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`;
+					const stripped = content.replace(/\x1b\[[^m]*m/g, "").length;
+					const pad = Math.max(0, maxW - stripped);
+
+					const border = theme.fg("border", "─".repeat(maxW));
 					return [
-						topBorder,
-						theme.fg(borderColor, "│") + pad(titleLine, maxW) + theme.fg(borderColor, "│"),
-						theme.fg(borderColor, "│") + pad(hint, maxW) + theme.fg(borderColor, "│"),
-						botBorder,
+						border,
+						content + " ".repeat(pad),
+						border,
 					];
 				},
 			};
 		}, { placement: "aboveEditor" });
 	}
 
-	// ─── Live Transcript Widget ─────────────────────────────────────────────
+	// ─── Live Transcript ────────────────────────────────────────────────────
+	// Instead of showing transcript in a widget, put it directly in the editor
+	// input area so users see it where they type.
 
 	function updateLiveTranscriptWidget(interim: string, finals: string[]) {
 		if (!ctx?.hasUI) return;
@@ -937,85 +920,35 @@ export default function (pi: ExtensionAPI) {
 		const finalized = finals.join(" ");
 		const displayText = finalized + (interim ? (finalized ? " " : "") + interim : "");
 
+		// Show live text directly in the editor input
+		if (displayText.trim()) {
+			ctx.ui.setEditorText(displayText);
+		}
+
+		// Keep a minimal recording indicator widget
 		ctx.ui.setWidget("voice-recording", (tui, theme) => {
 			return {
 				invalidate() {},
 				render(width: number): string[] {
-					const maxW = Math.min(width - 2, 72);
+					const maxW = Math.min(width - 4, 56);
 					const elapsed = Math.round((Date.now() - recordingStart) / 1000);
-					const mins = Math.floor(elapsed / 60);
-					const secs = elapsed % 60;
-					const timeStr = mins > 0 ? `${mins}:${String(secs).padStart(2, "0")}` : `${secs}s`;
+					const timeStr = `${elapsed}s`;
 
-					const topBorder = theme.fg("borderAccent", "╭" + "─".repeat(maxW) + "╮");
-					const botBorder = theme.fg("borderAccent", "╰" + "─".repeat(maxW) + "╯");
-					const sep = theme.fg("borderAccent", "│") + theme.fg("muted", "─".repeat(maxW)) + theme.fg("borderAccent", "│");
-					const side = (content: string) => {
-						const stripped = content.replace(/\x1b\[[^m]*m/g, "");
-						const padding = Math.max(0, maxW - stripped.length);
-						return theme.fg("borderAccent", "│") + content + " ".repeat(padding) + theme.fg("borderAccent", "│");
-					};
-
-					// Pulsing record dot
 					const dotPulse = Math.sin(Date.now() / 400) > -0.3;
 					const dot = dotPulse ? theme.fg("error", "●") : theme.fg("muted", "○");
-					const label = theme.bold(theme.fg("accent", " REC "));
-					const timeStyled = theme.fg("muted", timeStr);
 
-					// Small level meter alongside title
-					const meterLen = 6;
-					const meterFilled = Math.round(audioLevelSmoothed * meterLen);
-					const meter = theme.fg("accent", "█".repeat(meterFilled)) + theme.fg("muted", "░".repeat(meterLen - meterFilled));
+					const content = ` ${dot} ${theme.fg("accent", "REC")} ${theme.fg("muted", timeStr)} ${theme.fg("dim", "Release SPACE to finalize")}`;
+					const stripped = content.replace(/\x1b\[[^m]*m/g, "").length;
+					const pad = Math.max(0, maxW - stripped);
 
-					const titleLine = `  ${dot} ${label} ${meter}  ${timeStyled}`;
-					const hint = theme.fg("dim", "  Release SPACE to finalize");
-					const lines = [topBorder, side(titleLine)];
-
-					if (!displayText.trim()) {
-						lines.push(side(theme.fg("dim", "  Listening...")));
-					} else {
-						lines.push(sep);
-						const innerMax = maxW - 4;
-						const words = displayText.split(" ");
-						const wrappedLines: string[] = [];
-						let currentLine = "";
-
-						for (const word of words) {
-							if ((currentLine + " " + word).trim().length > innerMax && currentLine) {
-								wrappedLines.push(currentLine);
-								currentLine = word;
-							} else {
-								currentLine = currentLine ? currentLine + " " + word : word;
-							}
-						}
-						if (currentLine) wrappedLines.push(currentLine);
-
-						// Show last 3 lines, with blinking cursor on the last
-						const visible = wrappedLines.slice(-3);
-						for (let i = 0; i < visible.length; i++) {
-							let line = visible[i];
-							if (i === visible.length - 1 && interim) {
-								// Typing cursor effect — blinks
-								const cursorVisible = Math.sin(Date.now() / 300) > 0;
-								const cursor = cursorVisible ? theme.fg("accent", "▎") : " ";
-								line = theme.fg("text", line) + cursor;
-							} else {
-								line = theme.fg("text", line);
-							}
-							lines.push(side("  " + line));
-						}
-					}
-
-					lines.push(side(hint));
-					lines.push(botBorder);
-					return lines;
+					const border = theme.fg("border", "─".repeat(maxW));
+					return [border, content + " ".repeat(pad), border];
 				},
 			};
 		}, { placement: "aboveEditor" });
 	}
 
 	// ─── Finalizing Widget ──────────────────────────────────────────────────
-	// Smooth transition: shrinks to single "Processing..." line
 
 	function showFinalizingWidget() {
 		if (!ctx?.hasUI) return;
@@ -1027,18 +960,14 @@ export default function (pi: ExtensionAPI) {
 				return {
 					invalidate() {},
 					render(width: number): string[] {
-						const maxW = Math.min(width - 2, 72);
-						const topBorder = theme.fg("border", "╭" + "─".repeat(maxW) + "╮");
-						const botBorder = theme.fg("border", "╰" + "─".repeat(maxW) + "╯");
-						const side = (content: string) => {
-							const stripped = content.replace(/\x1b\[[^m]*m/g, "").length;
-							const padding = Math.max(0, maxW - stripped);
-							return theme.fg("border", "│") + content + " ".repeat(padding) + theme.fg("border", "│");
-						};
-						// Smooth spinner
+						const maxW = Math.min(width - 4, 56);
 						const dots = ".".repeat(1 + (Math.floor(Date.now() / 400) % 3));
-						const line = `  ${theme.fg("accent", ">")} ${theme.fg("dim", `Processing${dots}`)}`;
-						return [topBorder, side(line), botBorder];
+						const content = ` ${theme.fg("accent", ">")} ${theme.fg("dim", `Processing${dots}`)}`;
+						const stripped = content.replace(/\x1b\[[^m]*m/g, "").length;
+						const pad = Math.max(0, maxW - stripped);
+
+						const border = theme.fg("border", "─".repeat(maxW));
+						return [border, content + " ".repeat(pad), border];
 					},
 				};
 			}, { placement: "aboveEditor" });
@@ -1046,8 +975,6 @@ export default function (pi: ExtensionAPI) {
 
 		render();
 		finalizingAnimTimer = setInterval(render, 400);
-
-		// Store timer for cleanup
 		(showFinalizingWidget as any)._timer = finalizingAnimTimer;
 	}
 
@@ -1116,23 +1043,22 @@ export default function (pi: ExtensionAPI) {
 
 				// Show result inline in widget briefly, then clear
 				if (ctx?.hasUI) {
-					const maxPreview = 80;
+					const maxPreview = 60;
 					const preview = fullText.length > maxPreview ? fullText.slice(0, maxPreview) + "..." : fullText;
 					ctx.ui.setWidget("voice-recording", (tui, theme) => {
 						return {
 							invalidate() {},
 							render(width: number): string[] {
-								const maxW = Math.min(width - 2, 72);
-								const topBorder = theme.fg("border", "╭" + "─".repeat(maxW) + "╮");
-								const botBorder = theme.fg("border", "╰" + "─".repeat(maxW) + "╯");
-								const side = (content: string) => {
-									const stripped = content.replace(/\x1b\[[^m]*m/g, "").length;
-									const padding = Math.max(0, maxW - stripped);
-									return theme.fg("border", "│") + content + " ".repeat(padding) + theme.fg("border", "│");
-								};
+								const maxW = Math.min(width - 4, 56);
 								const check = theme.fg("accent", "✓");
-								const text = theme.fg("text", preview);
-								return [topBorder, side(`  ${check} ${text}`), botBorder];
+								// Truncate preview to fit within maxW
+								const avail = maxW - 4; // "  ✓ "
+								const truncPrev = preview.length > avail ? preview.slice(0, avail - 3) + "..." : preview;
+								const content = ` ${check} ${theme.fg("text", truncPrev)}`;
+								const stripped = content.replace(/\x1b\[[^m]*m/g, "").length;
+								const pad = Math.max(0, maxW - stripped);
+								const border = theme.fg("border", "─".repeat(maxW));
+								return [border, content + " ".repeat(pad), border];
 							},
 						};
 					}, { placement: "aboveEditor" });
