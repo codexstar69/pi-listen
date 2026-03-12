@@ -351,6 +351,8 @@ export default function (pi: ExtensionAPI) {
 
 	// ─── Voice: Start / Stop / Transcribe ────────────────────────────────────
 
+	const MAX_RECORDING_SECS = 30; // Safety cap: auto-stop after 30s
+
 	async function startVoiceRecording(target: "editor" | "btw" = "editor"): Promise<boolean> {
 		if (voiceState !== "idle" || !ctx) return false;
 
@@ -363,14 +365,22 @@ export default function (pi: ExtensionAPI) {
 		recordingStart = Date.now();
 		setVoiceState("recording");
 		statusTimer = setInterval(() => {
-			if (voiceState === "recording") updateVoiceStatus();
+			if (voiceState === "recording") {
+				updateVoiceStatus();
+				// Safety: auto-stop after MAX_RECORDING_SECS
+				const elapsed = (Date.now() - recordingStart) / 1000;
+				if (elapsed >= MAX_RECORDING_SECS) {
+					isHolding = false;
+					stopVoiceRecording(target);
+				}
+			}
 		}, 1000);
 
 		if (ctx.hasUI) {
 			ctx.ui.setWidget("voice-recording", [
 				target === "btw"
-					? " BTW Recording... release to send"
-					: " Recording... release to transcribe",
+					? " 🎙 BTW Recording... Ctrl+Shift+V to stop"
+					: " 🎙 Recording... Ctrl+Shift+V to stop (or release SPACE)",
 			], { placement: "aboveEditor" });
 		}
 		return true;
@@ -679,6 +689,7 @@ export default function (pi: ExtensionAPI) {
 			if (voiceState === "idle") {
 				await startVoiceRecording("editor");
 			} else if (voiceState === "recording") {
+				isHolding = false;
 				await stopVoiceRecording("editor");
 			}
 		},
@@ -744,7 +755,7 @@ export default function (pi: ExtensionAPI) {
 	// ─── /voice command ──────────────────────────────────────────────────────
 
 	pi.registerCommand("voice", {
-		description: "Voice input: /voice [on|off|test|info|setup|reconfigure|doctor|backends|daemon]",
+		description: "Voice input: /voice [on|off|stop|test|info|setup|reconfigure|doctor|backends|daemon]",
 		handler: async (args, cmdCtx) => {
 			ctx = cmdCtx;
 			const sub = (args || "").trim().toLowerCase();
@@ -754,7 +765,7 @@ export default function (pi: ExtensionAPI) {
 				updateVoiceStatus();
 				setupHoldToTalk();
 				ensureDaemon(config).catch(() => {});
-				cmdCtx.ui.notify("Voice enabled. Hold SPACE (empty editor) to record.", "info");
+				cmdCtx.ui.notify("Voice enabled.\n  Hold SPACE (empty editor) → release to transcribe\n  Ctrl+Shift+V → toggle recording on/off\n  Auto-stops after 30s", "info");
 				return;
 			}
 
@@ -764,6 +775,18 @@ export default function (pi: ExtensionAPI) {
 				if (terminalInputUnsub) { terminalInputUnsub(); terminalInputUnsub = null; }
 				ctx.ui.setStatus("voice", undefined);
 				cmdCtx.ui.notify("Voice disabled.", "info");
+				return;
+			}
+
+			if (sub === "stop") {
+				// Emergency stop — cancel any active recording
+				if (voiceState === "recording") {
+					isHolding = false;
+					await stopVoiceRecording("editor");
+					cmdCtx.ui.notify("Recording stopped and transcribed.", "info");
+				} else {
+					cmdCtx.ui.notify("No recording in progress.", "info");
+				}
 				return;
 			}
 
