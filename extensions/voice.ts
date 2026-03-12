@@ -27,12 +27,11 @@ import type {
 	ExtensionCommandContext,
 	MessageRenderOptions,
 } from "@mariozechner/pi-coding-agent";
-import type { CustomMessage } from "@mariozechner/pi-coding-agent/dist/core/messages.js";
+import { Theme } from "@mariozechner/pi-coding-agent";
 import { streamSimple } from "@mariozechner/pi-ai";
 import type { AssistantMessageEvent } from "@mariozechner/pi-ai";
 import { isKeyRelease, isKeyRepeat, matchesKey } from "@mariozechner/pi-tui";
 import type { Component } from "@mariozechner/pi-tui";
-import type { Theme } from "@mariozechner/pi-coding-agent/dist/modes/interactive/theme/theme.js";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as net from "node:net";
@@ -756,7 +755,7 @@ export default function (pi: ExtensionAPI) {
 
 	// ─── BTW Message Renderer ────────────────────────────────────────────────
 
-	pi.registerMessageRenderer("btw", (message: CustomMessage<BtwExchange>, _options: MessageRenderOptions, _theme: Theme): Component | undefined => {
+	pi.registerMessageRenderer<BtwExchange>("btw", (message, _options: MessageRenderOptions, _theme: Theme): Component | undefined => {
 		const ex = message.details;
 		if (!ex) return undefined;
 		return {

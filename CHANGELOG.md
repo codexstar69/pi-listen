@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.7] - 2026-03-12
+
+### Fixed
+- **Critical: Extension crash on load** — Replaced deep internal imports (`dist/core/messages.js`, `dist/modes/interactive/theme/theme.js`) with top-level `@mariozechner/pi-coding-agent` imports that resolve correctly through pi's jiti virtual module system
+- Removed unused `CustomMessage` type import; used generic `registerMessageRenderer<T>` instead
+
 ## [1.0.6] - 2026-03-12
 
 ### Fixed
@@ -78,6 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - VAD (Voice Activity Detection) pre-filtering via Silero
 - Auto-idle shutdown for daemon (5-minute timeout)
 
+[1.0.7]: https://github.com/codexstar69/pi-listen/compare/v1.0.6...v1.0.7
 [1.0.6]: https://github.com/codexstar69/pi-listen/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/codexstar69/pi-listen/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/codexstar69/pi-listen/compare/v1.0.3...v1.0.4
