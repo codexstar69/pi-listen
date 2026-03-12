@@ -120,7 +120,7 @@ const FINALIZE_NO_DATA_TIMEOUT_MS = 1500; // If no data for 1.5s after CloseStre
 const MAX_RECORDING_SECS = 120;
 
 // Hold-to-talk timing
-const HOLD_THRESHOLD_MS = 2000;   // Must hold for 2 seconds before voice activates
+const HOLD_THRESHOLD_MS = 1200;   // Must hold for 1.2s before voice activates
 const RELEASE_DETECT_MS = 500;    // Gap in key-repeat that means "released" (non-Kitty)
                                    // macOS default InitialKeyRepeat is ~375ms, so 500ms
                                    // ensures the first repeat arrives before we decide "tap"
@@ -128,7 +128,7 @@ const REPEAT_CONFIRM_COUNT = 3;   // Need this many rapid repeat presses to conf
 const REPEAT_CONFIRM_MS = 700;    // Max gap between presses to count as rapid repeat
                                   // macOS initial key-repeat delay is ~417-583ms depending on settings
                                    // Must be > macOS InitialKeyRepeat (~375ms)
-const RECORDING_GRACE_MS = 2000;  // After recording starts, ignore release for this long
+const RECORDING_GRACE_MS = 1200;  // After recording starts, ignore release for this long
                                    // The holdActivationTimer + async startVoiceRecording
                                    // creates a gap where no key events arrive, so this must
                                    // be generous to avoid false stops
