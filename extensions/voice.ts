@@ -693,43 +693,12 @@ export default function (pi: ExtensionAPI) {
 		config = loaded.config;
 		configSource = loaded.source;
 		updateSocketPath(config, currentCwd);
-		updateVoiceStatus();
-		setupHoldToTalk();
 
-		if (needsOnboarding(config, configSource) && startCtx.hasUI) {
-			const decision = await promptFirstRunOnboarding(startCtx);
-			if (decision.action === "start") {
-				const diagnostics = scanEnvironment(TRANSCRIBE_SCRIPT);
-				const result = await runVoiceOnboarding(startCtx, config, diagnostics);
-				if (result) {
-					await finalizeAndSaveSetup(startCtx, result.config, result.selectedScope, result.summaryLines, "first-run");
-				} else {
-					config = {
-						...config,
-						onboarding: {
-							...config.onboarding,
-							skippedAt: new Date().toISOString(),
-						},
-					};
-					saveConfig(config, config.scope, currentCwd);
-					startCtx.ui.notify("Voice setup skipped. Run /voice setup anytime.", "warning");
-				}
-			} else {
-				config = {
-					...config,
-					onboarding: {
-						...config.onboarding,
-						skippedAt: new Date().toISOString(),
-					},
-				};
-				saveConfig(config, config.scope, currentCwd);
-				startCtx.ui.notify("Voice setup skipped. Run /voice setup anytime.", "warning");
-			}
-			return;
-		}
-
-		// Start daemon in background only after the user has completed onboarding.
-		if (config.enabled && config.onboarding.completed && !needsOnboarding(config, configSource)) {
+		// No auto-popup on startup. Users run `/voice setup` to configure.
+		// Only activate voice features if setup has been completed previously.
+		if (config.enabled && config.onboarding.completed) {
+			updateVoiceStatus();
+			setupHoldToTalk();
 			ensureDaemon(config).catch(() => {});
 		}
 	});
