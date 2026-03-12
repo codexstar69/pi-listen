@@ -120,7 +120,7 @@ const FINALIZE_NO_DATA_TIMEOUT_MS = 1500; // If no data for 1.5s after CloseStre
 const MAX_RECORDING_SECS = 120;
 
 // Hold-to-talk timing
-const HOLD_THRESHOLD_MS = 1200;   // Must hold for 1.2s before voice activates
+const HOLD_THRESHOLD_MS = 800;    // Must hold for 0.8s before voice activates
 const RELEASE_DETECT_MS = 500;    // Gap in key-repeat that means "released" (non-Kitty)
                                    // macOS default InitialKeyRepeat is ~375ms, so 500ms
                                    // ensures the first repeat arrives before we decide "tap"
@@ -1310,9 +1310,13 @@ export default function (pi: ExtensionAPI) {
 						const processedText = processVoiceShortcuts(fullText);
 
 						// The editor already has the live transcript via updateLiveTranscriptWidget.
-						// Just set the final text (with original prefix) — don't append again.
-						const prefix = editorTextBeforeVoice ? editorTextBeforeVoice + " " : "";
-						ctx.ui.setEditorText(prefix + processedText);
+						// Only set final text if the editor still has content.
+						// If user already hit Enter (editor cleared), don't re-insert.
+						const currentEditorText = ctx.ui.getEditorText?.() ?? "";
+						if (currentEditorText.trim()) {
+							const prefix = editorTextBeforeVoice ? editorTextBeforeVoice + " " : "";
+							ctx.ui.setEditorText(prefix + processedText);
+						}
 						const elapsed = ((Date.now() - recordingStart) / 1000).toFixed(1);
 						// No STT notification — live transcript already visible in editor
 						addToHistory(fullText, parseFloat(elapsed), target);
