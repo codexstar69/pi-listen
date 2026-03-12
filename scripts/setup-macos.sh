@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -eo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-PACKAGE_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+# When piped from curl, BASH_SOURCE is empty — detect and handle gracefully
+if [[ -n "${BASH_SOURCE[0]:-}" && "${BASH_SOURCE[0]}" != "bash" ]]; then
+  SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+  PACKAGE_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+else
+  SCRIPT_DIR=""
+  PACKAGE_ROOT=""
+fi
+
+# Enable nounset after handling BASH_SOURCE
+set -u
 
 MODE="local"
 BACKEND="faster-whisper"
@@ -171,6 +180,12 @@ PY
 }
 
 smoke_test() {
+  if [[ -z "$PACKAGE_ROOT" ]]; then
+    log "Skipping daemon smoke test (running via curl pipe — daemon.py not available locally)"
+    log "Run '/voice test' inside pi to verify the full pipeline"
+    return 0
+  fi
+
   local backend model socket log_file err_file
   backend="$(selected_backend)"
   model="$(selected_model)"
