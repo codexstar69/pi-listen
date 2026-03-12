@@ -2069,22 +2069,71 @@ export default function (pi: ExtensionAPI) {
 
 		const btwContext = buildBtwContext();
 
-		const model = ctx.model;
-		if (!model) {
+		// ── Pick a SEPARATE lightweight model for BTW ──
+		// The main agent's model (ctx.model) is often busy streaming.
+		// Using it directly would interrupt/compete with the active turn.
+		// Instead, find a small fast model from the registry, or fall back
+		// to sendUserMessage with deliverAs: "followUp".
+		const preferredBtwModels = [
+			// Cheap/fast models ideal for side-channel questions
+			"gpt-4.1-mini", "gpt-4o-mini", "gpt-4.1-nano",
+			"claude-haiku", "claude-3-5-haiku", "claude-3-haiku",
+			"gemini-2.0-flash", "gemini-2.5-flash", "gemini-flash",
+			"deepseek-chat", "mistral-small",
+		];
+
+		let btwModel: typeof ctx.model = undefined;
+
+		// Try to find a lightweight model from the registry
+		const registry = ctx.modelRegistry;
+		if (registry) {
+			const available = registry.getAvailable();
+			// First: try exact match on preferred names
+			for (const pref of preferredBtwModels) {
+				const match = available.find(m =>
+					m.id.toLowerCase().includes(pref) || m.name.toLowerCase().includes(pref)
+				);
+				if (match) {
+					btwModel = match;
+					break;
+				}
+			}
+			// Second: if no preferred found, pick cheapest available model that isn't the main one
+			if (!btwModel && available.length > 1 && ctx.model) {
+				const candidates = available
+					.filter(m => m.id !== ctx.model?.id)
+					.sort((a, b) => (a.cost?.output ?? 999) - (b.cost?.output ?? 999));
+				if (candidates.length > 0) {
+					btwModel = candidates[0];
+				}
+			}
+		}
+
+		// If no separate model found, fall back to sendUserMessage (non-blocking)
+		if (!btwModel) {
+			voiceDebug("BTW: no separate model available, falling back to sendUserMessage");
 			const exchange: BtwExchange = {
 				question: message,
-				answer: "(No model available — is the session active?)",
+				answer: "(Routed to main agent — no separate BTW model available)",
 				timestamp: Date.now(),
 			};
 			btwThread.push(exchange);
 			pi.appendEntry("btw", exchange);
 			updateBtwWidget();
+
+			// Use followUp so it waits for the main agent to finish
+			pi.sendUserMessage(
+				`[BTW side question — answer briefly]: ${message}`,
+				{ deliverAs: "followUp" },
+			);
 			return;
 		}
 
+		voiceDebug("BTW: using separate model", { model: btwModel.name, id: btwModel.id });
+
 		try {
 			let answer = "";
-			const eventStream = streamSimple(model, {
+			const eventStream = streamSimple(btwModel, {
 				systemPrompt: btwContext,
 				messages: [{ role: "user" as const, content: message, timestamp: Date.now() }],
 			});
@@ -2101,7 +2150,7 @@ export default function (pi: ExtensionAPI) {
 
 				if (ctx?.hasUI) {
 					const displayLines: string[] = [
-						` BTW`,
+						` BTW (${btwModel.name})`,
 						"",
 						`  Q: ${message.slice(0, 80)}`,
 						"",
@@ -2116,7 +2165,7 @@ export default function (pi: ExtensionAPI) {
 			const exchange: BtwExchange = {
 				question: message,
 				answer: answer.trim() || "(empty response)",
-				model: model.name,
+				model: btwModel.name,
 				timestamp: Date.now(),
 			};
 
@@ -2124,17 +2173,19 @@ export default function (pi: ExtensionAPI) {
 			pi.appendEntry("btw", exchange);
 			updateBtwWidget();
 		} catch (err: any) {
+			voiceDebug("BTW: streaming failed, falling back", { error: err.message });
 			const exchange: BtwExchange = {
 				question: message,
-				answer: `(BTW streaming failed: ${err.message}. Falling back to sendUserMessage.)`,
+				answer: `(BTW failed: ${err.message}. Sent to main agent.)`,
 				timestamp: Date.now(),
 			};
 			btwThread.push(exchange);
 			pi.appendEntry("btw", exchange);
 			updateBtwWidget();
 
+			// Fall back to main agent via followUp (non-interrupting)
 			pi.sendUserMessage(
-				`[BTW question]: ${message}`,
+				`[BTW question — answer briefly]: ${message}`,
 				{ deliverAs: "followUp" },
 			);
 		}
