@@ -664,6 +664,7 @@ export default function (pi: ExtensionAPI) {
 	let spacePressCount = 0;          // Count of rapid space presses (for non-Kitty hold detection)
 	let lastSpacePressTime = 0;       // Timestamp of last space press event
 	let holdConfirmed = false;        // True once we've confirmed user is holding (not tapping)
+	let errorCooldownUntil = 0;       // After an error, block re-activation until this timestamp
 
 	// ─── BTW State ───────────────────────────────────────────────────────────
 
@@ -971,6 +972,7 @@ export default function (pi: ExtensionAPI) {
 		lastSpacePressTime = 0;
 		holdConfirmed = false;
 		retryAttempts = 0;
+		errorCooldownUntil = 0;
 		editorTextBeforeVoice = "";
 		dictationMode = false;
 		dictationText = "";
@@ -1267,6 +1269,7 @@ export default function (pi: ExtensionAPI) {
 					holdConfirmed = false;
 					clearHoldTimer();
 					clearReleaseTimer();
+					errorCooldownUntil = Date.now() + 3000; // Block re-activation for 3s
 					if (!meta.hadAudio) {
 						ctx?.ui.notify("Microphone captured no audio. Check mic permissions.", "error");
 					} else if (!meta.hadSpeech) {
@@ -1324,8 +1327,8 @@ export default function (pi: ExtensionAPI) {
 				hideWidget();
 
 				// ── STOP THE LOOP ──
-				// On error, fully reset ALL hold state so incoming key-repeat
-				// events don't immediately restart another warmup→record cycle.
+				// On error, fully reset ALL hold state AND set a cooldown
+				// so incoming key-repeat events can't re-trigger activation.
 				spaceConsumed = false;
 				spaceDownTime = null;
 				spacePressCount = 0;
@@ -1333,7 +1336,8 @@ export default function (pi: ExtensionAPI) {
 				clearHoldTimer();
 				clearReleaseTimer();
 				clearWarmupWidget();
-				retryAttempts = 0;  // Don't auto-retry — just report the error
+				retryAttempts = 0;
+				errorCooldownUntil = Date.now() + 5000; // Block re-activation for 5 seconds
 
 				ctx?.ui.notify(`Voice error: ${err}`, "error");
 				playSound("error");
@@ -1582,6 +1586,12 @@ export default function (pi: ExtensionAPI) {
 
 			// ── SPACE handling ──
 			if (matchesKey(data, "space")) {
+				// ── ERROR COOLDOWN: block all voice activation for 5s after an error ──
+				if (errorCooldownUntil > Date.now()) {
+					// During cooldown, let space through as a normal character
+					return undefined;
+				}
+
 				voiceDebug("SPACE event", {
 					isRelease: isKeyRelease(data),
 					isRepeat: isKeyRepeat(data),
