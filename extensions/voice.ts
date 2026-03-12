@@ -477,18 +477,21 @@ function startStreamingSession(
 	};
 
 	// Handle HTTP error responses before WebSocket upgrade (e.g., 400 Bad Request, 401 Unauthorized)
-	(ws as any).on("unexpected-response", (_req: any, res: any) => {
-		let body = "";
-		res.on("data", (d: Buffer) => { body += d.toString(); });
-		res.on("end", () => {
-			voiceDebug("WebSocket unexpected-response", { status: res.statusCode, body });
-			if (!session.closed) {
-				session.onError(`Deepgram HTTP ${res.statusCode}: ${body.slice(0, 200)}`);
-				session.closed = true;
-				try { recProc.kill("SIGTERM"); } catch {}
-			}
+	// Only available with Node.js `ws` package — skip if using browser-style WebSocket
+	if (typeof (ws as any).on === "function") {
+		(ws as any).on("unexpected-response", (_req: any, res: any) => {
+			let body = "";
+			res.on("data", (d: Buffer) => { body += d.toString(); });
+			res.on("end", () => {
+				voiceDebug("WebSocket unexpected-response", { status: res.statusCode, body });
+				if (!session.closed) {
+					session.onError(`Deepgram HTTP ${res.statusCode}: ${body.slice(0, 200)}`);
+					session.closed = true;
+					try { recProc.kill("SIGTERM"); } catch {}
+				}
+			});
 		});
-	});
+	}
 
 	ws.onopen = () => {
 		voiceDebug("WebSocket onopen → streaming audio");
