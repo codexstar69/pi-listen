@@ -54,6 +54,52 @@ For local development, you can also install from a path:
 pi install /path/to/pi-listen
 ```
 
+## Bootstrap scripts
+
+If you want a one-command setup helper for a laptop, this repo now ships separate platform scripts:
+- `scripts/setup-macos.sh`
+- `scripts/setup-windows.ps1`
+
+### macOS
+
+```bash
+bash scripts/setup-macos.sh --mode local --backend faster-whisper
+```
+
+API mode example:
+
+```bash
+bash scripts/setup-macos.sh --mode api --deepgram-key YOUR_KEY --persist-deepgram-key
+```
+
+### Windows (PowerShell)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup-windows.ps1 -Mode local -Backend faster-whisper
+```
+
+API mode example:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup-windows.ps1 -Mode api -DeepgramKey YOUR_KEY -PersistDeepgramKey
+```
+
+What the scripts handle:
+- install/check `python3` or Python 3.12
+- install/check SoX / `rec`
+- install a supported local backend or wire up `DEEPGRAM_API_KEY`
+- run `pi install npm:pi-listen` when the `pi` command is available
+- run backend + daemon smoke tests from `transcribe.py` and `daemon.py`
+- write ready-to-use Pi voice config into `settings.json`
+
+What still stays manual:
+- granting microphone permission in the OS
+
+You should not need to run `/voice setup` on the happy path.
+If you want project-local config instead of global config, pass the script scope flag:
+- macOS: `--scope project --project-dir /path/to/repo`
+- Windows: `-Scope project -ProjectDir C:\path\to\repo`
+
 ## Setup experience
 
 ### Automatic first-run onboarding

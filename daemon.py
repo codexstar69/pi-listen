@@ -199,6 +199,16 @@ class DaemonServer:
                     break
                 buf += chunk
 
+                # Guard against unbounded buffer growth from clients
+                # that never send a newline delimiter
+                if len(buf) > MAX_MSG_SIZE:
+                    response = {"error": "Message exceeds maximum size"}
+                    try:
+                        conn.sendall((json.dumps(response) + "\n").encode())
+                    except (ConnectionResetError, BrokenPipeError):
+                        pass
+                    break
+
                 while b"\n" in buf:
                     line, buf = buf.split(b"\n", 1)
                     if not line.strip():

@@ -1,9 +1,15 @@
 {
   "name": "pi-listen",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Voice input, first-run onboarding, and side-channel BTW conversations for Pi",
   "type": "module",
-  "keywords": ["pi-package", "pi", "pi-extension", "voice", "stt"],
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "voice",
+    "stt"
+  ],
   "license": "MIT",
   "scripts": {
     "typecheck": "bunx tsc -p tsconfig.json",
@@ -26,11 +32,14 @@
     "@mariozechner/pi-tui": "*"
   },
   "pi": {
-    "extensions": ["./extensions/voice.ts"]
+    "extensions": [
+      "./extensions/voice.ts"
+    ]
   },
   "files": [
     "extensions",
     "docs",
+    "scripts",
     "README.md",
     "transcribe.py",
     "daemon.py",

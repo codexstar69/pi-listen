@@ -394,8 +394,10 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		// Start daemon in background if not running
-		ensureDaemon(config).catch(() => {});
+		// Ensure daemon is up before transcribing — await so the warm path
+		// is available for this request instead of falling through to the
+		// cold subprocess fallback.
+		await ensureDaemon(config).catch(() => {});
 
 		const result = await transcribeAudio(tempFile, config);
 		try { fs.unlinkSync(tempFile); } catch {}
