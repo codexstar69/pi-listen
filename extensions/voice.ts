@@ -1,24 +1,63 @@
 /**
- * pi-voice — Voice input + BTW side conversations for Pi CLI.
+ * pi-voice — Enterprise-grade voice STT for Pi CLI.
  *
- * Features:
- *   1. Hold-spacebar to talk (Kitty protocol key release detection)
- *      Fallback: Ctrl+Shift+V toggle for non-Kitty terminals
- *   2. BTW side conversations (/btw <msg>, /btw:new, /btw:clear, /btw:inject, /btw:summarize)
- *   3. Voice → BTW glue: Ctrl+Shift+B = hold to record → auto-send as /btw
+ * Architecture (modeled after Claude Code's voice pipeline):
  *
- * Records audio via SoX, transcribes via persistent daemon (daemon.py) or fallback subprocess.
- * STT backends: faster-whisper, moonshine, whisper.cpp, deepgram, parakeet.
+ *   STATE MACHINE
+ *   ─────────────
+ *   idle → warmup → recording → finalizing → idle
+ *              ↑         │
+ *              └─────────┘  (rapid re-press recovery)
  *
- * Config in ~/.pi/agent/settings.json or <project>/.pi/settings.json:
- * {
- *   "voice": {
- *     "enabled": true,
- *     "language": "en",
- *     "backend": "faster-whisper",
- *     "model": "small"
- *   }
- * }
+ *   warmup:     User holds SPACE for ≥ HOLD_THRESHOLD_MS (2000ms).
+ *               A "keep holding…" hint with countdown is shown. If released before
+ *               the threshold, a normal space character is typed (or "hold longer" hint shown).
+ *
+ *   recording:  SoX captures PCM → Deepgram WebSocket streaming.
+ *               Live interim + final transcripts update the widget.
+ *               Release SPACE (or press again in toggle mode) → stop.
+ *
+ *   finalizing: CloseStream sent to Deepgram. Waiting for final
+ *               transcript. Safety timeout auto-completes.
+ *
+ *   HOLD-TO-TALK DETECTION
+ *   ──────────────────────
+ *   Two paths depending on terminal capabilities:
+ *
+ *   A) Kitty protocol (Ghostty on Linux, Kitty, WezTerm):
+ *      True key-down/repeat/release events available.
+ *      First SPACE press → enter warmup immediately (show countdown).
+ *      Released < 300ms → tap → type a space.
+ *      Released 300ms–2s → show "hold longer" hint.
+ *      Held ≥ 2s → activate recording.
+ *      True release event stops recording.
+ *
+ *   B) Non-Kitty (macOS Terminal, Ghostty on macOS):
+ *      No key-release event. Holding sends rapid press events (~30-90ms apart).
+ *      First SPACE press → record time, start release-detect timer (500ms).
+ *      No more presses within 500ms → TAP → type a space.
+ *      Rapid presses detected → user is HOLDING.
+ *      After REPEAT_CONFIRM_COUNT (3) rapid presses → enter warmup.
+ *      After HOLD_THRESHOLD_MS (2000ms) from first press → activate recording.
+ *      Gap > RELEASE_DETECT_MS (500ms) after RECORDING_GRACE_MS (1000ms) → stop.
+ *
+ *   ENTERPRISE FALLBACKS
+ *   ────────────────────
+ *   • Session corruption guard: new recording request during
+ *     finalizing automatically cancels the stale session first.
+ *   • Transient failure retry: on WebSocket error during rapid
+ *     push-to-talk re-press, auto-retry once after 300ms.
+ *   • Stale transcript cleanup: any prior transcript is cleared
+ *     before new recording begins.
+ *   • Silence vs. no-speech: distinguishes "mic captured silence"
+ *     from "no speech detected" with distinct user messages.
+ *
+ * Activation:
+ *   - Hold SPACE (≥500ms) → release to finalize
+ *   - Ctrl+Shift+V → toggle start/stop (always works)
+ *   - Ctrl+Shift+B → hold to record → auto-send as /btw
+ *
+ * Config in ~/.pi/agent/settings.json under "voice": { ... }
  */
 
 import type {
@@ -52,7 +91,14 @@ import { buildProvisioningPlan } from "./voice/install";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-type VoiceState = "idle" | "recording" | "transcribing";
+/**
+ * Voice state machine — strict transitions only:
+ *   idle → warmup → recording → finalizing → idle
+ *   warmup → idle  (released before threshold)
+ *   recording → idle  (on error)
+ *   finalizing → idle  (on completion or timeout)
+ */
+type VoiceState = "idle" | "warmup" | "recording" | "finalizing";
 
 interface BtwExchange {
 	question: string;
@@ -64,17 +110,82 @@ interface BtwExchange {
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const SAMPLE_RATE = 16000;
+const SAMPLE_RATE = 16000;        // Target sample rate for Deepgram
+const CHANNELS = 1;
+const ENCODING = "linear16";
+const DEEPGRAM_WS_URL = "wss://api.deepgram.com/v1/listen";
+const KEEPALIVE_INTERVAL_MS = 8000;
+const FINALIZE_SAFETY_TIMEOUT_MS = 5000;
+const FINALIZE_NO_DATA_TIMEOUT_MS = 1500;
+const MAX_RECORDING_SECS = 120;
+
+// Hold-to-talk timing
+const HOLD_THRESHOLD_MS = 2000;   // Must hold for 2 seconds before voice activates
+const RELEASE_DETECT_MS = 500;    // Gap in key-repeat that means "released" (non-Kitty)
+                                   // macOS default InitialKeyRepeat is ~375ms, so 500ms
+                                   // ensures the first repeat arrives before we decide "tap"
+const REPEAT_CONFIRM_COUNT = 3;   // Need this many rapid repeat presses to confirm "holding"
+const REPEAT_CONFIRM_MS = 450;    // Max gap between presses to count as rapid repeat
+                                   // Must be > macOS InitialKeyRepeat (~375ms)
+const RECORDING_GRACE_MS = 2000;  // After recording starts, ignore release for this long
+                                   // The holdActivationTimer + async startVoiceRecording
+                                   // creates a gap where no key events arrive, so this must
+                                   // be generous to avoid false stops
+const RELEASE_DETECT_RECORDING_MS = 3000; // During active recording, gap before we consider
+                                           // the key released. Must be very generous because:
+                                           // 1. macOS key repeat is ~90ms but event loop may
+                                           //    be busy with Deepgram WebSocket I/O
+                                           // 2. False stops are far worse than slow stop
+                                           // 3. User expects recording to continue while holding
+const RETRY_DELAY_MS = 300;       // Auto-retry on transient failure during rapid re-press
+const MAX_RETRY_ATTEMPTS = 1;     // Max retries per activation attempt
+const CORRUPTION_GUARD_MS = 200;  // Min gap between stop and restart
+
+// Debug logging — set PI_VOICE_DEBUG=1 to enable
+const VOICE_DEBUG = !!process.env.PI_VOICE_DEBUG;
+const VOICE_LOG_FILE = path.join(os.tmpdir(), "pi-voice-debug.log");
+
+// ─── Audio level tracking (module scope so streaming can access) ──────
+let audioLevel = 0;
+let audioLevelSmoothed = 0;
+
+function updateAudioLevel(chunk: Buffer) {
+	// Compute RMS of 16-bit PCM samples
+	let sum = 0;
+	const samples = Math.floor(chunk.length / 2);
+	if (samples === 0) return;
+	for (let i = 0; i < chunk.length - 1; i += 2) {
+		const sample = chunk.readInt16LE(i);
+		sum += sample * sample;
+	}
+	const rms = Math.sqrt(sum / samples);
+	// Normalize to 0-1 range (16-bit max is 32768)
+	audioLevel = Math.min(1, rms / 8000);
+	// Smooth with exponential decay
+	audioLevelSmoothed = audioLevelSmoothed * 0.6 + audioLevel * 0.4;
+}
+
+function voiceDebug(...args: unknown[]) {
+	// Always write to log file for post-mortem debugging
+	const ts = new Date().toISOString().split("T")[1];
+	const line = `[voice ${ts}] ${args.map(a => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" ")}\n`;
+	try { fs.appendFileSync(VOICE_LOG_FILE, line); } catch {}
+	if (VOICE_DEBUG) {
+		process.stderr.write(line);
+	}
+}
+
 const EXT_DIR = path.dirname(new URL(import.meta.url).pathname);
 const PROJECT_ROOT = path.join(EXT_DIR, "..");
 const DAEMON_SCRIPT = path.join(PROJECT_ROOT, "daemon.py");
 const TRANSCRIBE_SCRIPT = path.join(PROJECT_ROOT, "transcribe.py");
 
 function commandExists(cmd: string): boolean {
-	return spawnSync("which", [cmd], { stdio: "pipe", timeout: 3000 }).status === 0;
+	const which = process.platform === "win32" ? "where" : "which";
+	return spawnSync(which, [cmd], { stdio: "pipe", timeout: 3000 }).status === 0;
 }
 
-// ─── Daemon Communication ────────────────────────────────────────────────────
+// ─── Daemon Communication (kept for non-deepgram local backends) ─────────────
 
 let activeSocketPath = getSocketPath({
 	scope: DEFAULT_CONFIG.scope,
@@ -135,8 +246,6 @@ async function isDaemonRunning(socketPath = activeSocketPath): Promise<boolean> 
 async function ensureDaemon(config: VoiceConfig): Promise<boolean> {
 	if (await isDaemonRunning(activeSocketPath)) {
 		const status = await daemonSend({ cmd: "status" }, 3000, activeSocketPath);
-		// When backend is 'auto', accept any loaded backend — the daemon already
-		// resolved 'auto' to a concrete backend, so we don't need to reload.
 		if (config.backend === "auto" || (status.backend === config.backend && status.model === config.model)) return true;
 		const reloaded = await daemonSend({
 			cmd: "load",
@@ -175,7 +284,6 @@ async function ensureDaemon(config: VoiceConfig): Promise<boolean> {
 
 		proc.on("error", () => resolve(false));
 
-		// Timeout: if daemon doesn't start in 10s, kill orphan and fall back
 		setTimeout(() => {
 			if (!started) {
 				try { proc.kill(); } catch {}
@@ -185,46 +293,41 @@ async function ensureDaemon(config: VoiceConfig): Promise<boolean> {
 	});
 }
 
-// ─── Audio Recording ─────────────────────────────────────────────────────────
+// ─── Legacy file-based transcription (for non-deepgram backends) ─────────────
 
-let recProcess: ChildProcess | null = null;
+let legacyRecProcess: ChildProcess | null = null;
 
-function startRecordingToFile(outPath: string): boolean {
-	if (recProcess) {
-		recProcess.kill("SIGTERM");
-		recProcess = null;
+function startLegacyRecordingToFile(outPath: string): boolean {
+	if (legacyRecProcess) {
+		legacyRecProcess.kill("SIGTERM");
+		legacyRecProcess = null;
 	}
-
 	if (!commandExists("rec")) return false;
-
-	recProcess = spawn("rec", [
-		"-q", "-r", String(SAMPLE_RATE), "-c", "1", "-b", "16", outPath,
+	legacyRecProcess = spawn("rec", [
+		"-q", "-c", "1", "-b", "16", "-r", String(SAMPLE_RATE), outPath,
+		"rate", String(SAMPLE_RATE),
 	], { stdio: ["pipe", "pipe", "pipe"] });
-
-	recProcess.stderr?.on("data", () => {});
-	recProcess.on("error", () => { recProcess = null; });
+	legacyRecProcess.stderr?.on("data", () => {});
+	legacyRecProcess.on("error", () => { legacyRecProcess = null; });
 	return true;
 }
 
-function stopRecording(): Promise<void> {
+function stopLegacyRecording(): Promise<void> {
 	return new Promise((resolve) => {
-		if (!recProcess) { resolve(); return; }
-		recProcess.on("close", () => { recProcess = null; resolve(); });
-		recProcess.kill("SIGTERM");
+		if (!legacyRecProcess) { resolve(); return; }
+		legacyRecProcess.on("close", () => { legacyRecProcess = null; resolve(); });
+		legacyRecProcess.kill("SIGTERM");
 		setTimeout(() => {
-			if (recProcess) { recProcess.kill("SIGKILL"); recProcess = null; }
+			if (legacyRecProcess) { legacyRecProcess.kill("SIGKILL"); legacyRecProcess = null; }
 			resolve();
 		}, 2000);
 	});
 }
 
-// ─── Transcription (daemon or fallback) ──────────────────────────────────────
-
-async function transcribeAudio(
+async function transcribeAudioFile(
 	audioPath: string,
 	config: VoiceConfig,
 ): Promise<{ text: string; duration: number; error?: string }> {
-	// Try daemon first
 	if (await isDaemonRunning()) {
 		const resp = await daemonSend({
 			cmd: "transcribe",
@@ -238,13 +341,10 @@ async function transcribeAudio(
 			return resp as { text: string; duration: number };
 		}
 	}
-
-	// Fallback: direct subprocess
 	return new Promise((resolve) => {
 		const args = [TRANSCRIBE_SCRIPT, "--language", config.language, audioPath];
 		if (config.backend !== "auto") args.splice(1, 0, "--backend", config.backend);
 		if (config.model) args.splice(1, 0, "--model", config.model);
-
 		const proc = spawn("python3", args, { stdio: ["pipe", "pipe", "pipe"] });
 		let stdout = "";
 		let stderr = "";
@@ -256,6 +356,249 @@ async function transcribeAudio(
 		});
 		proc.on("error", (err) => resolve({ text: "", duration: 0, error: err.message }));
 	});
+}
+
+// ─── Deepgram WebSocket Streaming ────────────────────────────────────────────
+
+interface StreamingSession {
+	ws: WebSocket;
+	recProcess: ChildProcess;
+	interimText: string;
+	finalizedParts: string[];
+	keepAliveTimer: ReturnType<typeof setInterval> | null;
+	closed: boolean;
+	hadAudioData: boolean;       // Track if we received any audio data
+	hadSpeech: boolean;          // Track if Deepgram detected any speech
+	onTranscript: (interim: string, finals: string[]) => void;
+	onDone: (fullText: string, meta: { hadAudio: boolean; hadSpeech: boolean }) => void;
+	onError: (err: string) => void;
+}
+
+function resolveDeepgramApiKey(config: VoiceConfig): string | null {
+	return process.env.DEEPGRAM_API_KEY || config.deepgramApiKey || null;
+}
+
+function isDeepgramStreaming(config: VoiceConfig): boolean {
+	const key = resolveDeepgramApiKey(config);
+	if (!key) return false;
+	return config.backend === "deepgram" || (config.backend === "auto" && !!key);
+}
+
+function buildDeepgramWsUrl(config: VoiceConfig): string {
+	const params = new URLSearchParams({
+		encoding: ENCODING,
+		sample_rate: String(SAMPLE_RATE),
+		channels: String(CHANNELS),
+		endpointing: "300",
+		utterance_end_ms: "1000",
+		language: config.language || "en",
+		model: config.model || "nova-3",
+		smart_format: "true",
+		interim_results: "true",
+	});
+	return `${DEEPGRAM_WS_URL}?${params.toString()}`;
+}
+
+function startStreamingSession(
+	config: VoiceConfig,
+	callbacks: {
+		onTranscript: (interim: string, finals: string[]) => void;
+		onDone: (fullText: string, meta: { hadAudio: boolean; hadSpeech: boolean }) => void;
+		onError: (err: string) => void;
+	},
+): StreamingSession | null {
+	const apiKey = resolveDeepgramApiKey(config);
+	if (!apiKey) {
+		callbacks.onError("DEEPGRAM_API_KEY not set");
+		return null;
+	}
+
+	if (!commandExists("rec")) {
+		callbacks.onError("Voice requires SoX. Install: brew install sox");
+		return null;
+	}
+
+	// On macOS, SoX's rec ignores -r for input (CoreAudio captures at native rate,
+	// usually 48kHz). We must use the `rate` effect to downsample to 16kHz.
+	// Without this, Deepgram receives 48kHz audio labeled as 16kHz → garbled/silence.
+	const recProc = spawn("rec", [
+		"-q",
+		"-c", String(CHANNELS),
+		"-b", "16",
+		"-e", "signed-integer",
+		"-t", "raw",
+		"-",          // output to stdout
+		"rate", String(SAMPLE_RATE),  // SoX effect: resample to 16kHz
+	], { stdio: ["pipe", "pipe", "pipe"] });
+
+	recProc.stderr?.on("data", (d: Buffer) => {
+		voiceDebug("SoX stderr:", d.toString().trim());
+	});
+
+	const wsUrl = buildDeepgramWsUrl(config);
+	const ws = new WebSocket(wsUrl, {
+		headers: {
+			"Authorization": `Token ${apiKey}`,
+		},
+	} as any);
+
+	const session: StreamingSession = {
+		ws,
+		recProcess: recProc,
+		interimText: "",
+		finalizedParts: [],
+		keepAliveTimer: null,
+		closed: false,
+		hadAudioData: false,
+		hadSpeech: false,
+		onTranscript: callbacks.onTranscript,
+		onDone: callbacks.onDone,
+		onError: callbacks.onError,
+	};
+
+	ws.onopen = () => {
+		voiceDebug("WebSocket onopen → streaming audio");
+		try { ws.send(JSON.stringify({ type: "KeepAlive" })); } catch {}
+
+		session.keepAliveTimer = setInterval(() => {
+			if (ws.readyState === WebSocket.OPEN) {
+				try { ws.send(JSON.stringify({ type: "KeepAlive" })); } catch {}
+			}
+		}, KEEPALIVE_INTERVAL_MS);
+
+		recProc.stdout?.on("data", (chunk: Buffer) => {
+			if (ws.readyState === WebSocket.OPEN) {
+				session.hadAudioData = true;
+				try { ws.send(chunk); } catch {}
+				// Feed audio data to level meter for reactive waveform
+				updateAudioLevel(chunk);
+			}
+		});
+	};
+
+	ws.onmessage = (event: MessageEvent) => {
+		try {
+			const msg = typeof event.data === "string" ? JSON.parse(event.data) : null;
+			if (!msg) return;
+
+			if (msg.type === "Results") {
+				const alt = msg.channel?.alternatives?.[0];
+				const transcript = alt?.transcript || "";
+
+				if (transcript.trim()) {
+					session.hadSpeech = true;
+				}
+
+				if (msg.is_final) {
+					if (transcript.trim()) {
+						session.finalizedParts.push(transcript.trim());
+					}
+					session.interimText = "";
+				} else {
+					session.interimText = transcript;
+				}
+
+				session.onTranscript(session.interimText, session.finalizedParts);
+			} else if (msg.type === "Error" || msg.type === "error") {
+				session.onError(msg.message || msg.description || "Deepgram error");
+			}
+		} catch {}
+	};
+
+	ws.onerror = (ev) => {
+		voiceDebug("WebSocket onerror", { readyState: ws.readyState });
+		if (!session.closed) {
+			session.onError("WebSocket connection error");
+		}
+	};
+
+	ws.onclose = (ev) => {
+		voiceDebug("WebSocket onclose", { code: (ev as any)?.code, reason: (ev as any)?.reason, closed: session.closed });
+		if (!session.closed) {
+			finalizeSession(session);
+		}
+	};
+
+	recProc.on("error", (err) => {
+		voiceDebug("SoX process error:", err.message);
+		session.onError(`SoX error: ${err.message}`);
+	});
+
+	recProc.on("close", (code, signal) => {
+		voiceDebug("SoX process closed", { code, signal, wsClosed: session.closed, wsState: ws.readyState });
+		if (ws.readyState === WebSocket.OPEN) {
+			try { ws.send(JSON.stringify({ type: "CloseStream" })); } catch {}
+		}
+	});
+
+	return session;
+}
+
+function stopStreamingSession(session: StreamingSession): void {
+	if (session.closed) return;
+
+	try { session.recProcess.kill("SIGTERM"); } catch {}
+
+	if (session.ws.readyState === WebSocket.OPEN) {
+		try { session.ws.send(JSON.stringify({ type: "CloseStream" })); } catch {}
+	}
+
+	// Safety timeout
+	setTimeout(() => {
+		if (!session.closed) {
+			finalizeSession(session);
+		}
+	}, FINALIZE_SAFETY_TIMEOUT_MS);
+
+	// Quick finalize if no new data
+	let lastDataTime = Date.now();
+	const origOnMessage = session.ws.onmessage;
+	session.ws.onmessage = (event: MessageEvent) => {
+		lastDataTime = Date.now();
+		if (origOnMessage) origOnMessage.call(session.ws, event);
+	};
+
+	const noDataCheck = setInterval(() => {
+		if (Date.now() - lastDataTime > FINALIZE_NO_DATA_TIMEOUT_MS) {
+			clearInterval(noDataCheck);
+			if (!session.closed) {
+				finalizeSession(session);
+			}
+		}
+	}, 500);
+}
+
+function finalizeSession(session: StreamingSession): void {
+	if (session.closed) return;
+	session.closed = true;
+	voiceDebug("finalizeSession", { hadAudio: session.hadAudioData, hadSpeech: session.hadSpeech, parts: session.finalizedParts.length });
+
+	if (session.keepAliveTimer) {
+		clearInterval(session.keepAliveTimer);
+		session.keepAliveTimer = null;
+	}
+
+	try { session.ws.close(); } catch {}
+	try { session.recProcess.kill("SIGKILL"); } catch {}
+
+	const fullText = session.finalizedParts.join(" ").trim();
+	session.onDone(fullText, {
+		hadAudio: session.hadAudioData,
+		hadSpeech: session.hadSpeech,
+	});
+}
+
+// ─── Abort helper — nuke everything synchronously ────────────────────────────
+
+function abortSession(session: StreamingSession | null): void {
+	if (!session || session.closed) return;
+	session.closed = true;
+	if (session.keepAliveTimer) {
+		clearInterval(session.keepAliveTimer);
+		session.keepAliveTimer = null;
+	}
+	try { session.ws.close(); } catch {}
+	try { session.recProcess.kill("SIGKILL"); } catch {}
 }
 
 // ─── Extension ───────────────────────────────────────────────────────────────
@@ -270,7 +613,24 @@ export default function (pi: ExtensionAPI) {
 	let recordingStart = 0;
 	let statusTimer: ReturnType<typeof setInterval> | null = null;
 	let terminalInputUnsub: (() => void) | null = null;
-	let isHolding = false;
+
+	// Streaming session state
+	let activeSession: StreamingSession | null = null;
+	let currentTarget: "editor" | "btw" = "editor";
+	let retryAttempts = 0;
+	let lastStopTime = 0;    // For corruption guard
+	let recordingStartedAt = 0; // When recording actually started (for grace period)
+
+	// Hold-to-talk state
+	let kittyReleaseDetected = false;
+	let spaceDownTime: number | null = null;
+	let holdActivationTimer: ReturnType<typeof setTimeout> | null = null;
+	let spaceConsumed = false;        // True once threshold passed and recording started
+	let releaseDetectTimer: ReturnType<typeof setTimeout> | null = null;
+	let warmupWidgetTimer: ReturnType<typeof setInterval> | null = null;
+	let spacePressCount = 0;          // Count of rapid space presses (for non-Kitty hold detection)
+	let lastSpacePressTime = 0;       // Timestamp of last space press event
+	let holdConfirmed = false;        // True once we've confirmed user is holding (not tapping)
 
 	// ─── BTW State ───────────────────────────────────────────────────────────
 
@@ -289,20 +649,29 @@ export default function (pi: ExtensionAPI) {
 				}
 				const modeTag = !config.onboarding.completed
 					? "SETUP"
-					: config.mode === "api"
-						? "API"
-						: config.mode === "local"
-							? "LOCAL"
-							: "AUTO";
+					: isDeepgramStreaming(config)
+						? "STREAM"
+						: config.mode === "api"
+							? "API"
+							: config.mode === "local"
+								? "LOCAL"
+								: "AUTO";
 				ctx.ui.setStatus("voice", `MIC ${modeTag}`);
 				break;
 			}
+			case "warmup":
+				ctx.ui.setStatus("voice", "MIC HOLD...");
+				break;
 			case "recording": {
 				const secs = Math.round((Date.now() - recordingStart) / 1000);
-				ctx.ui.setStatus("voice", `REC ${secs}s`);
+				// Live audio level meter in status bar
+				const meterLen = 4;
+				const meterFilled = Math.round(audioLevelSmoothed * meterLen);
+				const meter = "█".repeat(meterFilled) + "░".repeat(meterLen - meterFilled);
+				ctx.ui.setStatus("voice", `REC ${secs}s ${meter}`);
 				break;
 			}
-			case "transcribing":
+			case "finalizing":
 				ctx.ui.setStatus("voice", "STT...");
 				break;
 		}
@@ -313,11 +682,68 @@ export default function (pi: ExtensionAPI) {
 		updateVoiceStatus();
 	}
 
+	// ─── Cleanup helpers ─────────────────────────────────────────────────────
+
+	function clearHoldTimer() {
+		if (holdActivationTimer) {
+			clearTimeout(holdActivationTimer);
+			holdActivationTimer = null;
+		}
+	}
+
+	function clearReleaseTimer() {
+		if (releaseDetectTimer) {
+			clearTimeout(releaseDetectTimer);
+			releaseDetectTimer = null;
+		}
+	}
+
+	function clearWarmupWidget() {
+		if (warmupWidgetTimer) {
+			clearInterval(warmupWidgetTimer);
+			warmupWidgetTimer = null;
+		}
+	}
+
+	function clearRecordingAnimTimer() {
+		const timer = (showRecordingWidget as any)?._animTimer;
+		if (timer) {
+			clearInterval(timer);
+			(showRecordingWidget as any)._animTimer = null;
+		}
+		const finTimer = (showFinalizingWidget as any)?._timer;
+		if (finTimer) {
+			clearInterval(finTimer);
+			(showFinalizingWidget as any)._timer = null;
+		}
+	}
+
+	function hideWidget() {
+		if (ctx?.hasUI) ctx.ui.setWidget("voice-recording", undefined);
+	}
+
 	function voiceCleanup() {
 		if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
-		if (recProcess) { recProcess.kill("SIGTERM"); recProcess = null; }
+		clearHoldTimer();
+		clearReleaseTimer();
+		clearWarmupWidget();
+		clearRecordingAnimTimer();
+		// Reset audio levels
+		audioLevel = 0;
+		audioLevelSmoothed = 0;
+		if (activeSession) {
+			abortSession(activeSession);
+			activeSession = null;
+		}
+		if (legacyRecProcess) { legacyRecProcess.kill("SIGTERM"); legacyRecProcess = null; }
 		if (tempFile) { try { fs.unlinkSync(tempFile); } catch {} tempFile = null; }
-		isHolding = false;
+		spaceConsumed = false;
+		spaceDownTime = null;
+		spacePressCount = 0;
+		lastSpacePressTime = 0;
+		holdConfirmed = false;
+		retryAttempts = 0;
+		hideWidget();
 		setVoiceState("idle");
 	}
 
@@ -332,7 +758,7 @@ export default function (pi: ExtensionAPI) {
 		const diagnostics = scanEnvironment(TRANSCRIBE_SCRIPT);
 		const provisioningPlan = buildProvisioningPlan(nextConfig, diagnostics);
 		let validated = provisioningPlan.ready;
-		if (validated && nextConfig.enabled) {
+		if (validated && nextConfig.enabled && !isDeepgramStreaming(nextConfig)) {
 			validated = await ensureDaemon(nextConfig);
 		}
 
@@ -349,77 +775,502 @@ export default function (pi: ExtensionAPI) {
 		].join("\n"), validated ? "info" : "warning");
 	}
 
-	// ─── Voice: Start / Stop / Transcribe ────────────────────────────────────
+	// ─── Warmup Widget ──────────────────────────────────────────────────────
+	//
+	// During the hold threshold, show a smooth progress bar with pulsing dot.
+	// No emojis. Clean, minimal, professional.
 
-	const MAX_RECORDING_SECS = 30; // Safety cap: auto-stop after 30s
+	function showWarmupWidget() {
+		if (!ctx?.hasUI) return;
+
+		const startTime = Date.now();
+		let lastRendered = "";
+
+		const renderWarmup = () => {
+			if (!ctx?.hasUI) return;
+			const elapsed = Date.now() - startTime;
+			const progress = Math.min(elapsed / HOLD_THRESHOLD_MS, 1);
+			const remainingSecs = Math.max(0, Math.ceil((HOLD_THRESHOLD_MS - elapsed) / 1000));
+
+			ctx.ui.setWidget("voice-recording", (tui, theme) => {
+				return {
+					invalidate() {},
+					render(width: number): string[] {
+						const maxW = Math.min(width - 4, 60);
+						const barLen = Math.max(10, maxW - 30);
+						const filled = Math.round(progress * barLen);
+						const empty = barLen - filled;
+
+						// Pulsing dot at the progress edge
+						const pulse = Math.sin(Date.now() / 150) > 0;
+						const dot = pulse ? theme.fg("accent", "●") : theme.fg("muted", "○");
+
+						const filledBar = theme.fg("accent", "━".repeat(filled));
+						const emptyBar = theme.fg("muted", "─".repeat(empty));
+						const bar = filledBar + dot + emptyBar;
+
+						const hint = remainingSecs > 1
+							? theme.fg("dim", `Activating in ${remainingSecs}s...`)
+							: theme.fg("accent", "Activating...");
+
+						const topBorder = theme.fg("border", "╭" + "─".repeat(maxW) + "╮");
+						const botBorder = theme.fg("border", "╰" + "─".repeat(maxW) + "╯");
+						const side = (content: string) => {
+							const stripped = content.replace(/\x1b\[[^m]*m/g, "").length;
+							const padding = Math.max(0, maxW - stripped);
+							return theme.fg("border", "│") + content + " ".repeat(padding) + theme.fg("border", "│");
+						};
+
+						return [
+							topBorder,
+							side(`  ${bar}  ${hint}`),
+							botBorder,
+						];
+					},
+				};
+			}, { placement: "aboveEditor" });
+		};
+
+		renderWarmup();
+		warmupWidgetTimer = setInterval(renderWarmup, 80);
+	}
+
+	// ─── Recording Widget ───────────────────────────────────────────────────
+
+	// Smoother waveform using sine-based amplitude simulation
+	const waveBlocks = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+
+	function showRecordingWidget(target: "editor" | "btw") {
+		if (!ctx?.hasUI) return;
+
+		(showRecordingWidget as any)._frame = 0;
+		(showRecordingWidget as any)._hasTranscript = false;
+
+		// Flash effect — briefly show a brighter border on recording start
+		(showRecordingWidget as any)._flashUntil = Date.now() + 300;
+
+		const animTimer = setInterval(() => {
+			if ((showRecordingWidget as any)?._hasTranscript) return;
+			(showRecordingWidget as any)._frame = ((showRecordingWidget as any)._frame || 0) + 1;
+			showRecordingWidgetFrame(target, (showRecordingWidget as any)._frame);
+		}, 150); // Faster animation for smoother waveform
+
+		(showRecordingWidget as any)._animTimer = animTimer;
+		showRecordingWidgetFrame(target, 0);
+	}
+
+	function showRecordingWidgetFrame(target: "editor" | "btw", frame: number) {
+		if (!ctx?.hasUI) return;
+		const isFlashing = Date.now() < ((showRecordingWidget as any)?._flashUntil || 0);
+
+		ctx.ui.setWidget("voice-recording", (tui, theme) => {
+			return {
+				invalidate() {},
+				render(width: number): string[] {
+					const maxW = Math.min(width - 2, 72);
+					const elapsed = Math.round((Date.now() - recordingStart) / 1000);
+					const mins = Math.floor(elapsed / 60);
+					const secs = elapsed % 60;
+					const timeStr = mins > 0 ? `${mins}:${String(secs).padStart(2, "0")}` : `${secs}s`;
+
+					// Reactive waveform based on audio level + sine variation
+					const waveLen = 16;
+					let wave = "";
+					for (let i = 0; i < waveLen; i++) {
+						// Combine audio level with sine wave for organic feel
+						const phase = (frame * 0.3 + i * 0.6);
+						const sinVal = (Math.sin(phase) + 1) / 2; // 0-1
+						const level = audioLevelSmoothed * 0.7 + sinVal * 0.3;
+						const idx = Math.min(waveBlocks.length - 1, Math.round(level * (waveBlocks.length - 1)));
+						wave += waveBlocks[idx];
+					}
+
+					const borderColor = isFlashing ? "accent" : "borderAccent";
+					const topBorder = theme.fg(borderColor, "╭" + "─".repeat(maxW) + "╮");
+					const botBorder = theme.fg(borderColor, "╰" + "─".repeat(maxW) + "╯");
+					const pad = (s: string, w: number) => {
+						const visible = s.replace(/\x1b\[[^m]*m/g, "").length;
+						return s + " ".repeat(Math.max(0, w - visible));
+					};
+
+					// Pulsing record dot
+					const dotPulse = Math.sin(Date.now() / 400) > -0.3;
+					const dot = dotPulse ? theme.fg("error", "●") : theme.fg("muted", "○");
+
+					const label = target === "btw"
+						? theme.bold(theme.fg("accent", " BTW "))
+						: theme.bold(theme.fg("accent", " REC "));
+					const waveStyled = theme.fg("accent", wave);
+					const timeStyled = theme.fg("muted", timeStr);
+
+					// Audio level meter in status style
+					const meterLen = 8;
+					const meterFilled = Math.round(audioLevelSmoothed * meterLen);
+					const meter = theme.fg("accent", "█".repeat(meterFilled)) + theme.fg("muted", "░".repeat(meterLen - meterFilled));
+
+					const titleLine = `  ${dot} ${label} ${waveStyled} ${meter} ${timeStyled}`;
+
+					const hint = target === "btw"
+						? theme.fg("dim", "  Ctrl+Shift+B to stop")
+						: theme.fg("dim", "  Release SPACE to finalize");
+
+					return [
+						topBorder,
+						theme.fg(borderColor, "│") + pad(titleLine, maxW) + theme.fg(borderColor, "│"),
+						theme.fg(borderColor, "│") + pad(hint, maxW) + theme.fg(borderColor, "│"),
+						botBorder,
+					];
+				},
+			};
+		}, { placement: "aboveEditor" });
+	}
+
+	// ─── Live Transcript Widget ─────────────────────────────────────────────
+
+	function updateLiveTranscriptWidget(interim: string, finals: string[]) {
+		if (!ctx?.hasUI) return;
+
+		// Stop the waveform animation — live transcript takes over
+		(showRecordingWidget as any)._hasTranscript = true;
+		clearRecordingAnimTimer();
+
+		const finalized = finals.join(" ");
+		const displayText = finalized + (interim ? (finalized ? " " : "") + interim : "");
+
+		ctx.ui.setWidget("voice-recording", (tui, theme) => {
+			return {
+				invalidate() {},
+				render(width: number): string[] {
+					const maxW = Math.min(width - 2, 72);
+					const elapsed = Math.round((Date.now() - recordingStart) / 1000);
+					const mins = Math.floor(elapsed / 60);
+					const secs = elapsed % 60;
+					const timeStr = mins > 0 ? `${mins}:${String(secs).padStart(2, "0")}` : `${secs}s`;
+
+					const topBorder = theme.fg("borderAccent", "╭" + "─".repeat(maxW) + "╮");
+					const botBorder = theme.fg("borderAccent", "╰" + "─".repeat(maxW) + "╯");
+					const sep = theme.fg("borderAccent", "│") + theme.fg("muted", "─".repeat(maxW)) + theme.fg("borderAccent", "│");
+					const side = (content: string) => {
+						const stripped = content.replace(/\x1b\[[^m]*m/g, "");
+						const padding = Math.max(0, maxW - stripped.length);
+						return theme.fg("borderAccent", "│") + content + " ".repeat(padding) + theme.fg("borderAccent", "│");
+					};
+
+					// Pulsing record dot
+					const dotPulse = Math.sin(Date.now() / 400) > -0.3;
+					const dot = dotPulse ? theme.fg("error", "●") : theme.fg("muted", "○");
+					const label = theme.bold(theme.fg("accent", " REC "));
+					const timeStyled = theme.fg("muted", timeStr);
+
+					// Small level meter alongside title
+					const meterLen = 6;
+					const meterFilled = Math.round(audioLevelSmoothed * meterLen);
+					const meter = theme.fg("accent", "█".repeat(meterFilled)) + theme.fg("muted", "░".repeat(meterLen - meterFilled));
+
+					const titleLine = `  ${dot} ${label} ${meter}  ${timeStyled}`;
+					const hint = theme.fg("dim", "  Release SPACE to finalize");
+					const lines = [topBorder, side(titleLine)];
+
+					if (!displayText.trim()) {
+						lines.push(side(theme.fg("dim", "  Listening...")));
+					} else {
+						lines.push(sep);
+						const innerMax = maxW - 4;
+						const words = displayText.split(" ");
+						const wrappedLines: string[] = [];
+						let currentLine = "";
+
+						for (const word of words) {
+							if ((currentLine + " " + word).trim().length > innerMax && currentLine) {
+								wrappedLines.push(currentLine);
+								currentLine = word;
+							} else {
+								currentLine = currentLine ? currentLine + " " + word : word;
+							}
+						}
+						if (currentLine) wrappedLines.push(currentLine);
+
+						// Show last 3 lines, with blinking cursor on the last
+						const visible = wrappedLines.slice(-3);
+						for (let i = 0; i < visible.length; i++) {
+							let line = visible[i];
+							if (i === visible.length - 1 && interim) {
+								// Typing cursor effect — blinks
+								const cursorVisible = Math.sin(Date.now() / 300) > 0;
+								const cursor = cursorVisible ? theme.fg("accent", "▎") : " ";
+								line = theme.fg("text", line) + cursor;
+							} else {
+								line = theme.fg("text", line);
+							}
+							lines.push(side("  " + line));
+						}
+					}
+
+					lines.push(side(hint));
+					lines.push(botBorder);
+					return lines;
+				},
+			};
+		}, { placement: "aboveEditor" });
+	}
+
+	// ─── Finalizing Widget ──────────────────────────────────────────────────
+	// Smooth transition: shrinks to single "Processing..." line
+
+	function showFinalizingWidget() {
+		if (!ctx?.hasUI) return;
+
+		let finalizingAnimTimer: ReturnType<typeof setInterval> | null = null;
+
+		const render = () => {
+			ctx!.ui.setWidget("voice-recording", (tui, theme) => {
+				return {
+					invalidate() {},
+					render(width: number): string[] {
+						const maxW = Math.min(width - 2, 72);
+						const topBorder = theme.fg("border", "╭" + "─".repeat(maxW) + "╮");
+						const botBorder = theme.fg("border", "╰" + "─".repeat(maxW) + "╯");
+						const side = (content: string) => {
+							const stripped = content.replace(/\x1b\[[^m]*m/g, "").length;
+							const padding = Math.max(0, maxW - stripped);
+							return theme.fg("border", "│") + content + " ".repeat(padding) + theme.fg("border", "│");
+						};
+						// Smooth spinner
+						const dots = ".".repeat(1 + (Math.floor(Date.now() / 400) % 3));
+						const line = `  ${theme.fg("accent", ">")} ${theme.fg("dim", `Processing${dots}`)}`;
+						return [topBorder, side(line), botBorder];
+					},
+				};
+			}, { placement: "aboveEditor" });
+		};
+
+		render();
+		finalizingAnimTimer = setInterval(render, 400);
+
+		// Store timer for cleanup
+		(showFinalizingWidget as any)._timer = finalizingAnimTimer;
+	}
+
+	// ─── Voice: Start / Stop (Streaming or Legacy) ───────────────────────────
 
 	async function startVoiceRecording(target: "editor" | "btw" = "editor"): Promise<boolean> {
-		if (voiceState !== "idle" || !ctx) return false;
+		if (!ctx) return false;
 
-		tempFile = path.join(os.tmpdir(), `pi-voice-${Date.now()}.wav`);
-		if (!startRecordingToFile(tempFile)) {
-			ctx.ui.notify("Voice requires SoX. Install: brew install sox", "error");
+		// ── SESSION CORRUPTION GUARD ──
+		// If we're still finalizing from a previous recording, abort it first.
+		// This prevents the "slow connection overlaps new recording" bug.
+		if (voiceState === "finalizing" || voiceState === "recording") {
+			abortSession(activeSession);
+			activeSession = null;
+			clearRecordingAnimTimer();
+			clearWarmupWidget();
+			hideWidget();
+			setVoiceState("idle");
+			// Brief pause to let resources release
+			await new Promise((r) => setTimeout(r, CORRUPTION_GUARD_MS));
+		}
+
+		// ── STALE TRANSCRIPT CLEANUP ──
+		// Clear any prior transcript from the widget
+		hideWidget();
+
+		currentTarget = target;
+		recordingStart = Date.now();
+		retryAttempts = 0;
+
+		if (isDeepgramStreaming(config)) {
+			return startStreamingRecording(target);
+		} else {
+			return startLegacyRecording(target);
+		}
+	}
+
+	async function startStreamingRecording(target: "editor" | "btw"): Promise<boolean> {
+		setVoiceState("recording");
+
+		const session = startStreamingSession(config, {
+			onTranscript: (interim, finals) => {
+				// Live transcript update — this is the key UX feature
+				updateLiveTranscriptWidget(interim, finals);
+				updateVoiceStatus();
+			},
+			onDone: (fullText, meta) => {
+				voiceDebug("onDone callback", { fullText: fullText.slice(0, 100), meta, voiceState, spaceConsumed });
+				activeSession = null;
+				clearRecordingAnimTimer();
+				lastStopTime = Date.now();
+
+				if (!fullText.trim()) {
+					// ── DISTINGUISH SILENCE VS NO SPEECH ──
+					hideWidget();
+					if (!meta.hadAudio) {
+						ctx?.ui.notify("Microphone captured no audio. Check mic permissions.", "error");
+					} else if (!meta.hadSpeech) {
+						ctx?.ui.notify("Microphone captured silence — no speech detected.", "warning");
+					} else {
+						ctx?.ui.notify("No speech detected.", "warning");
+					}
+					setVoiceState("idle");
+					return;
+				}
+
+				// Show result inline in widget briefly, then clear
+				if (ctx?.hasUI) {
+					const maxPreview = 80;
+					const preview = fullText.length > maxPreview ? fullText.slice(0, maxPreview) + "..." : fullText;
+					ctx.ui.setWidget("voice-recording", (tui, theme) => {
+						return {
+							invalidate() {},
+							render(width: number): string[] {
+								const maxW = Math.min(width - 2, 72);
+								const topBorder = theme.fg("border", "╭" + "─".repeat(maxW) + "╮");
+								const botBorder = theme.fg("border", "╰" + "─".repeat(maxW) + "╯");
+								const side = (content: string) => {
+									const stripped = content.replace(/\x1b\[[^m]*m/g, "").length;
+									const padding = Math.max(0, maxW - stripped);
+									return theme.fg("border", "│") + content + " ".repeat(padding) + theme.fg("border", "│");
+								};
+								const check = theme.fg("accent", "✓");
+								const text = theme.fg("text", preview);
+								return [topBorder, side(`  ${check} ${text}`), botBorder];
+							},
+						};
+					}, { placement: "aboveEditor" });
+
+					// Clear widget after brief display
+					setTimeout(() => hideWidget(), 1500);
+				}
+
+				if (target === "btw") {
+					handleBtw(fullText);
+				} else {
+					if (ctx?.hasUI) {
+						const existing = ctx.ui.getEditorText();
+						ctx.ui.setEditorText(existing ? existing + " " + fullText : fullText);
+						const elapsed = ((Date.now() - recordingStart) / 1000).toFixed(1);
+						ctx.ui.notify(
+							`STT (${elapsed}s): ${fullText.slice(0, 80)}${fullText.length > 80 ? "..." : ""}`,
+							"info",
+						);
+					}
+				}
+				setVoiceState("idle");
+			},
+			onError: (err) => {
+				activeSession = null;
+				clearRecordingAnimTimer();
+				hideWidget();
+
+				// ── TRANSIENT FAILURE RETRY ──
+				// On WebSocket error during rapid push-to-talk re-press, auto-retry
+				if (retryAttempts < MAX_RETRY_ATTEMPTS) {
+					retryAttempts++;
+					ctx?.ui.notify(`Voice connection error — retrying (${retryAttempts}/${MAX_RETRY_ATTEMPTS})…`, "warning");
+					setTimeout(() => {
+						if (voiceState !== "idle") {
+							setVoiceState("idle");
+						}
+						startStreamingRecording(target);
+					}, RETRY_DELAY_MS);
+					return;
+				}
+
+				ctx?.ui.notify(`STT error: ${err}`, "error");
+				setVoiceState("idle");
+			},
+		});
+
+		if (!session) {
+			setVoiceState("idle");
 			return false;
 		}
 
-		recordingStart = Date.now();
-		setVoiceState("recording");
+		activeSession = session;
+
+		// Status timer for elapsed time
 		statusTimer = setInterval(() => {
 			if (voiceState === "recording") {
 				updateVoiceStatus();
-				// Safety: auto-stop after MAX_RECORDING_SECS
 				const elapsed = (Date.now() - recordingStart) / 1000;
 				if (elapsed >= MAX_RECORDING_SECS) {
-					isHolding = false;
 					stopVoiceRecording(target);
 				}
 			}
 		}, 1000);
 
-		if (ctx.hasUI) {
-			ctx.ui.setWidget("voice-recording", [
-				target === "btw"
-					? " 🎙 BTW Recording... Ctrl+Shift+V to stop"
-					: " 🎙 Recording... Ctrl+Shift+V to stop (or release SPACE)",
-			], { placement: "aboveEditor" });
+		showRecordingWidget(target);
+		return true;
+	}
+
+	async function startLegacyRecording(target: "editor" | "btw"): Promise<boolean> {
+		if (!ctx) return false;
+		tempFile = path.join(os.tmpdir(), `pi-voice-${Date.now()}.wav`);
+		if (!startLegacyRecordingToFile(tempFile)) {
+			ctx.ui.notify("Voice requires SoX. Install: brew install sox", "error");
+			return false;
 		}
+
+		setVoiceState("recording");
+		statusTimer = setInterval(() => {
+			if (voiceState === "recording") {
+				updateVoiceStatus();
+				const elapsed = (Date.now() - recordingStart) / 1000;
+				if (elapsed >= MAX_RECORDING_SECS) {
+					stopVoiceRecording(target);
+				}
+			}
+		}, 1000);
+
+		showRecordingWidget(target);
 		return true;
 	}
 
 	async function stopVoiceRecording(target: "editor" | "btw" = "editor") {
+		voiceDebug("stopVoiceRecording called", { voiceState, target, hasActiveSession: !!activeSession });
 		if (voiceState !== "recording" || !ctx) return;
 		if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
 
-		const elapsed = ((Date.now() - recordingStart) / 1000).toFixed(1);
-		const audioFile = tempFile; // capture before cleanup can null it
-		setVoiceState("transcribing");
-		ctx.ui.setWidget("voice-recording", undefined);
+		if (activeSession) {
+			setVoiceState("finalizing");
+			clearRecordingAnimTimer();
+			showFinalizingWidget();
+			stopStreamingSession(activeSession);
+			return;
+		}
 
-		await stopRecording();
+		// Legacy path
+		const elapsed = ((Date.now() - recordingStart) / 1000).toFixed(1);
+		const audioFile = tempFile;
+		setVoiceState("finalizing");
+		clearRecordingAnimTimer();
+		showFinalizingWidget();
+
+		await stopLegacyRecording();
 
 		if (!audioFile || !fs.existsSync(audioFile)) {
 			ctx.ui.notify("No audio recorded.", "warning");
+			hideWidget();
 			setVoiceState("idle");
 			return;
 		}
 
 		const stats = fs.statSync(audioFile);
 		if (stats.size < 1000) {
-			ctx.ui.notify("Recording too short.", "warning");
+			ctx.ui.notify("Recording too short — mic captured silence.", "warning");
 			try { fs.unlinkSync(audioFile); } catch {}
 			tempFile = null;
+			hideWidget();
 			setVoiceState("idle");
 			return;
 		}
 
-		// Ensure daemon is up before transcribing — await so the warm path
-		// is available for this request instead of falling through to the
-		// cold subprocess fallback.
 		await ensureDaemon(config).catch(() => {});
 
-		const result = await transcribeAudio(audioFile, config);
+		const result = await transcribeAudioFile(audioFile, config);
 		try { fs.unlinkSync(audioFile); } catch {}
 		if (tempFile === audioFile) tempFile = null;
+
+		hideWidget();
 
 		if (result.error) {
 			ctx.ui.notify(`STT error: ${result.error}`, "error");
@@ -437,12 +1288,11 @@ export default function (pi: ExtensionAPI) {
 		if (target === "btw") {
 			await handleBtw(transcript);
 		} else {
-			// Inject into editor
 			if (ctx.hasUI) {
 				const existing = ctx.ui.getEditorText();
 				ctx.ui.setEditorText(existing ? existing + " " + transcript : transcript);
 				ctx.ui.notify(
-					`STT (${elapsed}s): ${transcript.slice(0, 80)}${transcript.length > 80 ? "..." : ""}`,
+					`STT (${elapsed}s): ${transcript.slice(0, 80)}${transcript.length > 80 ? "…" : ""}`,
 					"info",
 				);
 			}
@@ -451,55 +1301,469 @@ export default function (pi: ExtensionAPI) {
 		setVoiceState("idle");
 	}
 
-	// ─── Hold-to-talk via Kitty protocol ─────────────────────────────────────
+	// ─── Hold-to-Talk State Machine ─────────────────────────────────────────
+	//
+	// SPACE key handling with STRICT hold-duration detection.
+	//
+	// TWO TERMINAL MODES:
+	//
+	// A) KITTY PROTOCOL (Ghostty on Linux, Kitty, WezTerm, etc.):
+	//    True key-down/repeat/release events. On first SPACE press,
+	//    immediately enter warmup (show countdown). If released before
+	//    HOLD_THRESHOLD_MS → cancel warmup, type a space. If held past
+	//    threshold → start recording. True release event stops recording.
+	//    No timer-based release detection needed.
+	//
+	// B) NON-KITTY (macOS Terminal, Ghostty on macOS, etc.):
+	//    No key-release event. Holding sends rapid press events (~30-90ms apart).
+	//    A single tap sends exactly ONE press.
+	//    Algorithm:
+	//      1. First SPACE press → record time, start release-detect timer.
+	//      2. No more presses within RELEASE_DETECT_MS (500ms) → TAP → type space.
+	//      3. Rapid presses arrive → user is HOLDING. After REPEAT_CONFIRM_COUNT
+	//         rapid presses → enter warmup, show countdown.
+	//      4. After HOLD_THRESHOLD_MS (2000ms) from first press → start recording.
+	//      5. Recording continues while key-repeat events arrive.
+	//         Gap > RELEASE_DETECT_MS after RECORDING_GRACE_MS → stop.
+	//
+	// The RECORDING_GRACE_MS prevents the state transition at recording start
+	// from being mistaken for a key release (brief gap in events).
+
+	function onSpaceReleaseDetected() {
+		releaseDetectTimer = null;
+		voiceDebug("onSpaceReleaseDetected", { voiceState, holdConfirmed, spaceConsumed, spaceDownTime, spacePressCount, timeSinceRecStart: spaceConsumed ? Date.now() - recordingStartedAt : null });
+
+		// If we never confirmed this was a hold (< REPEAT_CONFIRM_COUNT rapid presses),
+		// then it was a TAP → type a space character
+		if (!holdConfirmed && voiceState === "idle") {
+			clearHoldTimer();
+			clearWarmupWidget();
+			hideWidget();
+			spaceDownTime = null;
+			spaceConsumed = false;
+			spacePressCount = 0;
+			holdConfirmed = false;
+			if (ctx?.hasUI) {
+				ctx.ui.setEditorText((ctx.ui.getEditorText() || "") + " ");
+			}
+			return;
+		}
+
+		// Released during warmup — cancel (user held but not long enough)
+		if (voiceState === "warmup") {
+			clearHoldTimer();
+			clearWarmupWidget();
+			hideWidget();
+			setVoiceState("idle");
+			spaceDownTime = null;
+			spaceConsumed = false;
+			spacePressCount = 0;
+			holdConfirmed = false;
+			// Don't type a space — user clearly intended to trigger voice but let go too early
+			ctx?.ui.notify("Hold SPACE for 2 seconds to activate voice.", "info");
+			return;
+		}
+
+		// Released during recording — but ONLY if grace period has passed.
+		// The grace period prevents the recording-start transition from being
+		// mistaken for a key release.
+		if (spaceConsumed && voiceState === "recording") {
+			const timeSinceRecordingStart = Date.now() - recordingStartedAt;
+			voiceDebug("release detected during recording", { timeSinceRecordingStart, RECORDING_GRACE_MS });
+			if (timeSinceRecordingStart < RECORDING_GRACE_MS) {
+				// Too soon after recording started — this is likely a false release
+				// caused by the state transition. Re-arm the release detector.
+				voiceDebug("  → too soon, re-arming (grace period)");
+				resetReleaseDetect();
+				return;
+			}
+			voiceDebug("  → stopping recording");
+			spaceConsumed = false;
+			spaceDownTime = null;
+			spacePressCount = 0;
+			holdConfirmed = false;
+			stopVoiceRecording("editor");
+		}
+	}
+
+	function resetReleaseDetect() {
+		clearReleaseTimer();
+		if (voiceState === "warmup" || voiceState === "recording" || spaceDownTime || spaceConsumed || holdConfirmed) {
+			// Use longer timeout during active recording — key repeats can be
+			// irregular when the system is under load (Deepgram streaming, etc.)
+			const timeout = (voiceState === "recording" || spaceConsumed)
+				? RELEASE_DETECT_RECORDING_MS
+				: RELEASE_DETECT_MS;
+			voiceDebug("resetReleaseDetect", { timeout, voiceState, spaceConsumed });
+			releaseDetectTimer = setTimeout(onSpaceReleaseDetected, timeout);
+		}
+	}
 
 	function setupHoldToTalk() {
 		if (!ctx?.hasUI) return;
 
-		// Remove previous listener
 		if (terminalInputUnsub) { terminalInputUnsub(); terminalInputUnsub = null; }
 
 		terminalInputUnsub = ctx.ui.onTerminalInput((data: string) => {
 			if (!config.enabled) return undefined;
 
-			// Hold SPACE → talk → release → transcribe to editor
+			// ── SPACE handling ──
 			if (matchesKey(data, "space")) {
-				// Only activate when editor is empty (avoid conflicting with typing)
-				const editorText = ctx?.hasUI ? ctx.ui.getEditorText() : "";
-				if (editorText && editorText.trim().length > 0) return undefined;
+				voiceDebug("SPACE event", {
+					isRelease: isKeyRelease(data),
+					isRepeat: isKeyRepeat(data),
+					voiceState,
+					kittyReleaseDetected,
+					holdConfirmed,
+					spaceConsumed,
+					spacePressCount,
+					spaceDownTime: spaceDownTime ? Date.now() - spaceDownTime : null,
+					dataHex: Buffer.from(data).toString("hex"),
+				});
 
+				// ── Kitty key-release (true release event) ──
 				if (isKeyRelease(data)) {
-					if (isHolding) {
-						isHolding = false;
+					kittyReleaseDetected = true;
+					clearReleaseTimer();
+
+					// Released during warmup → cancel
+					// If released very quickly (< 300ms), it was a tap → type a space
+					// If released after 300ms+, user was trying voice → show hint
+					if (voiceState === "warmup") {
+						const holdDuration = spaceDownTime ? Date.now() - spaceDownTime : 0;
+						clearHoldTimer();
+						clearWarmupWidget();
+						hideWidget();
+						setVoiceState("idle");
+						spaceDownTime = null;
+						spaceConsumed = false;
+						spacePressCount = 0;
+						holdConfirmed = false;
+						if (holdDuration < 300) {
+							// Quick tap — just type a space
+							if (ctx?.hasUI) ctx.ui.setEditorText((ctx.ui.getEditorText() || "") + " ");
+						} else {
+							// Held long enough to see warmup but let go → show hint
+							ctx?.ui.notify("Hold SPACE for 2 seconds to activate voice.", "info");
+						}
+						return { consume: true };
+					}
+
+					// Tap: released before warmup even started (shouldn't happen in
+					// Kitty path since we enter warmup on first press, but handle anyway)
+					if (spaceDownTime && !holdConfirmed && voiceState === "idle") {
+						clearHoldTimer();
+						spaceDownTime = null;
+						spacePressCount = 0;
+						holdConfirmed = false;
+						if (ctx?.hasUI) ctx.ui.setEditorText((ctx.ui.getEditorText() || "") + " ");
+						return { consume: true };
+					}
+
+					// Released during recording → stop
+					if (spaceConsumed && voiceState === "recording") {
+						spaceConsumed = false;
+						spaceDownTime = null;
+						spacePressCount = 0;
+						holdConfirmed = false;
 						stopVoiceRecording("editor");
 						return { consume: true };
 					}
+
+					spaceDownTime = null;
+					spaceConsumed = false;
+					spacePressCount = 0;
+					holdConfirmed = false;
 					return undefined;
 				}
 
+				// ── Kitty key-repeat ──
 				if (isKeyRepeat(data)) {
-					if (isHolding) return { consume: true };
-					return undefined;
-				}
+					// Already in recording/finalizing — just consume
+					if (voiceState === "recording" || voiceState === "finalizing" || spaceConsumed) {
+						return { consume: true };
+					}
+					// Already in warmup — consume (hold timer is running)
+					if (voiceState === "warmup") {
+						return { consume: true };
+					}
 
-				// Key press — start recording
-				if (voiceState === "idle" && !isHolding) {
-					isHolding = true;
-					startVoiceRecording("editor").then((ok) => {
-						if (!ok) isHolding = false;
-					});
+					// During initial hold detection: if we took PATH B on first
+					// press (because kittyReleaseDetected was false), we need to
+					// count these repeats to confirm the hold. Update state so
+					// onSpaceReleaseDetected won't fire a false tap.
+					if (spaceDownTime && !holdConfirmed) {
+						kittyReleaseDetected = true; // Now we know it's Kitty
+						clearReleaseTimer(); // Cancel non-Kitty release timer
+
+						const now = Date.now();
+						spacePressCount++;
+						lastSpacePressTime = now;
+
+						// Enough repeats to confirm hold — enter warmup
+						if (spacePressCount >= REPEAT_CONFIRM_COUNT) {
+							holdConfirmed = true;
+							setVoiceState("warmup");
+							showWarmupWidget();
+
+							const alreadyElapsed = now - (spaceDownTime || now);
+							const remaining = Math.max(0, HOLD_THRESHOLD_MS - alreadyElapsed);
+
+							holdActivationTimer = setTimeout(() => {
+								holdActivationTimer = null;
+								if (voiceState === "warmup") {
+									clearWarmupWidget();
+									spaceConsumed = true;
+									recordingStartedAt = Date.now();
+									// Kitty repeat handler: clear release timer during
+									// async recording startup to prevent false stop
+									clearReleaseTimer();
+									voiceDebug("holdActivationTimer fired → starting recording (Kitty repeat path)");
+									startVoiceRecording("editor").then((ok) => {
+										if (!ok) {
+											spaceConsumed = false;
+											spaceDownTime = null;
+											spacePressCount = 0;
+											holdConfirmed = false;
+											setVoiceState("idle");
+										}
+									});
+								} else {
+									spaceDownTime = null;
+									spaceConsumed = false;
+									spacePressCount = 0;
+									holdConfirmed = false;
+								}
+							}, remaining);
+						}
+						return { consume: true };
+					}
+
 					return { consume: true };
 				}
 
-				if (isHolding) return { consume: true };
+				// === Key PRESS (not repeat, not release) ===
+				//
+				// TWO TERMINAL MODES:
+				//
+				// A) Kitty protocol (kittyReleaseDetected = true):
+				//    Press fires ONCE on key-down. Repeats come as isKeyRepeat().
+				//    Release comes as isKeyRelease(). NO timer-based release detection
+				//    needed — the true release event handles everything.
+				//    On first press: enter warmup immediately and start hold timer.
+				//    (No need to wait for repeats to confirm hold.)
+				//
+				// B) Non-Kitty (macOS Terminal, etc.):
+				//    Holding a key sends rapid "press" events (~30-90ms apart).
+				//    A single tap sends exactly ONE press. There is NO release event.
+				//    We detect "tap vs hold" by counting rapid presses, and detect
+				//    "release" when no press arrives within RELEASE_DETECT_MS.
+
+				// If finalizing → ignore
+				if (voiceState === "finalizing") {
+					return { consume: true };
+				}
+
+				// If already recording → just consume
+				if (voiceState === "recording") {
+					if (!kittyReleaseDetected) {
+						voiceDebug("SPACE during recording → re-arm release detect");
+						resetReleaseDetect();
+					}
+					return { consume: true };
+				}
+
+				// If already in warmup → consume
+				if (voiceState === "warmup") {
+					if (!kittyReleaseDetected) {
+						voiceDebug("SPACE during warmup → re-arm release detect");
+						resetReleaseDetect();
+					}
+					return { consume: true };
+				}
+
+				// If we've already consumed space for this hold → consume
+				// This handles the gap between holdActivationTimer firing and
+				// voiceState transitioning to "recording" (async gap)
+				if (spaceConsumed) {
+					if (!kittyReleaseDetected) {
+						voiceDebug("SPACE while spaceConsumed (async gap) → re-arm release detect");
+						resetReleaseDetect();
+					}
+					return { consume: true };
+				}
+
+				// ──────────────────────────────────────────────────────────
+				// PATH A: Kitty protocol — true key events available
+				// ──────────────────────────────────────────────────────────
+				if (kittyReleaseDetected) {
+					// First press → immediately enter warmup (release event
+					// will cancel if it was a tap)
+					if (voiceState === "idle") {
+						spaceDownTime = Date.now();
+						spaceConsumed = false;
+						spacePressCount = 1;
+						lastSpacePressTime = Date.now();
+						holdConfirmed = true; // Kitty: trust the press, release cancels
+
+						setVoiceState("warmup");
+						showWarmupWidget();
+
+						holdActivationTimer = setTimeout(() => {
+							holdActivationTimer = null;
+							if (voiceState === "warmup") {
+								clearWarmupWidget();
+								spaceConsumed = true;
+								recordingStartedAt = Date.now();
+								voiceDebug("holdActivationTimer fired → starting recording (Kitty path)");
+								startVoiceRecording("editor").then((ok) => {
+									if (!ok) {
+										spaceConsumed = false;
+										spaceDownTime = null;
+										spacePressCount = 0;
+										holdConfirmed = false;
+										setVoiceState("idle");
+									}
+								});
+							} else {
+								spaceDownTime = null;
+								spaceConsumed = false;
+								spacePressCount = 0;
+								holdConfirmed = false;
+							}
+						}, HOLD_THRESHOLD_MS);
+
+						return { consume: true };
+					}
+					return { consume: true };
+				}
+
+				// ──────────────────────────────────────────────────────────
+				// PATH B: Non-Kitty — gap-based hold/release detection
+				// ──────────────────────────────────────────────────────────
+				// Holding a key sends rapid press events.
+				// We count presses and measure gaps to detect holds vs taps.
+				if (spaceDownTime) {
+					const now = Date.now();
+					const gap = now - lastSpacePressTime;
+
+					if (gap < REPEAT_CONFIRM_MS) {
+						// Rapid press = user is holding
+						spacePressCount++;
+						lastSpacePressTime = now;
+
+						if (spacePressCount >= REPEAT_CONFIRM_COUNT && !holdConfirmed) {
+							holdConfirmed = true;
+							setVoiceState("warmup");
+							showWarmupWidget();
+
+							const alreadyElapsed = now - spaceDownTime;
+							const remaining = Math.max(0, HOLD_THRESHOLD_MS - alreadyElapsed);
+
+							holdActivationTimer = setTimeout(() => {
+								holdActivationTimer = null;
+								if (voiceState === "warmup") {
+									clearWarmupWidget();
+									spaceConsumed = true;
+									recordingStartedAt = Date.now();
+									// CRITICAL: Clear release timer and DO NOT re-arm.
+									// The next key-repeat press event will re-arm it.
+									// Without this, the async startVoiceRecording creates
+									// a gap where the release timer fires falsely.
+									clearReleaseTimer();
+									voiceDebug("holdActivationTimer fired → starting recording (non-Kitty)");
+									startVoiceRecording("editor").then((ok) => {
+										if (!ok) {
+											spaceConsumed = false;
+											spaceDownTime = null;
+											spacePressCount = 0;
+											holdConfirmed = false;
+											setVoiceState("idle");
+										}
+										// Do NOT re-arm release detect here!
+										// The next SPACE key-repeat event will do it.
+										// Re-arming here causes false stops because
+										// the timer fires during the async gap.
+									});
+								} else {
+									spaceDownTime = null;
+									spaceConsumed = false;
+									spacePressCount = 0;
+									holdConfirmed = false;
+								}
+							}, remaining);
+						}
+
+						resetReleaseDetect();
+						return { consume: true };
+					} else {
+						// Gap too large → previous hold abandoned, new tap
+						clearHoldTimer();
+						clearReleaseTimer();
+						clearWarmupWidget();
+						hideWidget();
+						if ((voiceState as VoiceState) === "warmup") setVoiceState("idle");
+						if (ctx?.hasUI) ctx.ui.setEditorText((ctx.ui.getEditorText() || "") + " ");
+						spaceDownTime = null;
+						spacePressCount = 0;
+						holdConfirmed = false;
+						spaceConsumed = false;
+						// Fall through to treat this as a new first press
+					}
+				}
+
+				// IDLE — first SPACE press (non-Kitty path)
+				// Do NOT enter warmup. Just record the time.
+				// Release-detect timer fires after RELEASE_DETECT_MS if no
+				// more presses arrive (= tap → type a space).
+				if (voiceState === "idle") {
+					spaceDownTime = Date.now();
+					spaceConsumed = false;
+					spacePressCount = 1;
+					lastSpacePressTime = Date.now();
+					holdConfirmed = false;
+
+					resetReleaseDetect();
+
+					return { consume: true };
+				}
+
+				if (spaceConsumed) return { consume: true };
 				return undefined;
 			}
 
-			// Hold Ctrl+Shift+B → talk → release → auto-btw
+			// ── Any other key pressed → cancel potential hold, type a space ──
+			if (spaceDownTime && !holdConfirmed && voiceState === "idle") {
+				clearHoldTimer();
+				clearReleaseTimer();
+				spaceDownTime = null;
+				spacePressCount = 0;
+				holdConfirmed = false;
+				spaceConsumed = false;
+				if (ctx?.hasUI) {
+					ctx.ui.setEditorText((ctx.ui.getEditorText() || "") + " ");
+				}
+				return undefined;
+			}
+
+			if (voiceState === "warmup" && holdConfirmed && !spaceConsumed) {
+				clearHoldTimer();
+				clearReleaseTimer();
+				clearWarmupWidget();
+				hideWidget();
+				setVoiceState("idle");
+				spaceDownTime = null;
+				spacePressCount = 0;
+				holdConfirmed = false;
+				spaceConsumed = false;
+				return undefined;
+			}
+
+			// ── Ctrl+Shift+B handling (BTW voice) — direct toggle, no hold threshold ──
 			if (matchesKey(data, "ctrl+shift+b")) {
 				if (isKeyRelease(data)) {
-					if (isHolding) {
-						isHolding = false;
+					kittyReleaseDetected = true;
+					if (voiceState === "recording" && currentTarget === "btw") {
 						stopVoiceRecording("btw");
 						return { consume: true };
 					}
@@ -507,25 +1771,23 @@ export default function (pi: ExtensionAPI) {
 				}
 
 				if (isKeyRepeat(data)) {
-					if (isHolding) return { consume: true };
+					if (voiceState === "recording" && currentTarget === "btw") return { consume: true };
 					return undefined;
 				}
 
-				if (voiceState === "idle" && !isHolding) {
-					isHolding = true;
-					startVoiceRecording("btw").then((ok) => {
-						if (!ok) isHolding = false;
-					});
+				if (voiceState === "recording" && currentTarget === "btw") {
+					stopVoiceRecording("btw");
 					return { consume: true };
 				}
 
-				if (isHolding) return { consume: true };
-				return undefined;
-			}
+				if (voiceState === "idle") {
+					startVoiceRecording("btw");
+					return { consume: true };
+				}
 
-			// Any other key while holding = cancel
-			if (isHolding && voiceState === "recording") {
-				// Don't cancel on modifier-only events
+				if (voiceState === "recording" || voiceState === "finalizing" || voiceState === "warmup") {
+					return { consume: true };
+				}
 				return undefined;
 			}
 
@@ -536,7 +1798,6 @@ export default function (pi: ExtensionAPI) {
 	// ─── BTW: Side Conversations ─────────────────────────────────────────────
 
 	function buildBtwContext(): string {
-		// Build context from main session + btw thread
 		const systemPrompt = ctx?.getSystemPrompt() ?? "";
 		let btwContext = "You are a helpful side-channel assistant. ";
 		btwContext += "The user is having a parallel conversation while their main Pi agent works. ";
@@ -570,13 +1831,12 @@ export default function (pi: ExtensionAPI) {
 			"",
 		];
 
-		// Show last exchange
-		lines.push(`  Q: ${last.question.slice(0, 100)}${last.question.length > 100 ? "..." : ""}`);
+		lines.push(`  Q: ${last.question.slice(0, 100)}${last.question.length > 100 ? "…" : ""}`);
 		const answerLines = last.answer.split("\n");
 		for (const line of answerLines.slice(0, 8)) {
 			lines.push(`  ${line}`);
 		}
-		if (answerLines.length > 8) lines.push("  ...");
+		if (answerLines.length > 8) lines.push("  …");
 
 		lines.push("");
 		lines.push("  /btw:clear to dismiss | /btw:inject to send to agent");
@@ -589,19 +1849,16 @@ export default function (pi: ExtensionAPI) {
 
 		btwWidgetVisible = true;
 
-		// Show thinking state
 		ctx.ui.setWidget("btw", [
 			" BTW",
 			"",
-			`  Q: ${message.slice(0, 100)}${message.length > 100 ? "..." : ""}`,
+			`  Q: ${message.slice(0, 100)}${message.length > 100 ? "…" : ""}`,
 			"",
-			"  Thinking...",
+			"  Thinking…",
 		], { placement: "aboveEditor" });
 
-		// Build context for LLM
 		const btwContext = buildBtwContext();
 
-		// Use the model registry to get current model
 		const model = ctx.model;
 		if (!model) {
 			const exchange: BtwExchange = {
@@ -616,7 +1873,6 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		try {
-			// Stream the response
 			let answer = "";
 			const eventStream = streamSimple(model, {
 				systemPrompt: btwContext,
@@ -633,7 +1889,6 @@ export default function (pi: ExtensionAPI) {
 					break;
 				}
 
-				// Update widget with streaming response
 				const displayLines: string[] = [
 					` BTW`,
 					"",
@@ -657,7 +1912,6 @@ export default function (pi: ExtensionAPI) {
 			pi.appendEntry("btw", exchange);
 			updateBtwWidget();
 		} catch (err: any) {
-			// Fallback: send as a follow-up message to the main agent
 			const exchange: BtwExchange = {
 				question: message,
 				answer: `(BTW streaming failed: ${err.message}. Falling back to sendUserMessage.)`,
@@ -667,7 +1921,6 @@ export default function (pi: ExtensionAPI) {
 			pi.appendEntry("btw", exchange);
 			updateBtwWidget();
 
-			// Use sendUserMessage as alternative
 			pi.sendUserMessage(
 				`[BTW question]: ${message}`,
 				{ deliverAs: "followUp" },
@@ -677,7 +1930,6 @@ export default function (pi: ExtensionAPI) {
 
 	// ─── Shortcuts ───────────────────────────────────────────────────────────
 
-	// Ctrl+Shift+V = toggle voice (fallback for non-Kitty terminals)
 	pi.registerShortcut("ctrl+shift+v", {
 		description: "Toggle voice recording (start/stop)",
 		handler: async (handlerCtx) => {
@@ -687,9 +1939,15 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			if (voiceState === "idle") {
-				await startVoiceRecording("editor");
+				spaceConsumed = true;
+				const ok = await startVoiceRecording("editor");
+				if (!ok) {
+					spaceConsumed = false;
+				}
 			} else if (voiceState === "recording") {
-				isHolding = false;
+				spaceConsumed = false;
+				spaceDownTime = null;
+				clearHoldTimer();
 				await stopVoiceRecording("editor");
 			}
 		},
@@ -705,12 +1963,39 @@ export default function (pi: ExtensionAPI) {
 		configSource = loaded.source;
 		updateSocketPath(config, currentCwd);
 
-		// No auto-popup on startup. Users run `/voice setup` to configure.
-		// Only activate voice features if setup has been completed previously.
+		// Auto-capture DEEPGRAM_API_KEY from env into config
+		if (process.env.DEEPGRAM_API_KEY && !config.deepgramApiKey) {
+			config.deepgramApiKey = process.env.DEEPGRAM_API_KEY;
+			if (configSource !== "default") {
+				saveConfig(config, config.scope, currentCwd);
+			}
+		}
+
+		// Try to load DEEPGRAM_API_KEY from shell if not available
+		if (!resolveDeepgramApiKey(config) && config.backend === "deepgram") {
+			try {
+				const result = spawnSync("zsh", ["-ic", "echo $DEEPGRAM_API_KEY"], {
+					stdio: ["pipe", "pipe", "pipe"],
+					timeout: 3000,
+					env: { ...process.env, HOME: os.homedir() },
+				});
+				const shellKey = result.stdout?.toString().trim();
+				if (shellKey && shellKey.length > 5) {
+					config.deepgramApiKey = shellKey;
+					process.env.DEEPGRAM_API_KEY = shellKey;
+					if (configSource !== "default") {
+						saveConfig(config, config.scope, currentCwd);
+					}
+				}
+			} catch {}
+		}
+
 		if (config.enabled && config.onboarding.completed) {
 			updateVoiceStatus();
 			setupHoldToTalk();
-			ensureDaemon(config).catch(() => {});
+			if (!isDeepgramStreaming(config)) {
+				ensureDaemon(config).catch(() => {});
+			}
 		}
 	});
 
@@ -764,8 +2049,19 @@ export default function (pi: ExtensionAPI) {
 				config.enabled = true;
 				updateVoiceStatus();
 				setupHoldToTalk();
-				ensureDaemon(config).catch(() => {});
-				cmdCtx.ui.notify("Voice enabled.\n  Hold SPACE (empty editor) → release to transcribe\n  Ctrl+Shift+V → toggle recording on/off\n  Auto-stops after 30s", "info");
+				if (!isDeepgramStreaming(config)) {
+					ensureDaemon(config).catch(() => {});
+				}
+				const mode = isDeepgramStreaming(config) ? "Deepgram streaming" : config.backend;
+				cmdCtx.ui.notify([
+					`Voice enabled (${mode}).`,
+					"",
+					"  Hold SPACE (2s) → release to transcribe",
+					"  Ctrl+Shift+V → toggle recording on/off",
+					"  Quick SPACE tap → types a space (no voice)",
+					"",
+					"  Live transcription shown while speaking",
+				].join("\n"), "info");
 				return;
 			}
 
@@ -779,11 +2075,15 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (sub === "stop") {
-				// Emergency stop — cancel any active recording
 				if (voiceState === "recording") {
-					isHolding = false;
 					await stopVoiceRecording("editor");
 					cmdCtx.ui.notify("Recording stopped and transcribed.", "info");
+				} else if (voiceState === "warmup") {
+					clearHoldTimer();
+					clearWarmupWidget();
+					hideWidget();
+					setVoiceState("idle");
+					cmdCtx.ui.notify("Warmup cancelled.", "info");
 				} else {
 					cmdCtx.ui.notify("No recording in progress.", "info");
 				}
@@ -791,8 +2091,10 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (sub === "test") {
-				cmdCtx.ui.notify("Testing voice setup...", "info");
+				cmdCtx.ui.notify("Testing voice setup…", "info");
 				const diagnostics = scanEnvironment(TRANSCRIBE_SCRIPT);
+				const dgKey = resolveDeepgramApiKey(config);
+				const streaming = isDeepgramStreaming(config);
 				const daemonUp = await isDaemonRunning();
 				const provisioningPlan = buildProvisioningPlan(config, diagnostics);
 				const selectedBackend = diagnostics.backends.find((backend) => backend.name === config.backend);
@@ -805,10 +2107,16 @@ export default function (pi: ExtensionAPI) {
 					`  model: ${config.model}`,
 					`  model status: ${modelReadiness}`,
 					`  language: ${config.language}`,
+					`  streaming: ${streaming ? "YES (Deepgram WS)" : "NO (batch)"}`,
+					`  DEEPGRAM_API_KEY: ${dgKey ? "set (" + dgKey.slice(0, 8) + "…)" : "NOT SET"}`,
 					`  onboarding: ${config.onboarding.completed ? "complete" : "incomplete"}`,
 					`  python3: ${diagnostics.hasPython ? "OK" : "missing"}`,
 					`  sox/rec: ${diagnostics.hasSox ? "OK" : "missing"}`,
 					`  daemon: ${daemonUp ? "running" : "not running"}`,
+					`  state: ${voiceState}`,
+					`  hold threshold: ${HOLD_THRESHOLD_MS}ms`,
+					`  release detect: ${RELEASE_DETECT_MS}ms`,
+					`  kitty protocol: ${kittyReleaseDetected ? "detected" : "not detected"}`,
 				];
 
 				if (diagnostics.hasSox) {
@@ -826,11 +2134,10 @@ export default function (pi: ExtensionAPI) {
 					}
 				}
 
-				lines.push("", "Suggested commands:");
-				lines.push(...(provisioningPlan.commands.length > 0 ? provisioningPlan.commands.map((command) => `  - ${command}`) : ["  - none"]));
-				if (provisioningPlan.manualSteps.length > 0) {
-					lines.push("", "Manual steps:");
-					lines.push(...provisioningPlan.manualSteps.map((step) => `  - ${step}`));
+				if (!dgKey && config.backend === "deepgram") {
+					lines.push("");
+					lines.push("⚠️  DEEPGRAM_API_KEY not set! Add to ~/.zshrc or ~/.env.secrets");
+					lines.push("   export DEEPGRAM_API_KEY=your_key_here");
 				}
 
 				cmdCtx.ui.notify(lines.join("\n"), provisioningPlan.ready ? "info" : "warning");
@@ -847,28 +2154,31 @@ export default function (pi: ExtensionAPI) {
 				const diagnostics = scanEnvironment(TRANSCRIBE_SCRIPT);
 				const selectedBackend = diagnostics.backends.find((backend) => backend.name === config.backend);
 				const modelReadiness = getModelReadiness(selectedBackend, config.model);
+				const streaming = isDeepgramStreaming(config);
 
 				cmdCtx.ui.notify([
 					`Voice config:`,
-					`  enabled:  ${config.enabled}`,
-					`  mode:     ${config.mode}`,
-					`  scope:    ${config.scope}`,
-					`  backend:  ${config.backend}`,
-					`  model:    ${config.model}`,
-					`  model status: ${modelReadiness}`,
-					`  language: ${config.language}`,
-					`  state:    ${voiceState}`,
-					`  setup:    ${config.onboarding.completed ? `complete (${config.onboarding.source ?? "unknown"})` : "incomplete"}`,
-					`  socket:   ${activeSocketPath}`,
-					`  daemon:   ${daemonUp ? "running" : "stopped"}${daemonInfo}`,
-					`  hold-key: SPACE (editor empty) or Ctrl+Shift+V (toggle)`,
-					`  btw-key:  Ctrl+Shift+B (hold to record → auto-btw)`,
+					`  enabled:    ${config.enabled}`,
+					`  mode:       ${config.mode}`,
+					`  scope:      ${config.scope}`,
+					`  backend:    ${config.backend}`,
+					`  model:      ${config.model}`,
+					`  model stat: ${modelReadiness}`,
+					`  language:   ${config.language}`,
+					`  streaming:  ${streaming ? "YES (Deepgram WebSocket)" : "NO (batch)"}`,
+					`  state:      ${voiceState}`,
+					`  setup:      ${config.onboarding.completed ? `complete (${config.onboarding.source ?? "unknown"})` : "incomplete"}`,
+					`  socket:     ${activeSocketPath}`,
+					`  daemon:     ${daemonUp ? "running" : "stopped"}${daemonInfo}`,
+					`  hold-key:   SPACE (hold ≥${HOLD_THRESHOLD_MS}ms) or Ctrl+Shift+V (toggle)`,
+					`  btw-key:    Ctrl+Shift+B (hold to record → auto-btw)`,
+					`  kitty:      ${kittyReleaseDetected ? "yes" : "no"}`,
 				].join("\n"), "info");
 				return;
 			}
 
 			if (sub === "daemon" || sub === "daemon start") {
-				cmdCtx.ui.notify("Starting STT daemon...", "info");
+				cmdCtx.ui.notify("Starting STT daemon…", "info");
 				const ok = await ensureDaemon(config);
 				cmdCtx.ui.notify(ok ? "Daemon started." : "Failed to start daemon.", ok ? "info" : "error");
 				return;
@@ -905,7 +2215,6 @@ export default function (pi: ExtensionAPI) {
 					cmdCtx.ui.notify("Voice setup cancelled.", "warning");
 					return;
 				}
-
 				await finalizeAndSaveSetup(cmdCtx, result.config, result.selectedScope, result.summaryLines, "setup-command");
 				return;
 			}
@@ -1013,7 +2322,7 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// ─── Dedicated setup command (discoverable in /command list) ──────────────
+	// ─── Dedicated setup command ─────────────────────────────────────────────
 
 	pi.registerCommand("voice-setup", {
 		description: "Configure voice input — select backend, model, and language",
@@ -1081,7 +2390,6 @@ export default function (pi: ExtensionAPI) {
 
 			pi.sendUserMessage(content, { deliverAs: "followUp" });
 
-			// Clear after injection
 			btwThread = [];
 			btwWidgetVisible = false;
 			cmdCtx.ui.setWidget("btw", undefined);
@@ -1106,14 +2414,13 @@ export default function (pi: ExtensionAPI) {
 				threadText += `Q: ${ex.question}\nA: ${ex.answer}\n\n`;
 			}
 
-			// Ask the model to summarize
 			const model = ctx.model;
 			if (!model) {
 				cmdCtx.ui.notify("No model available for summarization.", "error");
 				return;
 			}
 
-			cmdCtx.ui.notify("Summarizing BTW thread...", "info");
+			cmdCtx.ui.notify("Summarizing BTW thread…", "info");
 
 			try {
 				let summary = "";
