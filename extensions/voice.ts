@@ -886,7 +886,8 @@ export default function (pi: ExtensionAPI) {
 				break;
 			}
 			case "finalizing":
-				ctx.ui.setStatus("voice", "STT...");
+				// Don't show "STT..." — live transcript handles it
+				ctx.ui.setStatus("voice", "");
 				break;
 		}
 	}
@@ -1260,31 +1261,9 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 
-				// Show result inline in widget briefly, then clear
-				if (ctx?.hasUI) {
-					const maxPreview = 60;
-					const preview = fullText.length > maxPreview ? fullText.slice(0, maxPreview) + "..." : fullText;
-					ctx.ui.setWidget("voice-recording", (tui, theme) => {
-						return {
-							invalidate() {},
-							render(width: number): string[] {
-								const maxW = Math.max(0, Math.min(width - 4, 56));
-								const check = theme.fg("accent", "✓");
-								// Truncate preview to fit within maxW
-								const avail = maxW - 4; // "  ✓ "
-								const truncPrev = preview.length > avail ? preview.slice(0, avail - 3) + "..." : preview;
-								const content = ` ${check} ${theme.fg("text", truncPrev)}`;
-								const stripped = content.replace(/\x1b\[[^m]*m/g, "").length;
-								const pad = Math.max(0, maxW - stripped);
-								const border = theme.fg("border", "─".repeat(maxW));
-								return [border, content + " ".repeat(pad), border];
-							},
-						};
-					}, { placement: "aboveEditor" });
-
-					// Clear widget after brief display
-					setTimeout(() => hideWidget(), 1500);
-				}
+				// Live transcript already showed text in editor — just finalize quietly.
+				// No check mark widget, no "Processing" animation, no STT notification needed.
+				hideWidget();
 
 				if (target === "btw") {
 					handleBtw(fullText);
@@ -1308,10 +1287,7 @@ export default function (pi: ExtensionAPI) {
 						const prefix = editorTextBeforeVoice ? editorTextBeforeVoice + " " : "";
 						ctx.ui.setEditorText(prefix + processedText);
 						const elapsed = ((Date.now() - recordingStart) / 1000).toFixed(1);
-						ctx.ui.notify(
-							`STT (${elapsed}s): ${fullText.slice(0, 80)}${fullText.length > 80 ? "..." : ""}`,
-							"info",
-						);
+						// No STT notification — live transcript already visible in editor
 						addToHistory(fullText, parseFloat(elapsed), target);
 					}
 				}
@@ -1399,7 +1375,9 @@ export default function (pi: ExtensionAPI) {
 		if (activeSession) {
 			setVoiceState("finalizing");
 			clearRecordingAnimTimer();
-			showFinalizingWidget();
+			// Don't show "Processing..." widget — live transcript is already in the editor.
+			// Just stop the recording widget and finalize silently.
+			hideWidget();
 			stopStreamingSession(activeSession);
 			return;
 		}
