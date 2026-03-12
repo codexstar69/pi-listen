@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "baseUrl": "..",
+    "paths": {
+      "@mariozechner/*": ["node_modules/@mariozechner/*"]
+    }
+  },
+  "include": ["extensions/**/*.ts"]
+}

@@ -1,0 +1,39 @@
+{
+  "name": "pi-voice",
+  "version": "1.0.0",
+  "description": "Voice input, first-run onboarding, and side-channel BTW conversations for Pi",
+  "type": "module",
+  "keywords": ["pi-package", "pi", "pi-extension", "voice", "stt"],
+  "license": "MIT",
+  "scripts": {
+    "typecheck": "bunx tsc -p tsconfig.json",
+    "test": "bun test",
+    "check": "bun run typecheck && bun run test && python3 -m py_compile daemon.py transcribe.py",
+    "release:dry": "bun run check && bun publish --dry-run",
+    "release": "bun run check && bun publish --access public"
+  },
+  "homepage": "https://github.com/codexstar69/pi-voice",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/codexstar69/pi-voice.git"
+  },
+  "bugs": {
+    "url": "https://github.com/codexstar69/pi-voice/issues"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*"
+  },
+  "pi": {
+    "extensions": ["./extensions/voice.ts"]
+  },
+  "files": [
+    "extensions",
+    "docs",
+    "README.md",
+    "transcribe.py",
+    "daemon.py",
+    "package.json"
+  ]
+}
