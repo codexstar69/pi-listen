@@ -1031,19 +1031,17 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function buildPremiumWave(frame: number, width: number, level: number): string {
-		const len = Math.max(6, Math.min(width, 14));
-		const half = Math.max(3, Math.floor(len / 2));
-		const chars = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+		const len = Math.max(6, Math.min(width, 10));
+		const chars = ["·", "▁", "▂", "▃", "▄", "▅", "▆"];
 		const values: string[] = [];
-		for (let i = 0; i < half; i++) {
-			const centerWeight = 1 - (Math.abs(i - (half - 1)) / half) * 0.75;
-			const motion = 0.14 + ((Math.sin(frame * 0.38 + i * 0.72) + 1) / 2) * 0.22;
-			const amp = Math.max(0.04, Math.min(1, level * centerWeight + motion));
+		for (let i = 0; i < len; i++) {
+			const centerBias = 1 - Math.abs(i - (len - 1) / 2) / len;
+			const motion = (Math.sin(frame * 0.42 + i * 0.95) + 1) / 2;
+			const amp = Math.max(0.06, Math.min(1, level * (0.45 + centerBias * 0.55) + motion * 0.18));
 			const idx = Math.max(0, Math.min(chars.length - 1, Math.round(amp * (chars.length - 1))));
 			values.push(chars[idx]);
 		}
-		const mirrored = values.concat([...values].reverse().slice(len % 2 === 0 ? 0 : 1));
-		return mirrored.slice(0, len).join("");
+		return values.join("");
 	}
 
 	function showWarmupWidget() {
@@ -1051,8 +1049,12 @@ export default function (pi: ExtensionAPI) {
 
 		const startTime = Date.now();
 		const useCat = config.catAnimation !== false;
-		const wakeFaces = ["( -.- )", "( .-. )", "( o.o )", "( O.O )"];
-		const ears = "/\\_/\\";
+		const catFrames = [
+			"/ᐠ - ˕ -マ",
+			"/ᐠ . ˕ .マ",
+			"/ᐠ o ˕ oマ",
+			"/ᐠ◕ ˕ ◕マ",
+		];
 
 		const renderWarmup = () => {
 			if (!ctx?.hasUI) return;
@@ -1066,19 +1068,19 @@ export default function (pi: ExtensionAPI) {
 					render(width: number): string[] {
 						const maxW = Math.max(0, Math.min(width - 4, 62));
 						const border = theme.fg("border", "─".repeat(maxW));
-						const meterLen = Math.max(8, Math.min(16, maxW - 28));
+						const meterLen = Math.max(6, Math.min(12, maxW - 34));
 						const filled = Math.round(progress * meterLen);
-						const meter = theme.fg("accent", "●".repeat(filled)) + theme.fg("muted", "·".repeat(meterLen - filled));
-						const hint = remainingSecs > 1 ? `${remainingSecs}s` : "ready";
+						const meter = theme.fg("accent", "▬".repeat(filled)) + theme.fg("muted", "─".repeat(meterLen - filled));
+						const hint = theme.fg("dim", remainingSecs > 1 ? `${remainingSecs}s` : "ready");
 
 						if (!useCat) {
-							const content = ` ${theme.fg("accent", "MIC")} ${meter} ${theme.fg("dim", hint)}`;
+							const content = ` ${theme.fg("accent", "MIC")} ${meter} ${hint}`;
 							const stripped = stripAnsi(content).length;
 							return [border, content + " ".repeat(Math.max(0, maxW - stripped)), border];
 						}
 
-						const face = wakeFaces[Math.min(wakeFaces.length - 1, Math.floor(progress * wakeFaces.length))];
-						const content = ` ${theme.fg("accent", ears)} ${theme.fg("text", face)}  ${meter} ${theme.fg("dim", hint)}`;
+						const cat = catFrames[Math.min(catFrames.length - 1, Math.floor(progress * catFrames.length))];
+						const content = ` ${theme.fg("muted", "○")} ${theme.fg("accent", cat)} ${theme.fg("accent", meter)} ${hint}`;
 						const stripped = stripAnsi(content).length;
 						return [border, content + " ".repeat(Math.max(0, maxW - stripped)), border];
 					},
@@ -1087,7 +1089,7 @@ export default function (pi: ExtensionAPI) {
 		};
 
 		renderWarmup();
-		warmupWidgetTimer = setInterval(renderWarmup, 80);
+		warmupWidgetTimer = setInterval(renderWarmup, 90);
 	}
 
 	// ─── Recording Widget ───────────────────────────────────────────────────
@@ -1124,10 +1126,10 @@ export default function (pi: ExtensionAPI) {
 					const border = theme.fg("border", "─".repeat(maxW));
 					const dotPulse = Math.sin(Date.now() / 420) > -0.15;
 					const dot = dotPulse ? theme.fg("error", "●") : theme.fg("muted", "○");
-					const wave = buildPremiumWave(frame, Math.max(8, Math.min(14, maxW - 34)), audioLevelSmoothed);
+					const wave = buildPremiumWave(frame, Math.max(8, Math.min(10, maxW - 36)), audioLevelSmoothed);
 					const hint = target === "btw"
 						? theme.fg("dim", "Ctrl+Shift+B stop")
-						: theme.fg("dim", "ESC cancel");
+						: theme.fg("dim", "Release SPACE");
 
 					if (!useCat) {
 						const label = target === "btw" ? theme.fg("accent", "BTW") : theme.fg("accent", "REC");
@@ -1136,15 +1138,19 @@ export default function (pi: ExtensionAPI) {
 						return [border, content + " ".repeat(Math.max(0, maxW - stripped)), border];
 					}
 
-					const blinkPhase = Math.floor(Date.now() / 140) % 34;
+					const blinkPhase = Math.floor(Date.now() / 160) % 30;
 					const blink = blinkPhase === 0 || blinkPhase === 1;
-					const loud = audioLevelSmoothed > 0.45;
+					const loud = audioLevelSmoothed > 0.42;
 					const mid = audioLevelSmoothed > 0.14;
-					const ears = "/\\_/\\";
-					const face = blink ? "( -.- )" : loud ? "( O.O )" : mid ? "( o.o )" : "( ･.･ )";
-					const tail = loud ? ["~", "^", "~", "^"][frame % 4] : ["~", "˷", "~", "˷"][frame % 4];
-
-					const content = ` ${dot} ${theme.fg("accent", ears)} ${theme.fg("text", face)}${theme.fg("muted", tail)}  ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`;
+					const cat = blink
+						? "/ᐠ - ˕ -マ"
+						: loud
+							? "/ᐠ◕ ˕ ◕マ"
+							: mid
+								? "/ᐠo ˕ oマ"
+								: "/ᐠ . ˕ .マ";
+					const tail = loud ? ["~", "˷", "~", "˷"][frame % 4] : ["~", " ", "~", " "][frame % 4];
+					const content = ` ${dot} ${theme.fg("accent", cat)}${theme.fg("muted", tail)}  ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`;
 					const stripped = stripAnsi(content).length;
 					return [border, content + " ".repeat(Math.max(0, maxW - stripped)), border];
 				},
