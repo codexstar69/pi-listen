@@ -645,6 +645,197 @@ export default function (pi: ExtensionAPI) {
 	let btwThread: BtwExchange[] = [];
 	let btwWidgetVisible = false;
 
+	// ─── Recording History ───────────────────────────────────────────────────
+
+	interface RecordingHistoryEntry {
+		text: string;
+		timestamp: number;
+		duration: number;
+		target: "editor" | "btw";
+		mode: "hold" | "toggle" | "dictate";
+	}
+
+	const recordingHistory: RecordingHistoryEntry[] = [];
+	const MAX_HISTORY = 50;
+
+	function addToHistory(text: string, duration: number, target: "editor" | "btw", mode: "hold" | "toggle" | "dictate" = "hold") {
+		recordingHistory.unshift({ text, timestamp: Date.now(), duration, target, mode });
+		if (recordingHistory.length > MAX_HISTORY) recordingHistory.pop();
+	}
+
+	// ─── Continuous Dictation Mode ───────────────────────────────────────────
+
+	let dictationMode = false;
+	let dictationText = "";
+
+	// ─── Voice Command Detection ─────────────────────────────────────────────
+
+	const VOICE_COMMAND_PREFIXES = ["hey pi", "pi ", "hey pie", "run ", "execute ", "commit ", "search for ", "open ", "go to "];
+	const VOICE_COMMAND_MAP: Record<string, (args: string) => string> = {
+		"run tests": () => "bun run test",
+		"run test": () => "bun run test",
+		"run the tests": () => "bun run test",
+		"run all tests": () => "bun run test",
+		"run typecheck": () => "bun run typecheck",
+		"type check": () => "bun run typecheck",
+		"run lint": () => "bun run lint",
+		"lint this": () => "bun run lint",
+		"commit this": () => "git add -A && git commit",
+		"commit": () => "git add -A && git commit",
+		"git status": () => "git status",
+		"git diff": () => "git diff",
+		"undo": () => "__UNDO__",
+		"undo that": () => "__UNDO__",
+		"clear": () => "__CLEAR__",
+		"clear all": () => "__CLEAR__",
+		"select all": () => "__SELECT_ALL__",
+		"new line": () => "__NEWLINE__",
+		"submit": () => "__SUBMIT__",
+		"send": () => "__SUBMIT__",
+		"send it": () => "__SUBMIT__",
+	};
+
+	function detectVoiceCommand(text: string): { isCommand: boolean; action?: string; args?: string } {
+		const lower = text.toLowerCase().trim();
+
+		// Direct command matches
+		for (const [trigger, handler] of Object.entries(VOICE_COMMAND_MAP)) {
+			if (lower === trigger || lower.replace(/[.,!?]/g, "") === trigger) {
+				return { isCommand: true, action: handler("") };
+			}
+		}
+
+		// Prefix-based commands: "hey pi, run the tests"
+		for (const prefix of VOICE_COMMAND_PREFIXES) {
+			if (lower.startsWith(prefix)) {
+				const rest = lower.slice(prefix.length).trim().replace(/[.,!?]/g, "");
+				for (const [trigger, handler] of Object.entries(VOICE_COMMAND_MAP)) {
+					if (rest === trigger || rest.startsWith(trigger)) {
+						return { isCommand: true, action: handler(rest.slice(trigger.length).trim()) };
+					}
+				}
+				// "hey pi, search for X" → search
+				if (rest.startsWith("search for ") || rest.startsWith("search ")) {
+					const query = rest.replace(/^search (for )?/, "").trim();
+					return { isCommand: true, action: `__SEARCH__${query}` };
+				}
+				// Generic: "hey pi, <anything>" → send as user message
+				if (prefix === "hey pi" || prefix === "hey pie" || prefix === "pi ") {
+					return { isCommand: true, action: `__MESSAGE__${rest}` };
+				}
+			}
+		}
+
+		// Voice shortcuts embedded in dictation
+		if (lower === "new line" || lower === "newline") return { isCommand: true, action: "__NEWLINE__" };
+		if (lower === "submit" || lower === "send it" || lower === "send") return { isCommand: true, action: "__SUBMIT__" };
+
+		return { isCommand: false };
+	}
+
+	function executeVoiceCommand(action: string): boolean {
+		if (!ctx?.hasUI) return false;
+
+		if (action === "__UNDO__") {
+			// Remove last word from editor
+			const text = ctx.ui.getEditorText() || "";
+			const words = text.trim().split(/\s+/);
+			words.pop();
+			ctx.ui.setEditorText(words.join(" ") + (words.length ? " " : ""));
+			ctx.ui.notify("↩ Undo last word", "info");
+			return true;
+		}
+
+		if (action === "__CLEAR__") {
+			ctx.ui.setEditorText("");
+			ctx.ui.notify("Cleared editor", "info");
+			return true;
+		}
+
+		if (action === "__SELECT_ALL__") {
+			// Can't truly select-all in the editor, but useful feedback
+			ctx.ui.notify("(Select all not available in terminal editor)", "info");
+			return true;
+		}
+
+		if (action === "__NEWLINE__") {
+			const text = ctx.ui.getEditorText() || "";
+			ctx.ui.setEditorText(text + "\n");
+			return true;
+		}
+
+		if (action === "__SUBMIT__") {
+			// Simulate Enter — send the editor text as a message
+			const text = (ctx.ui.getEditorText() || "").trim();
+			if (text) {
+				pi.sendUserMessage(text);
+				ctx.ui.setEditorText("");
+				ctx.ui.notify("✓ Submitted via voice", "info");
+			}
+			return true;
+		}
+
+		if (action.startsWith("__SEARCH__")) {
+			const query = action.slice("__SEARCH__".length);
+			ctx.ui.setEditorText(`search for ${query}`);
+			ctx.ui.notify(`🔍 Search: ${query}`, "info");
+			return true;
+		}
+
+		if (action.startsWith("__MESSAGE__")) {
+			const msg = action.slice("__MESSAGE__".length);
+			pi.sendUserMessage(msg);
+			ctx.ui.setEditorText("");
+			ctx.ui.notify("✓ Sent to agent via voice", "info");
+			return true;
+		}
+
+		// Shell command — put in editor for user to review
+		ctx.ui.setEditorText(action);
+		ctx.ui.notify(`🎤 Voice command: ${action}`, "info");
+		return true;
+	}
+
+	// ─── Voice Shortcut Processing ───────────────────────────────────────────
+	// Processes text for inline shortcuts like "new line", "period", etc.
+
+	function processVoiceShortcuts(text: string): string {
+		return text
+			.replace(/\bnew line\b/gi, "\n")
+			.replace(/\bnewline\b/gi, "\n")
+			.replace(/\bperiod\b/gi, ".")
+			.replace(/\bcomma\b/gi, ",")
+			.replace(/\bquestion mark\b/gi, "?")
+			.replace(/\bexclamation mark\b/gi, "!")
+			.replace(/\bcolon\b/gi, ":")
+			.replace(/\bsemicolon\b/gi, ";")
+			.replace(/\bopen parenthesis\b/gi, "(")
+			.replace(/\bclose parenthesis\b/gi, ")")
+			.replace(/\bopen bracket\b/gi, "[")
+			.replace(/\bclose bracket\b/gi, "]")
+			.replace(/\bopen brace\b/gi, "{")
+			.replace(/\bclose brace\b/gi, "}")
+			.replace(/\bbackslash\b/gi, "\\")
+			.replace(/\bforward slash\b/gi, "/");
+	}
+
+	// ─── Sound Feedback ──────────────────────────────────────────────────────
+
+	function playSound(type: "start" | "stop" | "error") {
+		// Use macOS system sounds — lightweight, no dependencies
+		try {
+			const soundMap: Record<string, string> = {
+				start: "/System/Library/Sounds/Tink.aiff",
+				stop: "/System/Library/Sounds/Pop.aiff",
+				error: "/System/Library/Sounds/Basso.aiff",
+			};
+			const soundFile = soundMap[type];
+			if (soundFile && fs.existsSync(soundFile)) {
+				spawn("afplay", [soundFile], { stdio: "ignore", detached: true }).unref();
+			}
+		} catch {}
+	}
+
 	// ─── Voice UI ────────────────────────────────────────────────────────────
 
 	function updateVoiceStatus() {
@@ -755,6 +946,8 @@ export default function (pi: ExtensionAPI) {
 		holdConfirmed = false;
 		retryAttempts = 0;
 		editorTextBeforeVoice = "";
+		dictationMode = false;
+		dictationText = "";
 		hideWidget();
 		setVoiceState("idle");
 	}
@@ -1044,6 +1237,7 @@ export default function (pi: ExtensionAPI) {
 				if (!fullText.trim()) {
 					// ── DISTINGUISH SILENCE VS NO SPEECH ──
 					hideWidget();
+					playSound("error");
 					if (!meta.hadAudio) {
 						ctx?.ui.notify("Microphone captured no audio. Check mic permissions.", "error");
 					} else if (!meta.hadSpeech) {
@@ -1085,17 +1279,32 @@ export default function (pi: ExtensionAPI) {
 					handleBtw(fullText);
 				} else {
 					if (ctx?.hasUI) {
+						// Check for voice commands first
+						const cmd = detectVoiceCommand(fullText);
+						if (cmd.isCommand && cmd.action) {
+							executeVoiceCommand(cmd.action);
+							playSound("stop");
+							addToHistory(fullText, (Date.now() - recordingStart) / 1000, target);
+							setVoiceState("idle");
+							return;
+						}
+
+						// Process voice shortcuts (new line, period, etc.)
+						const processedText = processVoiceShortcuts(fullText);
+
 						// The editor already has the live transcript via updateLiveTranscriptWidget.
 						// Just set the final text (with original prefix) — don't append again.
 						const prefix = editorTextBeforeVoice ? editorTextBeforeVoice + " " : "";
-						ctx.ui.setEditorText(prefix + fullText);
+						ctx.ui.setEditorText(prefix + processedText);
 						const elapsed = ((Date.now() - recordingStart) / 1000).toFixed(1);
 						ctx.ui.notify(
 							`STT (${elapsed}s): ${fullText.slice(0, 80)}${fullText.length > 80 ? "..." : ""}`,
 							"info",
 						);
+						addToHistory(fullText, parseFloat(elapsed), target);
 					}
 				}
+				playSound("stop");
 				setVoiceState("idle");
 			},
 			onError: (err) => {
@@ -1143,6 +1352,7 @@ export default function (pi: ExtensionAPI) {
 		}, 1000);
 
 		showRecordingWidget(target);
+		playSound("start");
 		return true;
 	}
 
@@ -1166,6 +1376,7 @@ export default function (pi: ExtensionAPI) {
 		}, 1000);
 
 		showRecordingWidget(target);
+		playSound("start");
 		return true;
 	}
 
@@ -1778,8 +1989,33 @@ export default function (pi: ExtensionAPI) {
 			btwContext += `Main session context (for reference):\n${systemPrompt.slice(0, 2000)}\n\n`;
 		}
 
+		// ── Context-aware BTW: gather current workspace info ──
+		try {
+			const cwd = currentCwd || process.cwd();
+			// Current directory
+			btwContext += `Working directory: ${cwd}\n`;
+
+			// Recent git diff (last changes)
+			const diffResult = spawnSync("git", ["diff", "--stat", "HEAD"], {
+				cwd, stdio: ["pipe", "pipe", "pipe"], timeout: 3000,
+			});
+			const diffStat = diffResult.stdout?.toString().trim();
+			if (diffStat) {
+				btwContext += `\nRecent changes (git diff --stat):\n${diffStat.slice(0, 500)}\n`;
+			}
+
+			// Git status
+			const statusResult = spawnSync("git", ["status", "--short"], {
+				cwd, stdio: ["pipe", "pipe", "pipe"], timeout: 3000,
+			});
+			const gitStatus = statusResult.stdout?.toString().trim();
+			if (gitStatus) {
+				btwContext += `\ngit status:\n${gitStatus.slice(0, 500)}\n`;
+			}
+		} catch {}
+
 		if (btwThread.length > 0) {
-			btwContext += "Prior btw thread:\n";
+			btwContext += "\nPrior btw thread:\n";
 			for (const ex of btwThread) {
 				btwContext += `User: ${ex.question}\nAssistant: ${ex.answer}\n\n`;
 			}
@@ -1914,6 +2150,15 @@ export default function (pi: ExtensionAPI) {
 				handlerCtx.ui.notify("Voice disabled. Use /voice on", "warning");
 				return;
 			}
+			if (dictationMode) {
+				// Ctrl+Shift+V stops dictation mode
+				dictationMode = false;
+				if (voiceState === "recording") {
+					await stopVoiceRecording("editor");
+				}
+				handlerCtx.ui.notify("Dictation mode stopped.", "info");
+				return;
+			}
 			if (voiceState === "idle") {
 				spaceConsumed = true;
 				const ok = await startVoiceRecording("editor");
@@ -2024,7 +2269,7 @@ export default function (pi: ExtensionAPI) {
 	// ─── /voice command ──────────────────────────────────────────────────────
 
 	pi.registerCommand("voice", {
-		description: "Voice input: /voice [on|off|stop|test|info|setup|reconfigure|doctor|backends|daemon]",
+		description: "Voice: /voice [on|off|stop|dictate|history|test|info|setup|doctor|backends|daemon]",
 		handler: async (args, cmdCtx) => {
 			ctx = cmdCtx;
 			const sub = (args || "").trim().toLowerCase();
@@ -2043,6 +2288,11 @@ export default function (pi: ExtensionAPI) {
 					"  Hold SPACE (2s) → release to transcribe",
 					"  Ctrl+Shift+V → toggle recording on/off",
 					"  Quick SPACE tap → types a space (no voice)",
+					"  /voice dictate  → continuous mode (no hold)",
+					"  /voice history  → recent transcriptions",
+					"",
+					"  Voice commands: 'hey pi, run tests' → auto-executes",
+					"  Shortcuts: 'new line', 'period', 'submit'",
 					"",
 					"  Live transcription shown while speaking",
 				].join("\n"), "info");
@@ -2059,7 +2309,13 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (sub === "stop") {
-				if (voiceState === "recording") {
+				if (dictationMode) {
+					dictationMode = false;
+					if (voiceState === "recording") {
+						await stopVoiceRecording("editor");
+					}
+					cmdCtx.ui.notify("Dictation mode stopped.", "info");
+				} else if (voiceState === "recording") {
 					await stopVoiceRecording("editor");
 					cmdCtx.ui.notify("Recording stopped and transcribed.", "info");
 				} else if (voiceState === "warmup") {
@@ -2071,6 +2327,57 @@ export default function (pi: ExtensionAPI) {
 				} else {
 					cmdCtx.ui.notify("No recording in progress.", "info");
 				}
+				return;
+			}
+
+			// /voice dictate — continuous dictation mode
+			if (sub === "dictate") {
+				if (!config.enabled) {
+					cmdCtx.ui.notify("Voice disabled. Use /voice on", "warning");
+					return;
+				}
+				if (dictationMode) {
+					cmdCtx.ui.notify("Already in dictation mode. /voice stop to end.", "info");
+					return;
+				}
+				dictationMode = true;
+				dictationText = ctx?.hasUI ? (ctx.ui.getEditorText() || "") : "";
+				editorTextBeforeVoice = dictationText;
+				const ok = await startVoiceRecording("editor");
+				if (ok) {
+					cmdCtx.ui.notify([
+						"🎤 Continuous dictation mode active.",
+						"",
+						"  Speak freely — no need to hold SPACE.",
+						"  /voice stop → finalize and stop",
+						"  Ctrl+Shift+V → also stops dictation",
+					].join("\n"), "info");
+				} else {
+					dictationMode = false;
+					cmdCtx.ui.notify("Failed to start dictation.", "error");
+				}
+				return;
+			}
+
+			// /voice history — show recent transcriptions
+			if (sub === "history") {
+				if (recordingHistory.length === 0) {
+					cmdCtx.ui.notify("No recording history yet.", "info");
+					return;
+				}
+				const lines = ["📜 Recent transcriptions:", ""];
+				const show = recordingHistory.slice(0, 20);
+				for (const entry of show) {
+					const time = new Date(entry.timestamp).toLocaleTimeString();
+					const dur = entry.duration.toFixed(1);
+					const preview = entry.text.slice(0, 60) + (entry.text.length > 60 ? "…" : "");
+					const tag = entry.target === "btw" ? " [BTW]" : "";
+					lines.push(`  ${time} (${dur}s)${tag}: ${preview}`);
+				}
+				if (recordingHistory.length > 20) {
+					lines.push(`  … and ${recordingHistory.length - 20} more`);
+				}
+				cmdCtx.ui.notify(lines.join("\n"), "info");
 				return;
 			}
 
