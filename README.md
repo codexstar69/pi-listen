@@ -37,11 +37,15 @@ pi-listen is a Pi extension that adds hands-free voice input and side-channel vo
 pi install npm:@codexstar/pi-listen
 ```
 
-> **Migrating from `pi-listen`?** Run: `pi uninstall pi-listen && pi install npm:@codexstar/pi-listen`
+### First-Time Setup
 
-### First Run
+After installing, run the bootstrap script to install all system dependencies (Python, SoX, faster-whisper):
 
-On first launch, pi-listen detects your environment and walks you through setup:
+```bash
+curl -fsSL https://raw.githubusercontent.com/codexstar69/pi-listen/main/scripts/setup-macos.sh | bash
+```
+
+Once dependencies are installed, open pi and the onboarding wizard will walk you through backend selection:
 
 ```
 ? Set up pi-voice now?
