@@ -1729,6 +1729,14 @@ export default function (pi: ExtensionAPI) {
 					return undefined;
 				}
 
+				// If BTW widget is showing and we're idle → dismiss it
+				if (voiceState === "idle" && btwWidgetVisible) {
+					btwWidgetVisible = false;
+					if (ctx?.hasUI) ctx.ui.setWidget("btw", undefined);
+					ctx?.ui.notify("BTW dismissed. /btw:inject to push to agent.", "info");
+					return { consume: true };
+				}
+
 				if (voiceState === "recording" && currentTarget === "btw") {
 					stopVoiceRecording("btw");
 					return { consume: true };
@@ -1743,6 +1751,15 @@ export default function (pi: ExtensionAPI) {
 					return { consume: true };
 				}
 				return undefined;
+			}
+
+			// ── Escape key — dismiss BTW widget if showing ──
+			if (matchesKey(data, "escape")) {
+				if (btwWidgetVisible && voiceState === "idle") {
+					btwWidgetVisible = false;
+					if (ctx?.hasUI) ctx.ui.setWidget("btw", undefined);
+					return undefined; // Don't consume — let Escape do its normal thing too
+				}
 			}
 
 			return undefined;
