@@ -114,9 +114,9 @@ const SAMPLE_RATE = 16000;        // Target sample rate for Deepgram
 const CHANNELS = 1;
 const ENCODING = "linear16";
 const DEEPGRAM_WS_URL = "wss://api.deepgram.com/v1/listen";
-const KEEPALIVE_INTERVAL_MS = 8000;
-const FINALIZE_SAFETY_TIMEOUT_MS = 5000;
-const FINALIZE_NO_DATA_TIMEOUT_MS = 1500;
+const KEEPALIVE_INTERVAL_MS = 5000;
+const FINALIZE_SAFETY_TIMEOUT_MS = 3000;
+const FINALIZE_NO_DATA_TIMEOUT_MS = 800;
 const MAX_RECORDING_SECS = 120;
 
 // Hold-to-talk timing
@@ -179,6 +179,10 @@ const EXT_DIR = path.dirname(new URL(import.meta.url).pathname);
 const PROJECT_ROOT = path.join(EXT_DIR, "..");
 const DAEMON_SCRIPT = path.join(PROJECT_ROOT, "daemon.py");
 const TRANSCRIBE_SCRIPT = path.join(PROJECT_ROOT, "transcribe.py");
+
+// ── Guard: only use python scripts if they actually exist ──
+const HAS_TRANSCRIBE_SCRIPT = fs.existsSync(TRANSCRIBE_SCRIPT);
+const HAS_DAEMON_SCRIPT = fs.existsSync(DAEMON_SCRIPT);
 
 function commandExists(cmd: string): boolean {
 	const which = process.platform === "win32" ? "where" : "which";
@@ -244,6 +248,7 @@ async function isDaemonRunning(socketPath = activeSocketPath): Promise<boolean> 
 }
 
 async function ensureDaemon(config: VoiceConfig): Promise<boolean> {
+	if (!HAS_DAEMON_SCRIPT) return false;
 	if (await isDaemonRunning(activeSocketPath)) {
 		const status = await daemonSend({ cmd: "status" }, 3000, activeSocketPath);
 		if (config.backend === "auto" || (status.backend === config.backend && status.model === config.model)) return true;
@@ -331,6 +336,9 @@ async function transcribeAudioFile(
 	audioPath: string,
 	config: VoiceConfig,
 ): Promise<{ text: string; duration: number; error?: string }> {
+	if (!HAS_TRANSCRIBE_SCRIPT) {
+		return { text: "", duration: 0, error: "transcribe.py not found — use Deepgram streaming instead" };
+	}
 	if (await isDaemonRunning()) {
 		const resp = await daemonSend({
 			cmd: "transcribe",
@@ -392,12 +400,17 @@ function buildDeepgramWsUrl(config: VoiceConfig): string {
 		encoding: ENCODING,
 		sample_rate: String(SAMPLE_RATE),
 		channels: String(CHANNELS),
-		endpointing: "300",
-		utterance_end_ms: "1000",
+		// Faster endpointing for snappy response (was 300ms)
+		endpointing: "200",
+		utterance_end_ms: "800",
 		language: config.language || "en",
 		model: config.model || "nova-3",
 		smart_format: "true",
 		interim_results: "true",
+		// no_delay: don't wait for smart_format lookahead — emit immediately
+		no_delay: "true",
+		// VAD events for better silence detection
+		vad_events: "true",
 	});
 	return `${DEEPGRAM_WS_URL}?${params.toString()}`;
 }
@@ -424,8 +437,10 @@ function startStreamingSession(
 	// On macOS, SoX's rec ignores -r for input (CoreAudio captures at native rate,
 	// usually 48kHz). We must use the `rate` effect to downsample to 16kHz.
 	// Without this, Deepgram receives 48kHz audio labeled as 16kHz → garbled/silence.
+	// Use smaller buffer (-b 4096) for lower latency audio capture.
 	const recProc = spawn("rec", [
 		"-q",
+		"--buffer", "1024",           // smaller buffer = lower capture latency
 		"-c", String(CHANNELS),
 		"-b", "16",
 		"-e", "signed-integer",
@@ -2560,6 +2575,10 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (sub === "backends") {
+				if (!HAS_TRANSCRIBE_SCRIPT) {
+					cmdCtx.ui.notify("Using Deepgram streaming (no local backends needed).", "info");
+					return;
+				}
 				const backendsJson = spawnSync("python3", [TRANSCRIBE_SCRIPT, "--list-backends"], {
 					stdio: ["pipe", "pipe", "pipe"], timeout: 10000,
 				});

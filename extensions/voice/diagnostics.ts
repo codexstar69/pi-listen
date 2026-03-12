@@ -43,7 +43,9 @@ export function scanEnvironment(transcribeScriptPath: string): EnvironmentDiagno
 	const hasDeepgramKey = Boolean(process.env.DEEPGRAM_API_KEY);
 
 	let backends: BackendAvailability[] = [];
-	if (hasPython) {
+	// Only try to list backends if the transcribe script actually exists
+	const scriptExists = require("fs").existsSync(transcribeScriptPath);
+	if (hasPython && scriptExists) {
 		const result = spawnSync("python3", [transcribeScriptPath, "--list-backends"], {
 			stdio: ["pipe", "pipe", "pipe"],
 			timeout: 10000,
@@ -57,12 +59,13 @@ export function scanEnvironment(transcribeScriptPath: string): EnvironmentDiagno
 	}
 
 	const issues: string[] = [];
-	if (!hasPython) issues.push("python3 is required for all STT backends");
 	if (!hasSox) issues.push("Install SoX for microphone recording");
-	if (!backends.some((backend) => backend.available)) {
-		issues.push("No STT backend is currently installed or configured");
-	}
+	// Only flag missing python/backends if user doesn't have Deepgram
 	if (!hasDeepgramKey) {
+		if (!hasPython) issues.push("python3 is required for local STT backends");
+		if (!backends.some((backend) => backend.available)) {
+			issues.push("No STT backend is currently installed or configured");
+		}
 		issues.push("Deepgram API key is not configured");
 	}
 
