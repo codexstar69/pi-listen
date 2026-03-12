@@ -1967,24 +1967,122 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	// ─── BTW: Side Conversations ─────────────────────────────────────────────
+	// BTW is a side-channel for quick questions while the main agent works.
+	//
+	// Key principles (modeled after Claude Code's /btw):
+	// - Full visibility into current conversation (system prompt + all messages)
+	// - Ephemeral: answers shown in widget, never enter conversation history
+	// - Runs on a SEPARATE lightweight model so it never interrupts the main agent
+	// - No tool access: answers only from what's already in context
+	// - Single response: no follow-up turns
+	// - Low cost: reuses conversation context, uses cheapest available model
+	//
+	// /btw is the inverse of a subagent:
+	//   /btw  → sees full conversation, has no tools
+	//   agent → has full tools, starts with empty context
 
 	function buildBtwContext(): string {
-		const systemPrompt = ctx?.getSystemPrompt() ?? "";
-		let btwContext = "You are a helpful side-channel assistant. ";
-		btwContext += "The user is having a parallel conversation while their main Pi agent works. ";
-		btwContext += "Be concise and direct. This is a quick side question, not the main task.\n\n";
+		// ── 1. Role & behavior instructions ──
+		let btwContext = [
+			"You are a side-channel assistant answering a quick question during an active coding session.",
+			"You have FULL VISIBILITY into the current conversation — the system prompt, all user messages,",
+			"all assistant responses, tool calls, and tool results from the main session.",
+			"",
+			"Rules:",
+			"- Be concise and direct. This is a quick side question, not a main task.",
+			"- Answer from what's already in the conversation context. You cannot read files, run commands, or search.",
+			"- Single response only — no follow-up turns.",
+			"- If the user asks about code the agent already read, decisions it made, or anything from the session, answer from that context.",
+			"- If the question is outside the conversation context, say so briefly.",
+			"",
+		].join("\n");
 
+		// ── 2. Full system prompt from the main session ──
+		const systemPrompt = ctx?.getSystemPrompt() ?? "";
 		if (systemPrompt) {
-			btwContext += `Main session context (for reference):\n${systemPrompt.slice(0, 2000)}\n\n`;
+			btwContext += "=== MAIN SESSION SYSTEM PROMPT ===\n";
+			btwContext += systemPrompt.slice(0, 8000) + "\n\n";
 		}
 
-		// ── Context-aware BTW: gather current workspace info ──
+		// ── 3. Conversation history from session manager ──
+		const sm = ctx?.sessionManager;
+		if (sm) {
+			try {
+				const entries = sm.getBranch();
+				if (entries.length > 0) {
+					btwContext += "=== CONVERSATION HISTORY ===\n";
+					// Include recent entries (last 50 to keep token budget reasonable)
+					const recent = entries.slice(-50);
+					for (const entry of recent) {
+						if (entry.type === "message") {
+							const msg = (entry as any).message;
+							if (!msg) continue;
+							const role = msg.role || "unknown";
+
+							if (role === "user") {
+								// User message
+								const content = typeof msg.content === "string"
+									? msg.content
+									: Array.isArray(msg.content)
+										? msg.content
+											.filter((c: any) => c.type === "text")
+											.map((c: any) => c.text)
+											.join("\n")
+										: String(msg.content || "");
+								if (content.trim()) {
+									btwContext += `\nUSER: ${content.slice(0, 2000)}\n`;
+								}
+							} else if (role === "assistant") {
+								// Assistant response — extract text content
+								const parts = Array.isArray(msg.content) ? msg.content : [];
+								const textParts = parts
+									.filter((c: any) => c.type === "text")
+									.map((c: any) => c.text || "");
+								const toolCalls = parts
+									.filter((c: any) => c.type === "toolCall" || c.type === "tool_use")
+									.map((c: any) => `[tool: ${c.name || c.toolName || "?"}(${JSON.stringify(c.arguments || c.input || {}).slice(0, 200)})]`);
+
+								if (textParts.length > 0) {
+									btwContext += `\nASSISTANT: ${textParts.join("\n").slice(0, 3000)}\n`;
+								}
+								if (toolCalls.length > 0) {
+									btwContext += `  Tools used: ${toolCalls.join(", ").slice(0, 500)}\n`;
+								}
+							} else if (role === "toolResult" || role === "tool") {
+								// Tool results — include brief summary
+								const content = typeof msg.content === "string"
+									? msg.content
+									: Array.isArray(msg.content)
+										? msg.content
+											.filter((c: any) => c.type === "text")
+											.map((c: any) => c.text)
+											.join("\n")
+										: "";
+								if (content.trim()) {
+									const toolName = msg.toolName || msg.name || "tool";
+									btwContext += `  [${toolName} result]: ${content.slice(0, 1000)}\n`;
+								}
+							}
+						} else if (entry.type === "compaction") {
+							// Compaction summary — very useful context
+							const summary = (entry as any).summary || (entry as any).text || "";
+							if (summary) {
+								btwContext += `\n[Session summary]: ${String(summary).slice(0, 2000)}\n`;
+							}
+						}
+					}
+					btwContext += "\n=== END CONVERSATION ===\n\n";
+				}
+			} catch (e) {
+				voiceDebug("BTW: failed to read conversation history", { error: String(e) });
+			}
+		}
+
+		// ── 4. Current workspace context ──
 		try {
 			const cwd = currentCwd || process.cwd();
-			// Current directory
 			btwContext += `Working directory: ${cwd}\n`;
 
-			// Recent git diff (last changes)
 			const diffResult = spawnSync("git", ["diff", "--stat", "HEAD"], {
 				cwd, stdio: ["pipe", "pipe", "pipe"], timeout: 3000,
 			});
@@ -1993,7 +2091,6 @@ export default function (pi: ExtensionAPI) {
 				btwContext += `\nRecent changes (git diff --stat):\n${diffStat.slice(0, 500)}\n`;
 			}
 
-			// Git status
 			const statusResult = spawnSync("git", ["status", "--short"], {
 				cwd, stdio: ["pipe", "pipe", "pipe"], timeout: 3000,
 			});
@@ -2003,10 +2100,11 @@ export default function (pi: ExtensionAPI) {
 			}
 		} catch {}
 
+		// ── 5. Prior BTW thread (for multi-turn BTW continuity) ──
 		if (btwThread.length > 0) {
-			btwContext += "\nPrior btw thread:\n";
+			btwContext += "\n=== PRIOR BTW EXCHANGES ===\n";
 			for (const ex of btwThread) {
-				btwContext += `User: ${ex.question}\nAssistant: ${ex.answer}\n\n`;
+				btwContext += `BTW Q: ${ex.question}\nBTW A: ${ex.answer}\n\n`;
 			}
 		}
 
