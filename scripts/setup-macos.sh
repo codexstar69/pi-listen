@@ -26,7 +26,7 @@ Options:
   --project-dir PATH            Project directory used for --scope project (default: current directory)
   --deepgram-key KEY            Deepgram API key for api mode (defaults to current DEEPGRAM_API_KEY)
   --persist-deepgram-key        Append DEEPGRAM_API_KEY to ~/.zshrc when a key is available
-  --skip-pi-install             Skip `pi install npm:pi-listen`
+  --skip-pi-install             Skip `pi install npm:@codexstar/pi-listen`
   -h, --help                    Show this help
 
 Examples:
@@ -102,7 +102,7 @@ install_pi_package() {
   fi
 
   if ! have pi; then
-    warn "The 'pi' command was not found, so package installation was skipped. Install Pi first, then run: pi install npm:pi-listen"
+    warn "The 'pi' command was not found, so package installation was skipped. Install Pi first, then run: pi install npm:@codexstar/pi-listen"
     return
   fi
 
@@ -110,11 +110,11 @@ install_pi_package() {
     log "Installing pi-listen into Pi project settings"
     (
       cd "$PROJECT_DIR"
-      pi install -l npm:pi-listen
+      pi install -l npm:@codexstar/pi-listen
     )
   else
     log "Installing pi-listen into global Pi settings"
-    pi install npm:pi-listen
+    pi install npm:@codexstar/pi-listen
   fi
 }
 

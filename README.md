@@ -2,8 +2,8 @@
 
 **Voice input and side-channel conversations for [Pi](https://github.com/mariozechner/pi-coding-agent).**
 
-[![npm version](https://img.shields.io/npm/v/pi-listen.svg)](https://www.npmjs.com/package/pi-listen)
-[![license](https://img.shields.io/npm/l/pi-listen.svg)](https://github.com/codexstar69/pi-listen/blob/main/LICENSE)
+[![npm version](https://img.shields.io/npm/v/@codexstar/pi-listen.svg)](https://www.npmjs.com/package/@codexstar/pi-listen)
+[![license](https://img.shields.io/npm/l/@codexstar/pi-listen.svg)](https://github.com/codexstar69/pi-listen/blob/main/LICENSE)
 [![tests](https://img.shields.io/badge/tests-37%2F37%20passing-brightgreen)](#testing)
 
 ---
@@ -30,8 +30,10 @@ pi-listen is a Pi extension that adds hands-free voice input and side-channel vo
 ### Install
 
 ```bash
-pi install npm:pi-listen
+pi install npm:@codexstar/pi-listen
 ```
+
+> **Migrating from `pi-listen`?** Run: `pi uninstall pi-listen && pi install npm:@codexstar/pi-listen`
 
 ### First Run
 
@@ -201,7 +203,7 @@ curl -fsSL https://raw.githubusercontent.com/codexstar69/pi-listen/main/scripts/
 irm https://raw.githubusercontent.com/codexstar69/pi-listen/main/scripts/setup-windows.ps1 | iex
 ```
 
-These scripts install all dependencies (Python, SoX, faster-whisper), create a virtualenv, download models, and configure microphone permissions.
+These scripts install all dependencies (Python, SoX, faster-whisper), create a virtualenv, download models, and configure microphone permissions. You should not need to run `/voice setup` on the happy path — the bootstrap scripts handle everything.
 
 ---
 
@@ -275,7 +277,7 @@ See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Links
 
-- **npm:** [npmjs.com/package/pi-listen](https://www.npmjs.com/package/pi-listen)
+- **npm:** [npmjs.com/package/@codexstar/pi-listen](https://www.npmjs.com/package/@codexstar/pi-listen)
 - **GitHub:** [github.com/codexstar69/pi-listen](https://github.com/codexstar69/pi-listen)
 - **Issues:** [github.com/codexstar69/pi-listen/issues](https://github.com/codexstar69/pi-listen/issues)
 - **Pi CLI:** [github.com/mariozechner/pi-coding-agent](https://github.com/mariozechner/pi-coding-agent)

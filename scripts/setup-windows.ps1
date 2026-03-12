@@ -76,7 +76,7 @@ function Install-PiPackage {
     if ($SkipPiInstall) { return }
 
     if (-not (Test-Command pi)) {
-        Write-Warn "The 'pi' command was not found, so package installation was skipped. Install Pi first, then run: pi install npm:pi-listen"
+        Write-Warn "The 'pi' command was not found, so package installation was skipped. Install Pi first, then run: pi install npm:@codexstar/pi-listen"
         return
     }
 
@@ -84,7 +84,7 @@ function Install-PiPackage {
         Write-Step 'Installing pi-listen into Pi project settings'
         Push-Location $ProjectDir
         try {
-            & pi install -l npm:pi-listen
+            & pi install -l npm:@codexstar/pi-listen
         }
         finally {
             Pop-Location
@@ -92,7 +92,7 @@ function Install-PiPackage {
     }
     else {
         Write-Step 'Installing pi-listen into global Pi settings'
-        & pi install npm:pi-listen
+        & pi install npm:@codexstar/pi-listen
     }
 }
 

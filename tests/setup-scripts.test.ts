@@ -10,7 +10,7 @@ describe("bootstrap setup scripts", () => {
 		expect(existsSync("scripts/setup-macos.sh")).toBe(true);
 		const script = read("scripts/setup-macos.sh");
 		expect(script).toContain("brew install sox");
-		expect(script).toContain("pi install npm:pi-listen");
+		expect(script).toContain("pi install npm:@codexstar/pi-listen");
 		expect(script).toContain("DEEPGRAM_API_KEY");
 		expect(script).toContain("settings.json");
 		expect(script).toContain("onboarding");
@@ -32,7 +32,7 @@ describe("bootstrap setup scripts", () => {
 		const script = read("scripts/setup-windows.ps1");
 		expect(script).toContain("ChrisBagwell.SoX");
 		expect(script).toContain("Python.Python.3.12");
-		expect(script).toContain("pi install npm:pi-listen");
+		expect(script).toContain("pi install npm:@codexstar/pi-listen");
 		expect(script).toContain("DEEPGRAM_API_KEY");
 		expect(script).toContain("settings.json");
 		expect(script).toContain("onboarding");

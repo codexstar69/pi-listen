@@ -177,7 +177,7 @@ bun run check  # typecheck + test + Python compile
 Please include:
 
 1. **Pi version** (`pi --version`)
-2. **pi-listen version** (`npm list pi-listen`)
+2. **pi-listen version** (`npm list @codexstar/pi-listen`)
 3. **OS and architecture** (e.g., macOS 15.2, Apple Silicon)
 4. **STT backend** (e.g., faster-whisper, deepgram)
 5. **Steps to reproduce**

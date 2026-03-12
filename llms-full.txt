@@ -4,8 +4,8 @@
 
 ## Package Identity
 
-- **Name:** pi-listen
-- **npm:** https://www.npmjs.com/package/pi-listen
+- **Name:** @codexstar/pi-listen
+- **npm:** https://www.npmjs.com/package/@codexstar/pi-listen
 - **GitHub:** https://github.com/codexstar69/pi-listen
 - **License:** MIT
 - **Type:** Pi coding agent extension (pi-package)
