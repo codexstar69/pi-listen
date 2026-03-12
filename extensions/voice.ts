@@ -136,7 +136,9 @@ async function isDaemonRunning(socketPath = activeSocketPath): Promise<boolean> 
 async function ensureDaemon(config: VoiceConfig): Promise<boolean> {
 	if (await isDaemonRunning(activeSocketPath)) {
 		const status = await daemonSend({ cmd: "status" }, 3000, activeSocketPath);
-		if (status.backend === config.backend && status.model === config.model) return true;
+		// When backend is 'auto', accept any loaded backend — the daemon already
+		// resolved 'auto' to a concrete backend, so we don't need to reload.
+		if (config.backend === "auto" || (status.backend === config.backend && status.model === config.model)) return true;
 		const reloaded = await daemonSend({
 			cmd: "load",
 			backend: config.backend,
@@ -174,9 +176,12 @@ async function ensureDaemon(config: VoiceConfig): Promise<boolean> {
 
 		proc.on("error", () => resolve(false));
 
-		// Timeout: if daemon doesn't start in 10s, fall back
+		// Timeout: if daemon doesn't start in 10s, kill orphan and fall back
 		setTimeout(() => {
-			if (!started) resolve(false);
+			if (!started) {
+				try { proc.kill(); } catch {}
+				resolve(false);
+			}
 		}, 10000);
 	});
 }
@@ -347,13 +352,13 @@ export default function (pi: ExtensionAPI) {
 
 	// ─── Voice: Start / Stop / Transcribe ────────────────────────────────────
 
-	async function startVoiceRecording(target: "editor" | "btw" = "editor") {
-		if (voiceState !== "idle" || !ctx) return;
+	async function startVoiceRecording(target: "editor" | "btw" = "editor"): Promise<boolean> {
+		if (voiceState !== "idle" || !ctx) return false;
 
 		tempFile = path.join(os.tmpdir(), `pi-voice-${Date.now()}.wav`);
 		if (!startRecordingToFile(tempFile)) {
 			ctx.ui.notify("Voice requires SoX. Install: brew install sox", "error");
-			return;
+			return false;
 		}
 
 		recordingStart = Date.now();
@@ -369,6 +374,7 @@ export default function (pi: ExtensionAPI) {
 					: " Recording... release to transcribe",
 			], { placement: "aboveEditor" });
 		}
+		return true;
 	}
 
 	async function stopVoiceRecording(target: "editor" | "btw" = "editor") {
@@ -376,21 +382,24 @@ export default function (pi: ExtensionAPI) {
 		if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
 
 		const elapsed = ((Date.now() - recordingStart) / 1000).toFixed(1);
+		const audioFile = tempFile; // capture before cleanup can null it
 		setVoiceState("transcribing");
 		ctx.ui.setWidget("voice-recording", undefined);
 
 		await stopRecording();
 
-		if (!tempFile || !fs.existsSync(tempFile)) {
+		if (!audioFile || !fs.existsSync(audioFile)) {
 			ctx.ui.notify("No audio recorded.", "warning");
 			setVoiceState("idle");
 			return;
 		}
 
-		const stats = fs.statSync(tempFile);
+		const stats = fs.statSync(audioFile);
 		if (stats.size < 1000) {
 			ctx.ui.notify("Recording too short.", "warning");
-			voiceCleanup();
+			try { fs.unlinkSync(audioFile); } catch {}
+			tempFile = null;
+			setVoiceState("idle");
 			return;
 		}
 
@@ -399,9 +408,9 @@ export default function (pi: ExtensionAPI) {
 		// cold subprocess fallback.
 		await ensureDaemon(config).catch(() => {});
 
-		const result = await transcribeAudio(tempFile, config);
-		try { fs.unlinkSync(tempFile); } catch {}
-		tempFile = null;
+		const result = await transcribeAudio(audioFile, config);
+		try { fs.unlinkSync(audioFile); } catch {}
+		if (tempFile === audioFile) tempFile = null;
 
 		if (result.error) {
 			ctx.ui.notify(`STT error: ${result.error}`, "error");
@@ -467,7 +476,9 @@ export default function (pi: ExtensionAPI) {
 				// Key press — start recording
 				if (voiceState === "idle" && !isHolding) {
 					isHolding = true;
-					startVoiceRecording("editor");
+					startVoiceRecording("editor").then((ok) => {
+						if (!ok) isHolding = false;
+					});
 					return { consume: true };
 				}
 
@@ -493,7 +504,9 @@ export default function (pi: ExtensionAPI) {
 
 				if (voiceState === "idle" && !isHolding) {
 					isHolding = true;
-					startVoiceRecording("btw");
+					startVoiceRecording("btw").then((ok) => {
+						if (!ok) isHolding = false;
+					});
 					return { consume: true };
 				}
 
@@ -645,13 +658,9 @@ export default function (pi: ExtensionAPI) {
 			pi.appendEntry("btw", exchange);
 			updateBtwWidget();
 
-			// Use sendMessage as alternative
-			pi.sendMessage(
-				{
-					customType: "btw-question",
-					content: message,
-					display: true,
-				},
+			// Use sendUserMessage as alternative
+			pi.sendUserMessage(
+				`[BTW question]: ${message}`,
 				{ deliverAs: "followUp" },
 			);
 		}

@@ -123,7 +123,8 @@ class ModelCache:
                     return result
 
             except Exception as e:
-                return {"error": str(e), "backend": backend, "model": model, "traceback": traceback.format_exc()}
+                log(f"Transcription error: {traceback.format_exc()}")
+                return {"error": str(e), "backend": backend, "model": model}
 
 
 # ─── VAD (Voice Activity Detection) ─────────────────────────────────────────
