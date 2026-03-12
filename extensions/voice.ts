@@ -1048,9 +1048,9 @@ export default function (pi: ExtensionAPI) {
 		const useCat = config.catAnimation !== false;
 		const catFrames = [
 			"╭( ー ー )╮",
+			"╭( • • )╮",
 			"╭( ◕ ◕ )╮",
-			"╭( ◉ ◉ )╮",
-			"╭( ⬤ ⬤ )╮",
+			"╭( ● ● )╮",
 		];
 
 		const renderWarmup = () => {
@@ -1142,10 +1142,10 @@ export default function (pi: ExtensionAPI) {
 					const cat = blink
 						? "╭( ー ー )╮"
 						: loud
-							? "╭( ⬤ ⬤ )╮"
+							? "╭( ● ● )╮"
 							: mid
-								? "╭( ◉ ◉ )╮"
-								: "╭( ◕ ◕ )╮";
+								? "╭( ◕ ◕ )╮"
+								: "╭( • • )╮";
 					const tail = loud ? ["~", "⁓", "~", "⁓"][frame % 4] : ["~", " ", "~", " "][frame % 4];
 					const content = ` ${dot} ${theme.fg("accent", cat)} ${theme.fg("muted", tail)}  ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`;
 					const stripped = stripAnsi(content).length;
