@@ -1,2 +1,3 @@
 {"type":"config","name":"pi-voice Enterprise Quality Audit","metricName":"issues_fixed","metricUnit":"","bestDirection":"higher"}
 {"run":1,"commit":"e5e45f7","metric":0,"metrics":{},"status":"keep","description":"Baseline: 14 tests pass, typecheck clean, 1921 lines voice.ts","timestamp":1773373914031,"segment":0}
+{"run":2,"commit":"6f7a48d","metric":10,"metrics":{},"status":"keep","description":"Exp1: 10 issues fixed — sound path caching, resetHoldState() dedup (29→15 occurrences), closure vars for widget, commandExists cache, double CloseStream fix, Int16Array audio perf, stale docs, dead exports removed","timestamp":1773374498710,"segment":0}

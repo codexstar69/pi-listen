@@ -239,6 +239,16 @@ function startStreamingSession(
 		},
 	} as any);
 
+	// Connection timeout — abort if Deepgram doesn't respond within 10s
+	const wsConnectTimeout = setTimeout(() => {
+		if (ws.readyState !== WebSocket.OPEN) {
+			voiceDebug("WebSocket connection timeout (10s)");
+			try { ws.close(); } catch {}
+			try { recProc.kill("SIGTERM"); } catch {}
+			callbacks.onError("Deepgram connection timed out (10s). Check your network.");
+		}
+	}, 10_000);
+
 	const session: StreamingSession = {
 		ws,
 		recProcess: recProc,
@@ -271,6 +281,7 @@ function startStreamingSession(
 	}
 
 	ws.onopen = () => {
+		clearTimeout(wsConnectTimeout);
 		voiceDebug("WebSocket onopen → streaming audio");
 		try { ws.send(JSON.stringify({ type: "KeepAlive" })); } catch {}
 
@@ -316,10 +327,13 @@ function startStreamingSession(
 			} else if (msg.type === "Error" || msg.type === "error") {
 				session.onError(msg.message || msg.description || "Deepgram error");
 			}
-		} catch {}
+		} catch (err) {
+			voiceDebug("onmessage parse error", { error: String(err) });
+		}
 	};
 
 	ws.onerror = (ev) => {
+		clearTimeout(wsConnectTimeout);
 		const errMsg = (ev as any)?.message || (ev as any)?.error?.message || "unknown";
 		voiceDebug("WebSocket onerror", { readyState: ws.readyState, error: errMsg });
 		if (!session.closed) {
@@ -328,6 +342,7 @@ function startStreamingSession(
 	};
 
 	ws.onclose = (ev) => {
+		clearTimeout(wsConnectTimeout);
 		voiceDebug("WebSocket onclose", { code: (ev as any)?.code, reason: (ev as any)?.reason, closed: session.closed });
 		if (!session.closed) {
 			finalizeSession(session);
@@ -717,8 +732,6 @@ export default function (pi: ExtensionAPI) {
 
 	function voiceCleanup() {
 		if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
-		clearHoldTimer();
-		clearReleaseTimer();
 		clearWarmupWidget();
 		clearRecordingAnimTimer();
 		// Reset audio levels
@@ -729,7 +742,7 @@ export default function (pi: ExtensionAPI) {
 			activeSession = null;
 		}
 
-		resetHoldState();
+		resetHoldState(); // includes clearHoldTimer + clearReleaseTimer
 		lastSpacePressTime = 0;
 		errorCooldownUntil = 0;
 		editorTextBeforeVoice = "";
@@ -942,9 +955,7 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.setEditorText(prefix + displayText);
 		}
 
-		// Update the waveform widget to also show a transcript preview line
-		// but keep the full animation running (don't replace it)
-		(showRecordingWidget as any)._liveText = displayText;
+
 	}
 
 	// ─── Voice: Start / Stop ─────────────────────────────────────────────────
