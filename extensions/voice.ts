@@ -1126,12 +1126,12 @@ export default function (pi: ExtensionAPI) {
 
 		// ── Eyes dilate with audio level ──
 		let eyes: string;
-		if (blinking)               eyes = "– ᴗ –";
-		else if (audioLevel > 0.42) eyes = "◉ ᴗ ◉";
-		else if (audioLevel > 0.15) eyes = "● ᴗ ●";
-		else                        eyes = "◕ ᴗ ◕";
+		if (blinking)               eyes = "–▽–";
+		else if (audioLevel > 0.42) eyes = "◉▽◉";
+		else if (audioLevel > 0.15) eyes = "●▽●";
+		else                        eyes = "◕▽◕";
 
-		return `( ${eyes} )`;
+		return `(${eyes})`;
 	}
 
 	// ─── XP & Level System ──────────────────────────────────────────────
