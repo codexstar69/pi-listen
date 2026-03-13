@@ -81,7 +81,7 @@ import {
 import { finalizeOnboardingConfig, runVoiceOnboarding } from "./voice/onboarding";
 import { detectVoiceCommand, processVoiceShortcuts } from "./voice/text-processing";
 import { buildDeepgramWsUrl, resolveDeepgramApiKey, SAMPLE_RATE, CHANNELS } from "./voice/deepgram";
-import { renderSlime, resetSlime, SLIME_WIDTH } from "./voice/slime";
+import { renderLumo, resetLumo, lumoSetTalking, lumoKeypress, LUMO_HEIGHT } from "./voice/lumo";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -491,7 +491,7 @@ export default function (pi: ExtensionAPI) {
 	let errorCooldownUntil = 0;       // After an error, block re-activation until this timestamp
 	let lastNonSpaceKeyTime = 0;      // Timestamp of last non-space keypress (typing cooldown)
 	let tailRecordingTimer: ReturnType<typeof setTimeout> | null = null; // Delayed stop after release
-	let _lastSlimeRenderTime = Date.now();  // For slime physics dt
+	let _lastCompanionRenderTime = Date.now();  // For Lumo companion physics dt
 
 	// ─── Recording History ───────────────────────────────────────────────────
 
@@ -639,10 +639,8 @@ export default function (pi: ExtensionAPI) {
 		voiceState = newState;
 		if (prev !== newState) {
 			voiceDebug(`STATE: ${prev} → ${newState}`);
-			// Restore slime companion when returning to idle after recording
-			if (newState === "idle" && config.enabled && (prev === "recording" || prev === "finalizing")) {
-				showSlimeCompanion();
-			}
+			// Update Lumo talking state
+			lumoSetTalking(newState === "recording");
 		}
 		updateVoiceStatus();
 	}
@@ -696,10 +694,10 @@ export default function (pi: ExtensionAPI) {
 	function voiceCleanup() {
 		if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
 		cancelDelayedStop();
-		hideSlimeCompanion();
+		hideCompanion();
 		clearWarmupWidget();
 		clearRecordingAnimTimer();
-		resetSlime();
+		resetLumo();
 		// Reset audio levels
 		audioLevel = 0;
 		audioLevelSmoothed = 0;
@@ -718,59 +716,52 @@ export default function (pi: ExtensionAPI) {
 		setVoiceState("idle");
 	}
 
-	// ─── Persistent Slime Companion ─────────────────────────────────────────
-	// Shows the slime on the right side when voice is enabled but not recording.
+	// ─── Persistent Lumo Companion ─────────────────────────────────────────
+	// Shows the Lumo companion above the editor when voice is enabled but not recording.
 	// During recording, the recording widget takes over.
-	let _slimeCompanionTimer: ReturnType<typeof setInterval> | null = null;
-	let _slimeCompanionActive = false;
+	let _companionTimer: ReturnType<typeof setInterval> | null = null;
+	let _companionActive = false;
 
-	function showSlimeCompanion() {
-		if (_slimeCompanionActive) return;
+	function showCompanion() {
+		if (_companionActive) return;
 		if (!ctx?.hasUI) return;
-		_slimeCompanionActive = true;
-		_lastSlimeRenderTime = Date.now();
+		_companionActive = true;
+		_lastCompanionRenderTime = Date.now();
 
-		// Set widget ONCE — Pi calls render() on each redraw cycle
-		ctx.ui.setWidget("slime-companion", (_tui, _theme) => ({
+		const renderCompanion = (width: number): string[] => {
+			const now = Date.now();
+			const dt = Math.min(0.1, (now - _lastCompanionRenderTime) / 1000);
+			_lastCompanionRenderTime = now;
+			const isRecording = voiceState === "recording";
+			lumoSetTalking(isRecording);
+			return renderLumo(Math.min(width, 60), isRecording ? audioLevelSmoothed : 0, dt);
+		};
+
+		// Set initial widget
+		ctx.ui.setWidget("lumo-companion", (_tui, _theme) => ({
 			invalidate() {},
-			render(width: number): string[] {
-				// Don't render during recording — recording widget handles it
-				if (voiceState !== "idle") return [];
-				const now = Date.now();
-				const dt = Math.min(0.1, (now - _lastSlimeRenderTime) / 1000);
-				_lastSlimeRenderTime = now;
-				const slimeLines = renderSlime(0, dt);
-				const pad = Math.max(0, width - SLIME_WIDTH - 2);
-				return slimeLines.map(line => " ".repeat(pad) + line);
-			},
+			render: renderCompanion,
 		}), { placement: "aboveEditor" });
 
-		// Trigger redraws at 5fps by calling setWidget again with same factory
-		_slimeCompanionTimer = setInterval(() => {
-			if (!ctx?.hasUI || voiceState !== "idle") return;
-			ctx.ui.setWidget("slime-companion", (_tui, _theme) => ({
+		// Trigger redraws at ~7fps
+		_companionTimer = setInterval(() => {
+			if (!ctx?.hasUI) return;
+			ctx.ui.setWidget("lumo-companion", (_tui, _theme) => ({
 				invalidate() {},
-				render(width: number): string[] {
-					if (voiceState !== "idle") return [];
-					const now = Date.now();
-					const dt = Math.min(0.1, (now - _lastSlimeRenderTime) / 1000);
-					_lastSlimeRenderTime = now;
-					const slimeLines = renderSlime(0, dt);
-					const pad = Math.max(0, width - SLIME_WIDTH - 2);
-					return slimeLines.map(line => " ".repeat(pad) + line);
-				},
+				render: renderCompanion,
 			}), { placement: "aboveEditor" });
-		}, 200);
+		}, 150);
 	}
 
-	function hideSlimeCompanion() {
-		_slimeCompanionActive = false;
-		if (_slimeCompanionTimer) {
-			clearInterval(_slimeCompanionTimer);
-			_slimeCompanionTimer = null;
+	function hideCompanion() {
+		_companionActive = false;
+		if (_companionTimer) {
+			clearInterval(_companionTimer);
+			_companionTimer = null;
 		}
+		lumoSetTalking(false);
 		if (ctx?.hasUI) {
-			ctx.ui.setWidget("slime-companion", undefined);
+			ctx.ui.setWidget("lumo-companion", undefined);
 		}
 	}
 
@@ -931,14 +922,15 @@ export default function (pi: ExtensionAPI) {
 
 	function showRecordingWidget() {
 		if (!ctx?.hasUI) return;
-		hideSlimeCompanion(); // Recording widget takes over
+		// Lumo companion stays visible — it reacts to audio automatically.
+		// We still run the recording widget for the info bar overlay.
 
 		_recWidgetFrame = 0;
 
 		_recWidgetAnimTimer = setInterval(() => {
 			_recWidgetFrame++;
 			showRecordingWidgetFrame(_recWidgetFrame);
-		}, 150); // 150ms ≈ 6.7fps — gives headroom for slime metaball rendering
+		}, 150); // 150ms ≈ 6.7fps — gives headroom for Lumo companion rendering
 
 		showRecordingWidgetFrame(0);
 	}
@@ -946,16 +938,13 @@ export default function (pi: ExtensionAPI) {
 	function showRecordingWidgetFrame(frame: number) {
 		if (!ctx?.hasUI) return;
 
-		ctx.ui.setWidget("voice-recording", (tui, theme) => {
+		// Compact recording info bar — the Lumo companion widget handles the creature
+		ctx.ui.setWidget("voice-recording", (_tui, theme) => {
 			return {
 				invalidate() {},
 				render(width: number): string[] {
-					const now = Date.now();
-					const dt = Math.min(0.1, (now - _lastSlimeRenderTime) / 1000);
-					_lastSlimeRenderTime = now;
-
 					const maxW = Math.max(0, Math.min(width - 4, 72));
-					const elapsed = Math.round((now - recordingStart) / 1000);
+					const elapsed = Math.round((Date.now() - recordingStart) / 1000);
 					const mins = Math.floor(elapsed / 60);
 					const secs = elapsed % 60;
 					const timeStr = mins > 0 ? `${mins}:${String(secs).padStart(2, "0")}` : `${secs}s`;
@@ -963,31 +952,7 @@ export default function (pi: ExtensionAPI) {
 					const hint = theme.fg("dim", "⌴ release");
 					const dot = theme.fg("error", getRecordDot());
 					const face = getFace(audioLevelSmoothed);
-
-					// Render slime creature driven by audio level
-					const slimeLines = renderSlime(audioLevelSmoothed, dt);
-					const slimeH = slimeLines.length;
-					const slimeW = 30; // visual width of slime (without ANSI codes)
-
-					// Layout: info on left, slime on right
-					// Info lines (centered vertically against slime)
-					const infoLines: string[] = [];
-					infoLines.push(` ${dot} ${theme.fg("accent", face)}  ${theme.fg("accent", wave)}`);
-					infoLines.push(`   ${theme.fg("muted", timeStr)}  ${hint}`);
-
-					// Calculate right-padding to push slime to right edge
-					const gap = Math.max(1, width - slimeW - 40);
-					const pad = " ".repeat(Math.max(0, gap));
-
-					const out: string[] = [];
-					for (let i = 0; i < slimeH; i++) {
-						const infoRow = i >= Math.floor((slimeH - infoLines.length) / 2)
-							&& i < Math.floor((slimeH - infoLines.length) / 2) + infoLines.length
-							? infoLines[i - Math.floor((slimeH - infoLines.length) / 2)]
-							: "";
-						out.push(`${infoRow}${pad}${slimeLines[i]}`);
-					}
-					return out;
+					return [` ${dot} ${theme.fg("accent", face)}  ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`];
 				},
 			};
 		}, { placement: "aboveEditor" });
@@ -1872,7 +1837,7 @@ export default function (pi: ExtensionAPI) {
 		if (config.enabled && config.onboarding.completed) {
 			updateVoiceStatus();
 			setupHoldToTalk();
-			showSlimeCompanion();
+			showCompanion();
 		}
 	});
 
@@ -1890,7 +1855,7 @@ export default function (pi: ExtensionAPI) {
 		config = loaded.config;
 		configSource = loaded.source;
 		setupHoldToTalk();
-		if (config.enabled) showSlimeCompanion();
+		if (config.enabled) showCompanion();
 		updateVoiceStatus();
 	});
 
@@ -1906,7 +1871,7 @@ export default function (pi: ExtensionAPI) {
 				config.enabled = true;
 				updateVoiceStatus();
 				setupHoldToTalk();
-				showSlimeCompanion();
+				showCompanion();
 				cmdCtx.ui.notify([
 					"Voice enabled (Deepgram streaming).",
 					"",
@@ -1927,7 +1892,7 @@ export default function (pi: ExtensionAPI) {
 			if (sub === "off") {
 				config.enabled = false;
 				voiceCleanup();
-				hideSlimeCompanion();
+				hideCompanion();
 				if (terminalInputUnsub) { terminalInputUnsub(); terminalInputUnsub = null; }
 				ctx.ui.setStatus("voice", undefined);
 				cmdCtx.ui.notify("Voice disabled.", "info");
@@ -1957,6 +1922,16 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			// /voice dictate — continuous dictation mode
+			// ── Lumo companion interactions ──
+			const lumoCommands: Record<string, string> = {
+				pet: "p", feed: "f", ball: "b", music: "m", color: "c",
+				sleep: "s", wake: "w", flip: "d",
+			};
+			if (lumoCommands[sub]) {
+				lumoKeypress(lumoCommands[sub]);
+				return;
+			}
+
 			if (sub === "dictate") {
 				if (!config.enabled) {
 					cmdCtx.ui.notify("Voice disabled. Use /voice on", "warning");
@@ -2081,8 +2056,8 @@ export default function (pi: ExtensionAPI) {
 
 			// Default: toggle
 			config.enabled = !config.enabled;
-			if (!config.enabled) { voiceCleanup(); hideSlimeCompanion(); }
-			else { setupHoldToTalk(); showSlimeCompanion(); }
+			if (!config.enabled) { voiceCleanup(); hideCompanion(); }
+			else { setupHoldToTalk(); showCompanion(); }
 			updateVoiceStatus();
 			cmdCtx.ui.notify(`Voice ${config.enabled ? "enabled" : "disabled"}.`, "info");
 		},
