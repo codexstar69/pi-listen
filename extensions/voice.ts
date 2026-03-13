@@ -1096,19 +1096,17 @@ export default function (pi: ExtensionAPI) {
 		encounters: 0,
 	};
 
-	// ─── Creature: simple, single-line, creative eyes ──────────────────
-	// Clean terminal aesthetic. Charming, not pixel art.
-	// Evolution changes the creature's form, not its rendering technique.
+	// ─── Creature: just a cute face ─────────────────────────────────────
+	// ( ◕ ᴗ ◕ ) — that's it. Eyes react to voice. Nothing else.
 
 	let _nextBlinkAt = Date.now() + 3000 + Math.random() * 2000;
 	let _blinkUntil = 0;
 	let _doubleBlink = false;
 
-	function getCreature(evolution: number, mood: string, audioLevel: number): string {
+	function getCreature(_evolution: number, _mood: string, audioLevel: number): string {
 		const now = Date.now();
-		const t = now / 1000;
 
-		// ── Natural blink with occasional double-blink ──
+		// ── Natural blink ──
 		if (now >= _nextBlinkAt && now > _blinkUntil) {
 			_blinkUntil = now + 130;
 			if (Math.random() < 0.18) {
@@ -1126,57 +1124,14 @@ export default function (pi: ExtensionAPI) {
 		}
 		const blinking = now < _blinkUntil;
 
-		const loud = audioLevel > 0.42;
-		const mid = audioLevel > 0.15;
-
-		// ── Eyes: the soul of the creature ──
+		// ── Eyes dilate with audio level ──
 		let eyes: string;
-		if (blinking) {
-			eyes = "–   –";
-		} else if (loud) {
-			eyes = "◕   ◕";
-		} else if (mid) {
-			eyes = "●   ●";
-		} else {
-			const drift = Math.sin(t * 0.3);
-			eyes = drift > 0.7 ? " •  •" : drift < -0.7 ? "•  • " : "•   •";
-		}
+		if (blinking)               eyes = "– ᴗ –";
+		else if (audioLevel > 0.42) eyes = "◉ ᴗ ◉";
+		else if (audioLevel > 0.15) eyes = "● ᴗ ●";
+		else                        eyes = "◕ ᴗ ◕";
 
-		// ── Cheeks flush with energy ──
-		const cheekL = loud ? "˚" : mid ? "·" : " ";
-		const cheekR = loud ? "˚" : mid ? "·" : " ";
-
-		// ── Mouth reacts to mood ──
-		const mouth = mood === "ecstatic" ? "ω" : loud ? "○" : "";
-
-		if (evolution === 0) {
-			// Egg — just a wobbling oval with a crack hint
-			const wobble = Math.sin(t * 3) > 0.7;
-			return wobble ? " (  ᨏ  )" : " (  ·  )";
-		}
-		if (evolution === 1) {
-			// Baby — tiny round blob, just eyes
-			return `(${cheekL} ${eyes} ${cheekR})`;
-		}
-		if (evolution === 2) {
-			// Teen — ears appear, whiskers
-			const earL = loud ? "⟋" : "ᘏ";
-			const earR = loud ? "⟍" : "ᘏ";
-			return `${earL}(${cheekL} ${eyes} ${cheekR})${earR}`;
-		}
-		if (evolution === 3) {
-			// Adult — full cat with tail
-			const earL = loud ? "⟋" : "ᘏ";
-			const earR = loud ? "⟍" : "ᘏ";
-			const tail = Math.sin(t * 2) > 0 ? "~" : "∼";
-			return `${earL}(${cheekL} ${eyes} ${cheekR})${earR}${tail}${mouth ? " " + mouth : ""}`;
-		}
-		// Legendary — sparkles + crown hint
-		const earL = loud ? "⟋" : "ᘏ";
-		const earR = loud ? "⟍" : "ᘏ";
-		const tail = Math.sin(t * 2) > 0 ? "~" : "∼";
-		const sparkle = Math.sin(t * 3) > 0.3 ? "✧" : " ";
-		return `${sparkle} ${earL}(${cheekL} ${eyes} ${cheekR})${earR}${tail} ${sparkle}`;
+		return `( ${eyes} )`;
 	}
 
 	// ─── XP & Level System ──────────────────────────────────────────────
@@ -1356,13 +1311,12 @@ export default function (pi: ExtensionAPI) {
 					render(width: number): string[] {
 						const maxW = Math.max(0, Math.min(width - 4, 72));
 						const creature = getCreature(pet.evolution, pet.mood, 0);
-						const meterLen = Math.max(4, Math.min(10, maxW - 40));
+						const meterLen = Math.max(4, Math.min(10, maxW - 30));
 						const filled = Math.round(progress * meterLen);
 						const meter = theme.fg("accent", "⣿".repeat(filled)) + theme.fg("muted", "⠁".repeat(meterLen - filled));
 						const hint = theme.fg("dim", progress < 1 ? "hold…" : "ready!");
-						const lvl = theme.fg("warning", `Lv.${pet.level}`);
 						const out: string[] = [];
-						out.push(` ${theme.fg("muted", "○")} ${lvl} ${theme.fg("accent", creature)} ${meter} ${hint}`);
+						out.push(` ${theme.fg("accent", creature)}  ${meter} ${hint}`);
 						return out;
 					},
 				};
@@ -1412,39 +1366,28 @@ export default function (pi: ExtensionAPI) {
 						? theme.fg("dim", "Ctrl+Shift+B")
 						: theme.fg("dim", "⌴ release");
 
-					// Pet mood from audio
+					// Face reacts to audio
 					pet.mood = audioLevelSmoothed > 0.4 ? "ecstatic" : audioLevelSmoothed > 0.12 ? "excited" : "happy";
 					const creature = getCreature(pet.evolution, pet.mood, audioLevelSmoothed);
-					const lvl = theme.fg("warning", `Lv.${pet.level}`);
-					const xpBar = buildXPBar(pet.xp, pet.xpToNext, 10);
-					const xpDisplay = theme.fg("success", xpBar);
 
 					const out: string[] = [];
 
 					if (battle.active && !battle.defeated) {
-						// ─── POKEMON BATTLE MODE ────────────────
 						const hpBar = buildHPBar(battle.enemyHP, battle.enemyMaxHP, 10);
 						const hpColor = (battle.enemyHP / battle.enemyMaxHP) > 0.5 ? "success" : (battle.enemyHP / battle.enemyMaxHP) > 0.2 ? "warning" : "error";
-						const enemyHPDisplay = theme.fg(hpColor as any, hpBar);
-						const comboStr = battle.combo > 1 ? theme.fg("warning", ` x${battle.combo}`) : "";
-						const critStr = battle.crit ? theme.fg("error", " ⚡CRIT!") : "";
-						const dmgStr = battle.playerDamage > 0 ? theme.fg("error", ` -${battle.playerDamage}`) : "";
-
-						out.push(` ${theme.fg("error", "⚔")} ${theme.fg("dim", battle.enemyName)} ${enemyHPDisplay}${dmgStr}${comboStr}${critStr}`);
-						out.push(` ${theme.fg("error", getRecordDot())} ${theme.fg("accent", creature)} ${lvl} ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)}`);
+						out.push(` ${theme.fg("error", "⚔")} ${theme.fg("dim", battle.enemyName)} ${theme.fg(hpColor as any, hpBar)}${battle.combo > 1 ? theme.fg("warning", ` x${battle.combo}`) : ""}`);
+						out.push(` ${theme.fg("error", getRecordDot())} ${theme.fg("accent", creature)}  ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)}`);
 						return out;
 					}
 
 					if (battle.active && battle.defeated) {
-						const sparkle = Math.sin(Date.now() / 200) > 0 ? "✦" : "✧";
-						out.push(` ${theme.fg("success", sparkle)} ${theme.fg("success", "VICTORY!")} ${theme.fg("warning", `+${battle.xpReward}XP`)}`);
-						out.push(` ${theme.fg("accent", creature)} ${lvl} ${xpDisplay} ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)}`);
+						out.push(` ${theme.fg("success", "✦")} ${theme.fg("success", "VICTORY!")} ${theme.fg("warning", `+${battle.xpReward}XP`)}`);
+						out.push(` ${theme.fg("accent", creature)}  ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)}`);
 						return out;
 					}
 
-					// Normal recording — single line with creature + wave + status
-					const content = ` ${theme.fg("error", getRecordDot())} ${theme.fg("accent", creature)} ${lvl} XP${xpDisplay} ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`;
-					out.push(content);
+					// Normal — face + wave + time
+					out.push(` ${theme.fg("error", getRecordDot())} ${theme.fg("accent", creature)}  ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`);
 					return out;
 				},
 			};
