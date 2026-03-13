@@ -9,7 +9,7 @@
  *              ↑         │
  *              └─────────┘  (rapid re-press recovery)
  *
- *   warmup:     User holds SPACE for ≥ HOLD_THRESHOLD_MS (2000ms).
+ *   warmup:     User holds SPACE for ≥ HOLD_THRESHOLD_MS (800ms).
  *               A "keep holding…" hint with countdown is shown. If released before
  *               the threshold, a normal space character is typed (or "hold longer" hint shown).
  *
@@ -29,7 +29,7 @@
  *      First SPACE press → enter warmup immediately (show countdown).
  *      Released < 300ms → tap → type a space.
  *      Released 300ms–2s → show "hold longer" hint.
- *      Held ≥ 2s → activate recording.
+ *      Held ≥ 0.8s → activate recording.
  *      True release event stops recording.
  *
  *   B) Non-Kitty (macOS Terminal, Ghostty on macOS):
@@ -38,7 +38,7 @@
  *      No more presses within 500ms → TAP → type a space.
  *      Rapid presses detected → user is HOLDING.
  *      After REPEAT_CONFIRM_COUNT (3) rapid presses → enter warmup.
- *      After HOLD_THRESHOLD_MS (2000ms) from first press → activate recording.
+ *      After HOLD_THRESHOLD_MS (800ms) from first press → activate recording.
  *      Gap > RELEASE_DETECT_MS (500ms) after RECORDING_GRACE_MS (1000ms) → stop.
  *
  *   ENTERPRISE FALLBACKS
@@ -126,8 +126,6 @@ const RELEASE_DETECT_RECORDING_MS = 3000; // During active recording, gap before
                                            //    be busy with Deepgram WebSocket I/O
                                            // 2. False stops are far worse than slow stop
                                            // 3. User expects recording to continue while holding
-const RETRY_DELAY_MS = 300;       // Auto-retry on transient failure during rapid re-press
-const MAX_RETRY_ATTEMPTS = 1;     // Max retries per activation attempt
 const CORRUPTION_GUARD_MS = 200;  // Min gap between stop and restart
 
 // Debug logging — set PI_VOICE_DEBUG=1 to enable
@@ -139,29 +137,25 @@ let audioLevel = 0;
 let audioLevelSmoothed = 0;
 
 function updateAudioLevel(chunk: Buffer) {
-	// Compute RMS of 16-bit PCM samples
+	const len = chunk.length;
+	if (len < 2) return;
 	let sum = 0;
-	const samples = Math.floor(chunk.length / 2);
-	if (samples === 0) return;
-	for (let i = 0; i < chunk.length - 1; i += 2) {
+	const samples = len >> 1;
+	for (let i = 0; i < len - 1; i += 2) {
 		const sample = chunk.readInt16LE(i);
 		sum += sample * sample;
 	}
 	const rms = Math.sqrt(sum / samples);
-	// Normalize to 0-1 range (16-bit max is 32768)
-	audioLevel = Math.min(1, rms / 8000);
-	// Smooth with exponential decay
+	audioLevel = rms < 8000 ? rms / 8000 : 1;
 	audioLevelSmoothed = audioLevelSmoothed * 0.6 + audioLevel * 0.4;
 }
 
 function voiceDebug(...args: unknown[]) {
-	// Always write to log file for post-mortem debugging
+	if (!VOICE_DEBUG) return;
 	const ts = new Date().toISOString().split("T")[1];
 	const line = `[voice ${ts}] ${args.map(a => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" ")}\n`;
 	try { fs.appendFileSync(VOICE_LOG_FILE, line); } catch {}
-	if (VOICE_DEBUG) {
-		process.stderr.write(line);
-	}
+	process.stderr.write(line);
 }
 
 const EXT_DIR = path.dirname(new URL(import.meta.url).pathname);
@@ -647,7 +641,6 @@ export default function (pi: ExtensionAPI) {
 	// Streaming session state
 	let activeSession: StreamingSession | null = null;
 
-	let retryAttempts = 0;
 	let lastStopTime = 0;    // For corruption guard
 	let recordingStartedAt = 0; // When recording actually started (for grace period)
 	let editorTextBeforeVoice = ""; // Snapshot of editor text before recording started
@@ -899,7 +892,7 @@ export default function (pi: ExtensionAPI) {
 		const prev = voiceState;
 		voiceState = newState;
 		if (prev !== newState) {
-			voiceDebug(`STATE: ${prev} → ${newState}`, { stack: new Error().stack?.split("\n").slice(1, 4).map(s => s.trim()).join(" | ") });
+			voiceDebug(`STATE: ${prev} → ${newState}`);
 		}
 		updateVoiceStatus();
 	}
@@ -967,7 +960,6 @@ export default function (pi: ExtensionAPI) {
 		spacePressCount = 0;
 		lastSpacePressTime = 0;
 		holdConfirmed = false;
-		retryAttempts = 0;
 		errorCooldownUntil = 0;
 		editorTextBeforeVoice = "";
 		dictationMode = false;
@@ -1005,13 +997,6 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	// ─── Warmup Widget ──────────────────────────────────────────────────────
-	//
-	// Premium minimal cat: calm, clean, and subtle.
-
-	function stripAnsi(text: string): string {
-		return text.replace(/\[[^m]*m/g, "");
-	}
-
 	// ═══════════════════════════════════════════════════════════════════════
 	// ─── Face: (◕▽◕) — eyes react to voice ─────────────────────────────
 
@@ -1210,15 +1195,9 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.setWidget("voice-recording", (tui, theme) => {
 				return {
 					invalidate() {},
-					render(width: number): string[] {
-						const maxW = Math.max(0, Math.min(width - 4, 56));
+					render(): string[] {
 						const dots = ".".repeat(1 + (Math.floor(Date.now() / 400) % 3));
-						const content = ` ${theme.fg("accent", ">")} ${theme.fg("dim", `Processing${dots}`)}`;
-						const stripped = content.replace(/\x1b\[[^m]*m/g, "").length;
-						const pad = Math.max(0, maxW - stripped);
-
-						const border = theme.fg("border", "─".repeat(maxW));
-						return [border, content + " ".repeat(pad), border];
+						return [` ${theme.fg("accent", ">")} ${theme.fg("dim", `Processing${dots}`)}`];
 					},
 				};
 			}, { placement: "aboveEditor" });
@@ -1254,7 +1233,6 @@ export default function (pi: ExtensionAPI) {
 		hideWidget();
 
 		recordingStart = Date.now();
-		retryAttempts = 0;
 
 		// Snapshot editor text before voice overwrites it with live transcript
 		editorTextBeforeVoice = ctx?.hasUI ? (ctx.ui.getEditorText() || "") : "";
@@ -1359,7 +1337,6 @@ export default function (pi: ExtensionAPI) {
 				clearHoldTimer();
 				clearReleaseTimer();
 				clearWarmupWidget();
-				retryAttempts = 0;
 				errorCooldownUntil = Date.now() + 5000; // Block re-activation for 5 seconds
 
 				ctx?.ui.notify(`Voice error: ${err}`, "error");
@@ -1517,7 +1494,7 @@ export default function (pi: ExtensionAPI) {
 	//      2. No more presses within RELEASE_DETECT_MS (500ms) → TAP → type space.
 	//      3. Rapid presses arrive → user is HOLDING. After REPEAT_CONFIRM_COUNT
 	//         rapid presses → enter warmup, show countdown.
-	//      4. After HOLD_THRESHOLD_MS (2000ms) from first press → start recording.
+	//      4. After HOLD_THRESHOLD_MS (800ms) from first press → start recording.
 	//      5. Recording continues while key-repeat events arrive.
 	//         Gap > RELEASE_DETECT_MS after RECORDING_GRACE_MS → stop.
 	//
@@ -1554,7 +1531,7 @@ export default function (pi: ExtensionAPI) {
 			spacePressCount = 0;
 			holdConfirmed = false;
 			// Don't type a space — user clearly intended to trigger voice but let go too early
-			ctx?.ui.notify("Hold SPACE for 2 seconds to activate voice.", "info");
+			ctx?.ui.notify("Hold SPACE longer to activate voice.", "info");
 			return;
 		}
 
@@ -1644,7 +1621,7 @@ export default function (pi: ExtensionAPI) {
 							if (ctx?.hasUI) ctx.ui.setEditorText((ctx.ui.getEditorText() || "") + " ");
 						} else {
 							// Held long enough to see warmup but let go → show hint
-							ctx?.ui.notify("Hold SPACE for 2 seconds to activate voice.", "info");
+							ctx?.ui.notify("Hold SPACE longer to activate voice.", "info");
 						}
 						return { consume: true };
 					}
@@ -2133,24 +2110,10 @@ export default function (pi: ExtensionAPI) {
 	// ─── /voice command ──────────────────────────────────────────────────────
 
 	pi.registerCommand("voice", {
-		description: "Voice: /voice [on|off|stop|dictate|history|test|info|setup|doctor|backends|daemon|cat on|cat off]",
+		description: "Voice: /voice [on|off|stop|dictate|history|test|info|setup|doctor|backends|daemon]",
 		handler: async (args, cmdCtx) => {
 			ctx = cmdCtx;
 			const sub = (args || "").trim().toLowerCase();
-
-			if (sub === "cat on" || sub === "style cat") {
-				config.catAnimation = true;
-				saveConfig(config, config.scope, currentCwd);
-				cmdCtx.ui.notify("Voice cat animation enabled.", "info");
-				return;
-			}
-
-			if (sub === "cat off" || sub === "style minimal") {
-				config.catAnimation = false;
-				saveConfig(config, config.scope, currentCwd);
-				cmdCtx.ui.notify("Voice minimal widget enabled (cat animation off).", "info");
-				return;
-			}
 
 			if (sub === "on") {
 				config.enabled = true;
@@ -2163,7 +2126,7 @@ export default function (pi: ExtensionAPI) {
 				cmdCtx.ui.notify([
 					`Voice enabled (${mode}).`,
 					"",
-					"  Hold SPACE (2s) → release to transcribe",
+					"  Hold SPACE → release to transcribe",
 					"  Ctrl+Shift+V → toggle recording on/off",
 					"  Quick SPACE tap → types a space (no voice)",
 					"  /voice dictate  → continuous mode (no hold)",
