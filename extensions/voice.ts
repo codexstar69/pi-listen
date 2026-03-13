@@ -1098,107 +1098,124 @@ export default function (pi: ExtensionAPI) {
 
 	// ─── Evolution Sprites (pixel art via Unicode blocks) ───────────────
 	// ─── ANSI True Color helpers ────────────────────────────────────────
-	// The theme only has named colors. For pixel art we need exact RGB.
 	function rgb(r: number, g: number, b: number, text: string): string {
 		return `\x1b[38;2;${r};${g};${b}m${text}\x1b[0m`;
 	}
+	/** ▀ char: top half = fg, bottom half = bg */
+	function halfTop(tr: number, tg: number, tb: number, br: number, bg: number, bb: number): string {
+		return `\x1b[38;2;${tr};${tg};${tb};48;2;${br};${bg};${bb}m▀\x1b[0m`;
+	}
+	/** ▄ char: top half = bg, bottom half = fg */
+	function halfBot(tr: number, tg: number, tb: number, br: number, bg: number, bb: number): string {
+		return `\x1b[38;2;${br};${bg};${bb};48;2;${tr};${tg};${tb}m▄\x1b[0m`;
+	}
+	function block(r: number, g: number, b: number): string {
+		return `\x1b[38;2;${r};${g};${b}m█\x1b[0m`;
+	}
+
+	// Color palette from concept art
+	const CC = {
+		gr: [120, 220, 120] as const,  // green outline
+		cy: [100, 200, 240] as const,  // cyan (eyes, crown)
+		dk: [35, 40, 55] as const,     // dark face interior
+		pu: [160, 100, 200] as const,  // purple
+		pd: [120, 70, 160] as const,   // dark purple
+		tl: [80, 200, 180] as const,   // teal
+		bl: [80, 120, 200] as const,   // blue
+		pk: [220, 100, 140] as const,  // pink hearts
+		wh: [200, 220, 240] as const,  // white highlights
+		bg: [0, 0, 0] as const,        // transparent (terminal bg)
+	};
 
 	function getPetSprite(evolution: number, mood: string, _level: number): string[] {
 		const t = Date.now() / 1000;
-
-		// Color palette from the concept art
-		const G  = (s: string) => rgb(120, 220, 120, s);  // green outline/body
-		const Gd = (s: string) => rgb(80, 160, 80, s);    // dark green
-		const Gl = (s: string) => rgb(160, 240, 160, s);  // light green
-		const C  = (s: string) => rgb(100, 200, 240, s);  // cyan eyes
-		const P  = (s: string) => rgb(160, 100, 200, s);  // purple belly/clothes
-		const Pd = (s: string) => rgb(120, 70, 160, s);   // dark purple
-		const Pk = (s: string) => rgb(220, 100, 140, s);  // pink hearts
-		const T  = (s: string) => rgb(80, 200, 180, s);   // teal accents
-		const W  = (s: string) => rgb(200, 220, 240, s);  // white highlights
+		const { gr, cy, dk, pu, pd, tl, bl, pk, wh, bg: _bg } = CC;
+		const B = (c: readonly [number, number, number]) => block(c[0], c[1], c[2]);
+		const HT = (top: readonly [number, number, number], bot: readonly [number, number, number]) => halfTop(top[0], top[1], top[2], bot[0], bot[1], bot[2]);
+		const HB = (top: readonly [number, number, number], bot: readonly [number, number, number]) => halfBot(top[0], top[1], top[2], bot[0], bot[1], bot[2]);
+		const heart = () => rgb(pk[0], pk[1], pk[2], "♥");
+		const whisker = () => rgb(gr[0], gr[1], gr[2], "═");
+		const bg = _bg;
 
 		if (evolution === 0) {
 			// Egg
 			const crack = mood === "excited" && Math.sin(t * 4) > 0;
+			const c = crack ? rgb(gr[0], gr[1], gr[2], "╱") : B(tl);
 			return [
-				`   ${G("▄████▄")}   `,
-				`  ${G("█")}${Gl("░░░░")}${G("█")}  `,
-				`  ${G("█")}${Gl("░")}${crack ? G("╱") : Gl("░")}${Gl("░")}${crack ? G("╲") : Gl("░")}${G("█")}  `,
-				`   ${G("▀████▀")}   `,
+				`    ${HB(bg, gr)}${HB(bg, gr)}${HB(bg, gr)}${HB(bg, gr)}    `,
+				`   ${B(gr)}${B(tl)}${B(tl)}${B(tl)}${B(tl)}${B(gr)}   `,
+				`   ${B(gr)}${B(tl)}${c}${B(tl)}${c}${B(gr)}   `,
+				`    ${HT(gr, bg)}${HT(gr, bg)}${HT(gr, bg)}${HT(gr, bg)}    `,
 			];
 		}
 		if (evolution === 1) {
-			// Baby — small pixel blob
+			// Baby — small round pixel blob
 			const blink = Math.sin(t * 0.8) > 0.92;
-			const eL = blink ? G("▄") : C("●");
-			const eR = blink ? G("▄") : C("●");
+			const eL = blink ? B(dk) : B(cy);
+			const eR = blink ? B(dk) : B(cy);
 			return [
-				`   ${G("▄▀")}${G("██")}${G("▀▄")}   `,
-				`  ${G("█")} ${eL}${G("██")}${eR} ${G("█")}  `,
-				`   ${G("█")}${Gl(" ▿ ")}${G("█")}   `,
-				`    ${G("▀██▀")}    `,
+				`   ${HB(bg, gr)}${B(gr)}${HB(bg, gr)}${HB(bg, gr)}${B(gr)}${HB(bg, gr)}   `,
+				`   ${B(gr)}${B(dk)}${eL}${B(dk)}${eR}${B(dk)}${B(gr)}   `,
+				`   ${B(gr)}${B(dk)}${B(dk)}${rgb(wh[0], wh[1], wh[2], "▿")}${B(dk)}${B(dk)}${B(gr)}   `,
+				`    ${HT(gr, bg)}${HT(gr, bg)}${HT(gr, bg)}${HT(gr, bg)}    `,
 			];
 		}
 		if (evolution === 2) {
-			// Teen — ears, whiskers, body
+			// Teen — ears, whiskers
 			const blink = Math.sin(t * 0.7) > 0.93;
-			const eL = blink ? G("▄") : C("◆");
-			const eR = blink ? G("▄") : C("◆");
-			const blush = mood === "ecstatic" || mood === "excited" ? Pk("·") : " ";
+			const eL = blink ? B(dk) : B(cy);
+			const eR = blink ? B(dk) : B(cy);
 			const m = mood === "ecstatic" ? "ω" : "▿";
 			return [
-				`  ${G("▄▀")}    ${G("▀▄")}  `,
-				`  ${G("█")}${G("▄▀▀▀▀▄")}${G("█")}  `,
-				` ${G("═")}${G("█")}${blush}${eL} ${G("██")} ${eR}${blush}${G("█")}${G("═")}`,
-				`  ${G("█")} ${G("(")}${W(m)}${G(")")} ${G("█")}  `,
-				`   ${G("▀")}${P("████")}${G("▀")}   `,
-				`    ${P("█")}${Pd("▓▓")}${P("█")}    `,
-				`   ${G("▀▀")}  ${G("▀▀")}   `,
+				`   ${HB(bg, gr)} ${HB(bg, dk)}${HB(bg, dk)}${HB(bg, dk)}${HB(bg, dk)}${HB(bg, dk)}${HB(bg, dk)} ${HB(bg, gr)}   `,
+				`   ${B(gr)} ${B(dk)}${eL}${eL}${B(dk)}${B(dk)}${eR}${eR}${B(dk)} ${B(gr)}   `,
+				`  ${whisker()}${B(gr)} ${B(dk)}${B(dk)}${B(dk)}${rgb(wh[0], wh[1], wh[2], m)}${B(dk)}${B(dk)}${B(dk)} ${B(gr)}${whisker()} `,
+				`    ${HT(gr, bg)}${HT(pu, bg)}${HT(pu, bg)}${HT(pu, bg)}${HT(pu, bg)}${HT(pu, bg)}${HT(pu, bg)}${HT(gr, bg)}    `,
 			];
 		}
 		if (evolution === 3) {
-			// Adult — the full pixel cat from the concept art
+			// Adult — the full pixel cat from concept art
 			const blink = Math.sin(t * 0.6) > 0.94;
-			const eL = blink ? G("▄▄") : C("◆ ");
-			const eR = blink ? G("▄▄") : C(" ◆");
+			const eL = blink ? B(dk) : B(cy);
+			const eR = blink ? B(dk) : B(cy);
 			const m = mood === "ecstatic" ? "ω" : mood === "excited" ? "▿" : "·";
-			const blush = (mood === "ecstatic" || mood === "excited") ? Pk("░") : G("░");
 			const tail = Math.sin(t * 2.5) > 0;
-			const heartFloat = (mood === "ecstatic" || mood === "excited") && Math.sin(t * 2) > 0;
-			const heart1 = heartFloat ? Pk("♥") : " ";
-			const heart2 = heartFloat && Math.sin(t * 2.8 + 1) > 0.3 ? Pk("♥") : " ";
+			const heartFloat = mood === "ecstatic" || mood === "excited";
+			const h1 = heartFloat && Math.sin(t * 2) > 0 ? heart() : " ";
+			const h2 = heartFloat && Math.sin(t * 2.8 + 1) > 0.3 ? heart() : " ";
+			const armUp = mood === "ecstatic" && Math.sin(t * 3) > 0;
 			return [
-				`            ${heart2} `,
-				`  ${G("▄▀")}      ${G("▀▄")}${heart1}`,
-				`  ${G("█")} ${T("▄▀▀▀▀▄")} ${G("█")} `,
-				` ${G("═")}${G("█")}${blush}${eL}${G("██")}${eR}${blush}${G("█")}${G("═")}`,
-				`  ${G("█")}  ${G("(")}${W(m)}${G(")")}  ${G("█")} `,
-				` ${T("╱")}${G("█")}${T("▄")}${P("██████")}${T("▄")}${G("█")} `,
-				`  ${G("█")}${P("█")}${T("░")}${P("████")}${T("░")}${P("█")}${G("█")} `,
-				`   ${P("█")}${Pd("▓▓")}${P("██")}${Pd("▓▓")}${P("█")}  `,
-				`   ${G("▀▀")}  ${tail ? T("▄▀") : T("▀▄")}  ${G("▀▀")} `,
+				`                ${h2}`,
+				`      ${HB(bg, cy)} ${HB(bg, cy)}${B(cy)}${HB(bg, cy)} ${HB(bg, cy)}      `,
+				`    ${HB(bg, gr)}${HT(gr, bg)}${HT(cy, dk)}${HT(cy, dk)}${HT(cy, dk)}${HT(cy, dk)}${HT(cy, dk)}${HT(cy, dk)}${HT(gr, bg)}${HB(bg, gr)} ${h1}`,
+				`   ${B(gr)} ${B(dk)}${B(dk)}${B(dk)}${B(dk)}${B(dk)}${B(dk)}${B(dk)}${B(dk)} ${B(gr)}  `,
+				`  ${whisker()}${B(gr)}${B(dk)}${eL}${eL}${B(dk)}${B(dk)}${eR}${eR}${B(dk)}${B(gr)}${whisker()} `,
+				`   ${B(gr)} ${B(dk)}${B(dk)}${B(dk)}${rgb(wh[0], wh[1], wh[2], m)}${B(dk)}${B(dk)}${B(dk)} ${B(gr)}  `,
+				` ${armUp ? rgb(tl[0], tl[1], tl[2], "╱") : " "}${B(gr)}${B(tl)}${B(tl)}${B(gr)}${B(gr)}${B(bl)}${B(bl)}${B(pu)}${B(pu)}${B(tl)}${B(gr)}  `,
+				`   ${B(gr)}${B(pu)}${B(tl)}${B(pu)}${B(pu)}${B(bl)}${B(bl)}${B(pu)}${B(pu)}${B(tl)}${B(pu)}${B(gr)}  `,
+				`    ${B(pd)}${B(pd)}${B(pu)}${B(pu)}  ${B(pu)}${B(pu)}${B(pd)}${B(pd)}  `,
+				`    ${HT(pd, bg)}${HT(pd, bg)}    ${HT(pd, bg)}${HT(pd, bg)} ${tail ? rgb(tl[0], tl[1], tl[2], "~") : " "}`,
 			];
 		}
-		// Legendary — crowned, sparkled
+		// Legendary — crowned pixel cat with sparkles
 		const blink = Math.sin(t * 0.5) > 0.95;
-		const eL = blink ? G("▄▄") : C("✦ ");
-		const eR = blink ? G("▄▄") : C(" ✦");
-		const sp1 = Math.sin(t * 3) > 0.3 ? W("✧") : " ";
-		const sp2 = Math.sin(t * 3 + 2) > 0.3 ? W("✧") : " ";
+		const eL = blink ? B(dk) : B(cy);
+		const eR = blink ? B(dk) : B(cy);
+		const sp1 = Math.sin(t * 3) > 0.3 ? rgb(wh[0], wh[1], wh[2], "✧") : " ";
+		const sp2 = Math.sin(t * 3 + 2) > 0.3 ? rgb(wh[0], wh[1], wh[2], "✧") : " ";
 		const tail = Math.sin(t * 2) > 0;
-		const heartFloat = Math.sin(t * 1.5) > 0;
-		const heart1 = heartFloat ? Pk("♥") : " ";
-		const heart2 = Math.sin(t * 2.1 + 1) > 0.2 ? Pk("♥") : " ";
+		const h1 = Math.sin(t * 2) > 0 ? heart() : " ";
+		const h2 = Math.sin(t * 2.1 + 1) > 0.2 ? heart() : " ";
 		return [
-			`    ${C("▄█▀█▄")}     ${heart2}`,
-			` ${sp1}${G("▄▀")}${C("▀")}    ${C("▀")}${G("▀▄")}${sp2}${heart1}`,
-			`  ${G("█")} ${T("▄▀▀▀▀▄")} ${G("█")} `,
-			` ${G("═")}${G("█")}${W("✧")}${eL}${G("██")}${eR}${W("✧")}${G("█")}${G("═")}`,
-			`  ${G("█")}  ${G("(")}${W("ω")}${G(")")}  ${G("█")} `,
-			` ${T("╱")}${G("█")}${T("▄")}${P("██████")}${T("▄")}${G("█")} `,
-			`  ${G("█")}${P("█")}${T("░")}${P("████")}${T("░")}${P("█")}${G("█")} `,
-			`   ${P("█")}${Pd("▓▓")}${P("██")}${Pd("▓▓")}${P("█")}  `,
-			`   ${G("▀▀")}  ${tail ? T("█▀") : T("▀█")}  ${G("▀▀")} `,
+			`      ${HB(bg, cy)} ${HB(bg, cy)}${B(cy)}${HB(bg, cy)} ${HB(bg, cy)}     ${h2}`,
+			` ${sp1} ${HB(bg, gr)}${HT(gr, bg)}${HT(cy, dk)}${HT(cy, dk)}${HT(cy, dk)}${HT(cy, dk)}${HT(cy, dk)}${HT(cy, dk)}${HT(gr, bg)}${HB(bg, gr)} ${sp2}${h1}`,
+			`   ${B(gr)} ${B(dk)}${B(dk)}${B(dk)}${B(dk)}${B(dk)}${B(dk)}${B(dk)}${B(dk)} ${B(gr)}  `,
+			`  ${whisker()}${B(gr)}${rgb(wh[0], wh[1], wh[2], "✧")}${eL}${eL}${B(dk)}${B(dk)}${eR}${eR}${rgb(wh[0], wh[1], wh[2], "✧")}${B(gr)}${whisker()} `,
+			`   ${B(gr)} ${B(dk)}${B(dk)}${B(dk)}${rgb(wh[0], wh[1], wh[2], "ω")}${B(dk)}${B(dk)}${B(dk)} ${B(gr)}  `,
+			` ${rgb(tl[0], tl[1], tl[2], "╱")}${B(gr)}${B(tl)}${B(tl)}${B(gr)}${B(gr)}${B(bl)}${B(bl)}${B(pu)}${B(pu)}${B(tl)}${B(gr)}  `,
+			`   ${B(gr)}${B(pu)}${B(tl)}${B(pu)}${B(pu)}${B(bl)}${B(bl)}${B(pu)}${B(pu)}${B(tl)}${B(pu)}${B(gr)}  `,
+			`    ${B(pd)}${B(pd)}${B(pu)}${B(pu)}  ${B(pu)}${B(pu)}${B(pd)}${B(pd)}  `,
+			`    ${HT(pd, bg)}${HT(pd, bg)}    ${HT(pd, bg)}${HT(pd, bg)} ${tail ? rgb(tl[0], tl[1], tl[2], "~") : " "}`,
 		];
 	}
 
