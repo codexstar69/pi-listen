@@ -723,7 +723,7 @@ export default function (pi: ExtensionAPI) {
 	let _blinkUntil = 0;
 	let _doubleBlink = false;
 
-	function getFace(audioLevel: number): string {
+	function getFace(audioLevel: number): { eyeL: string; eyeR: string; mouth: string } {
 		const now = Date.now();
 
 		// ── Natural blink ──
@@ -745,27 +745,27 @@ export default function (pi: ExtensionAPI) {
 		const blinking = now < _blinkUntil;
 
 		// ── Eyes dilate with audio level ──
-		let eyes: string;
+		let eyeL: string;
+		let eyeR: string;
 		if (blinking) {
-			eyes = "–";
+			eyeL = "–"; eyeR = "–";
 		} else if (audioLevel > 0.42) {
-			eyes = "◉";
+			eyeL = "◉"; eyeR = "◉";
 		} else if (audioLevel > 0.15) {
-			eyes = "●";
+			eyeL = "●"; eyeR = "●";
 		} else {
-			eyes = "◕";
+			eyeL = "◕"; eyeR = "◕";
 		}
 
 		// ── Mouth animates with audio (even soft speech) ──
-		// Thresholds are intentionally low so normal conversation triggers animation.
-		// audioLevelSmoothed typically ranges 0.01–0.5 for speech.
+		// Thresholds low so normal conversation triggers animation.
 		let mouth: string;
-		if (audioLevel > 0.30)      mouth = "◎";   // wide open — loud
-		else if (audioLevel > 0.15) mouth = "○";   // open — normal talking
-		else if (audioLevel > 0.06) mouth = "◦";   // slightly open — soft speech
-		else                        mouth = " ";   // closed — silence
+		if (audioLevel > 0.30)      mouth = "◠◡◠";   // wide open — loud
+		else if (audioLevel > 0.15) mouth = " ◡ ";   // open — normal talking
+		else if (audioLevel > 0.06) mouth = " · ";   // slightly open — soft speech
+		else                        mouth = " ─ ";   // closed — silence
 
-		return `(${eyes}▽${eyes})${mouth}`;
+		return { eyeL, eyeR, mouth };
 	}
 
 
@@ -835,14 +835,19 @@ export default function (pi: ExtensionAPI) {
 					invalidate() {},
 					render(width: number): string[] {
 						const maxW = Math.max(0, Math.min(width - 4, 72));
-						const face = getFace(0);
+						const f = getFace(0);
 						const meterLen = Math.max(4, Math.min(10, maxW - 30));
 						const filled = Math.round(progress * meterLen);
 						const meter = theme.fg("accent", "⣿".repeat(filled)) + theme.fg("muted", "⠁".repeat(meterLen - filled));
 						const hint = theme.fg("dim", progress < 1 ? "hold…" : "ready!");
-						const out: string[] = [];
-						out.push(` ${theme.fg("accent", face)}  ${meter} ${hint}`);
-						return out;
+						const faceTop = theme.fg("accent", ` ${f.eyeL}   ${f.eyeR}`);
+						const faceMid = theme.fg("accent", `   ▽`);
+						const faceBot = theme.fg("accent", ` ${f.mouth}`);
+						return [
+							`  ${faceTop}`,
+							`  ${faceMid}   ${meter} ${hint}`,
+							`  ${faceBot}`,
+						];
 					},
 				};
 			}, { placement: "aboveEditor" });
@@ -883,9 +888,18 @@ export default function (pi: ExtensionAPI) {
 					const timeStr = mins > 0 ? `${mins}:${String(secs).padStart(2, "0")}` : `${secs}s`;
 					const wave = buildPremiumWave(frame, Math.max(6, Math.min(12, maxW - 30)), audioLevelSmoothed);
 					const hint = theme.fg("dim", "⌴ release");
-					const face = getFace(audioLevelSmoothed);
+					const f = getFace(audioLevelSmoothed);
+					const dot = theme.fg("error", getRecordDot());
 
-					return [` ${theme.fg("error", getRecordDot())} ${theme.fg("accent", face)}  ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`];
+					// 3-line face: eyes on top, nose in middle with waveform, mouth on bottom
+					const faceTop = theme.fg("accent", ` ${f.eyeL}   ${f.eyeR}`);
+					const faceMid = theme.fg("accent", `   ▽`);
+					const faceBot = theme.fg("accent", ` ${f.mouth}`);
+					return [
+						`  ${faceTop}`,
+						` ${dot} ${faceMid}   ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`,
+						`  ${faceBot}`,
+					];
 				},
 			};
 		}, { placement: "aboveEditor" });
