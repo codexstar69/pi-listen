@@ -55,7 +55,7 @@
  * Activation:
  *   - Hold SPACE (≥500ms) → release to finalize
  *   - Ctrl+Shift+V → toggle start/stop (always works)
- *   - Ctrl+Shift+B → hold to record → auto-send as /btw
+
  *
  * Config in ~/.pi/agent/settings.json under "voice": { ... }
  */
@@ -64,11 +64,7 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 	ExtensionCommandContext,
-	MessageRenderOptions,
 } from "@mariozechner/pi-coding-agent";
-import type { Theme } from "@mariozechner/pi-coding-agent";
-import { streamSimple } from "@mariozechner/pi-ai";
-import type { AssistantMessageEvent } from "@mariozechner/pi-ai";
 import { isKeyRelease, isKeyRepeat, matchesKey } from "@mariozechner/pi-tui";
 import type { Component } from "@mariozechner/pi-tui";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
@@ -99,14 +95,6 @@ import { buildProvisioningPlan } from "./voice/install";
  *   finalizing → idle  (on completion or timeout)
  */
 type VoiceState = "idle" | "warmup" | "recording" | "finalizing";
-
-interface BtwExchange {
-	question: string;
-	thinking?: string;
-	answer: string;
-	model?: string;
-	timestamp: number;
-}
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -658,7 +646,7 @@ export default function (pi: ExtensionAPI) {
 
 	// Streaming session state
 	let activeSession: StreamingSession | null = null;
-	let currentTarget: "editor" | "btw" = "editor";
+
 	let retryAttempts = 0;
 	let lastStopTime = 0;    // For corruption guard
 	let recordingStartedAt = 0; // When recording actually started (for grace period)
@@ -676,29 +664,21 @@ export default function (pi: ExtensionAPI) {
 	let holdConfirmed = false;        // True once we've confirmed user is holding (not tapping)
 	let errorCooldownUntil = 0;       // After an error, block re-activation until this timestamp
 
-	// ─── BTW State ───────────────────────────────────────────────────────────
-
-	let btwThread: BtwExchange[] = [];
-	let btwWidgetVisible = false;
-
 	// ─── Recording History ───────────────────────────────────────────────────
 
 	interface RecordingHistoryEntry {
 		text: string;
 		timestamp: number;
 		duration: number;
-		target: "editor" | "btw";
 		mode: "hold" | "toggle" | "dictate";
 	}
 
 	const recordingHistory: RecordingHistoryEntry[] = [];
 	const MAX_HISTORY = 50;
 
-	function addToHistory(text: string, duration: number, target: "editor" | "btw", mode: "hold" | "toggle" | "dictate" = "hold") {
-		recordingHistory.unshift({ text, timestamp: Date.now(), duration, target, mode });
+	function addToHistory(text: string, duration: number, mode: "hold" | "toggle" | "dictate" = "hold") {
+		recordingHistory.unshift({ text, timestamp: Date.now(), duration, mode });
 		if (recordingHistory.length > MAX_HISTORY) recordingHistory.pop();
-
-
 	}
 
 	// ─── Continuous Dictation Mode ───────────────────────────────────────────
@@ -1155,7 +1135,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	// ─── Recording Widget ───────────────────────────────────────────────
-	function showRecordingWidget(target: "editor" | "btw") {
+	function showRecordingWidget() {
 		if (!ctx?.hasUI) return;
 
 		(showRecordingWidget as any)._frame = 0;
@@ -1163,14 +1143,14 @@ export default function (pi: ExtensionAPI) {
 
 		const animTimer = setInterval(() => {
 			(showRecordingWidget as any)._frame = ((showRecordingWidget as any)._frame || 0) + 1;
-			showRecordingWidgetFrame(target, (showRecordingWidget as any)._frame);
+			showRecordingWidgetFrame((showRecordingWidget as any)._frame);
 		}, 120);
 
 		(showRecordingWidget as any)._animTimer = animTimer;
-		showRecordingWidgetFrame(target, 0);
+		showRecordingWidgetFrame(0);
 	}
 
-	function showRecordingWidgetFrame(target: "editor" | "btw", frame: number) {
+	function showRecordingWidgetFrame(frame: number) {
 		if (!ctx?.hasUI) return;
 
 		ctx.ui.setWidget("voice-recording", (tui, theme) => {
@@ -1183,9 +1163,7 @@ export default function (pi: ExtensionAPI) {
 					const secs = elapsed % 60;
 					const timeStr = mins > 0 ? `${mins}:${String(secs).padStart(2, "0")}` : `${secs}s`;
 					const wave = buildPremiumWave(frame, Math.max(6, Math.min(12, maxW - 30)), audioLevelSmoothed);
-					const hint = target === "btw"
-						? theme.fg("dim", "Ctrl+Shift+B")
-						: theme.fg("dim", "⌴ release");
+					const hint = theme.fg("dim", "⌴ release");
 					const face = getFace(audioLevelSmoothed);
 
 					return [` ${theme.fg("error", getRecordDot())} ${theme.fg("accent", face)}  ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`];
@@ -1253,8 +1231,8 @@ export default function (pi: ExtensionAPI) {
 
 	// ─── Voice: Start / Stop (Streaming or Legacy) ───────────────────────────
 
-	async function startVoiceRecording(target: "editor" | "btw" = "editor"): Promise<boolean> {
-		voiceDebug("startVoiceRecording called", { target, voiceState, isDeepgram: isDeepgramStreaming(config), hasUI: !!ctx?.hasUI });
+	async function startVoiceRecording(): Promise<boolean> {
+		voiceDebug("startVoiceRecording called", { voiceState, isDeepgram: isDeepgramStreaming(config), hasUI: !!ctx?.hasUI });
 		if (!ctx?.hasUI) return false;
 
 		// ── SESSION CORRUPTION GUARD ──
@@ -1275,7 +1253,6 @@ export default function (pi: ExtensionAPI) {
 		// Clear any prior transcript from the widget
 		hideWidget();
 
-		currentTarget = target;
 		recordingStart = Date.now();
 		retryAttempts = 0;
 
@@ -1283,14 +1260,14 @@ export default function (pi: ExtensionAPI) {
 		editorTextBeforeVoice = ctx?.hasUI ? (ctx.ui.getEditorText() || "") : "";
 
 		if (isDeepgramStreaming(config)) {
-			return startStreamingRecording(target);
+			return startStreamingRecording();
 		} else {
-			return startLegacyRecording(target);
+			return startLegacyRecording();
 		}
 	}
 
-	async function startStreamingRecording(target: "editor" | "btw"): Promise<boolean> {
-		voiceDebug("startStreamingRecording called", { target, configBackend: config.backend, hasKey: !!resolveDeepgramApiKey(config) });
+	async function startStreamingRecording(): Promise<boolean> {
+		voiceDebug("startStreamingRecording called", { configBackend: config.backend, hasKey: !!resolveDeepgramApiKey(config) });
 		setVoiceState("recording");
 
 		const session = startStreamingSession(config, {
@@ -1332,35 +1309,30 @@ export default function (pi: ExtensionAPI) {
 				// No check mark widget, no "Processing" animation, no STT notification needed.
 				hideWidget();
 
-				if (target === "btw") {
-					handleBtw(fullText);
-				} else {
-					if (ctx?.hasUI) {
-						// Check for voice commands first
-						const cmd = detectVoiceCommand(fullText);
-						if (cmd.isCommand && cmd.action) {
-							executeVoiceCommand(cmd.action);
-							playSound("stop");
-							addToHistory(fullText, (Date.now() - recordingStart) / 1000, target);
-							setVoiceState("idle");
-							return;
-						}
-
-						// Process voice shortcuts (new line, period, etc.)
-						const processedText = processVoiceShortcuts(fullText);
-
-						// The editor already has the live transcript via updateLiveTranscriptWidget.
-						// Only set final text if the editor still has content.
-						// If user already hit Enter (editor cleared), don't re-insert.
-						const currentEditorText = ctx.ui.getEditorText?.() ?? "";
-						if (currentEditorText.trim()) {
-							const prefix = editorTextBeforeVoice ? editorTextBeforeVoice + " " : "";
-							ctx.ui.setEditorText(prefix + processedText);
-						}
-						const elapsed = ((Date.now() - recordingStart) / 1000).toFixed(1);
-						// No STT notification — live transcript already visible in editor
-						addToHistory(fullText, parseFloat(elapsed), target);
+				if (ctx?.hasUI) {
+					// Check for voice commands first
+					const cmd = detectVoiceCommand(fullText);
+					if (cmd.isCommand && cmd.action) {
+						executeVoiceCommand(cmd.action);
+						playSound("stop");
+						addToHistory(fullText, (Date.now() - recordingStart) / 1000);
+						setVoiceState("idle");
+						return;
 					}
+
+					// Process voice shortcuts (new line, period, etc.)
+					const processedText = processVoiceShortcuts(fullText);
+
+					// The editor already has the live transcript via updateLiveTranscriptWidget.
+					// Only set final text if the editor still has content.
+					// If user already hit Enter (editor cleared), don't re-insert.
+					const currentEditorText = ctx.ui.getEditorText?.() ?? "";
+					if (currentEditorText.trim()) {
+						const prefix = editorTextBeforeVoice ? editorTextBeforeVoice + " " : "";
+						ctx.ui.setEditorText(prefix + processedText);
+					}
+					const elapsed = ((Date.now() - recordingStart) / 1000).toFixed(1);
+					addToHistory(fullText, parseFloat(elapsed));
 				}
 				playSound("stop");
 				// Full state reset on successful completion
@@ -1416,17 +1388,17 @@ export default function (pi: ExtensionAPI) {
 				updateVoiceStatus();
 				const elapsed = (Date.now() - recordingStart) / 1000;
 				if (elapsed >= MAX_RECORDING_SECS) {
-					stopVoiceRecording(target);
+					stopVoiceRecording();
 				}
 			}
 		}, 1000);
 
-		showRecordingWidget(target);
+		showRecordingWidget();
 		playSound("start");
 		return true;
 	}
 
-	async function startLegacyRecording(target: "editor" | "btw"): Promise<boolean> {
+	async function startLegacyRecording(): Promise<boolean> {
 		if (!ctx) return false;
 		tempFile = path.join(os.tmpdir(), `pi-voice-${Date.now()}.wav`);
 		if (!startLegacyRecordingToFile(tempFile)) {
@@ -1440,18 +1412,18 @@ export default function (pi: ExtensionAPI) {
 				updateVoiceStatus();
 				const elapsed = (Date.now() - recordingStart) / 1000;
 				if (elapsed >= MAX_RECORDING_SECS) {
-					stopVoiceRecording(target);
+					stopVoiceRecording();
 				}
 			}
 		}, 1000);
 
-		showRecordingWidget(target);
+		showRecordingWidget();
 		playSound("start");
 		return true;
 	}
 
-	async function stopVoiceRecording(target: "editor" | "btw" = "editor") {
-		voiceDebug("stopVoiceRecording called", { voiceState, target, hasActiveSession: !!activeSession });
+	async function stopVoiceRecording() {
+		voiceDebug("stopVoiceRecording called", { voiceState, hasActiveSession: !!activeSession });
 		if (voiceState !== "recording" || !ctx) return;
 		if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
 
@@ -1512,18 +1484,13 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		if (target === "btw") {
-			await handleBtw(transcript);
-		} else {
-			if (ctx.hasUI) {
-				// Legacy path: use prefix pattern (same as streaming)
-				const prefix = editorTextBeforeVoice ? editorTextBeforeVoice + " " : "";
-				ctx.ui.setEditorText(prefix + transcript);
-				ctx.ui.notify(
-					`STT (${elapsed}s): ${transcript.slice(0, 80)}${transcript.length > 80 ? "…" : ""}`,
-					"info",
-				);
-			}
+		if (ctx.hasUI) {
+			const prefix = editorTextBeforeVoice ? editorTextBeforeVoice + " " : "";
+			ctx.ui.setEditorText(prefix + transcript);
+			ctx.ui.notify(
+				`STT (${elapsed}s): ${transcript.slice(0, 80)}${transcript.length > 80 ? "…" : ""}`,
+				"info",
+			);
 		}
 
 		setVoiceState("idle");
@@ -1609,7 +1576,7 @@ export default function (pi: ExtensionAPI) {
 			spaceDownTime = null;
 			spacePressCount = 0;
 			holdConfirmed = false;
-			stopVoiceRecording("editor");
+			stopVoiceRecording();
 		}
 	}
 
@@ -1699,7 +1666,7 @@ export default function (pi: ExtensionAPI) {
 						spaceDownTime = null;
 						spacePressCount = 0;
 						holdConfirmed = false;
-						stopVoiceRecording("editor");
+						stopVoiceRecording();
 						return { consume: true };
 					}
 
@@ -1752,7 +1719,7 @@ export default function (pi: ExtensionAPI) {
 									// async recording startup to prevent false stop
 									clearReleaseTimer();
 									voiceDebug("holdActivationTimer fired → starting recording (Kitty repeat path)");
-									startVoiceRecording("editor").then((ok) => {
+									startVoiceRecording().then((ok) => {
 										if (!ok) {
 											spaceConsumed = false;
 											spaceDownTime = null;
@@ -1857,7 +1824,7 @@ export default function (pi: ExtensionAPI) {
 								spaceConsumed = true;
 								recordingStartedAt = Date.now();
 								voiceDebug("holdActivationTimer fired → starting recording (Kitty path)");
-								startVoiceRecording("editor").then((ok) => {
+								startVoiceRecording().then((ok) => {
 									if (!ok) {
 										spaceConsumed = false;
 										spaceDownTime = null;
@@ -1921,7 +1888,7 @@ export default function (pi: ExtensionAPI) {
 									// a gap where the release timer fires falsely.
 									clearReleaseTimer();
 									voiceDebug("holdActivationTimer fired → starting recording (non-Kitty)");
-									startVoiceRecording("editor").then((ok) => {
+									startVoiceRecording().then((ok) => {
 										if (!ok) {
 											spaceConsumed = false;
 											spaceDownTime = null;
@@ -2020,47 +1987,7 @@ export default function (pi: ExtensionAPI) {
 				return undefined;
 			}
 
-			// ── Ctrl+Shift+B handling (BTW voice) — direct toggle, no hold threshold ──
-			if (matchesKey(data, "ctrl+shift+b")) {
-				if (isKeyRelease(data)) {
-					kittyReleaseDetected = true;
-					if (voiceState === "recording" && currentTarget === "btw") {
-						stopVoiceRecording("btw");
-						return { consume: true };
-					}
-					return undefined;
-				}
-
-				if (isKeyRepeat(data)) {
-					if (voiceState === "recording" && currentTarget === "btw") return { consume: true };
-					return undefined;
-				}
-
-				// If BTW widget is showing and we're idle → dismiss it
-				if (voiceState === "idle" && btwWidgetVisible) {
-					btwWidgetVisible = false;
-					if (ctx?.hasUI) ctx.ui.setWidget("btw", undefined);
-					ctx?.ui.notify("BTW dismissed. /btw:inject to push to agent.", "info");
-					return { consume: true };
-				}
-
-				if (voiceState === "recording" && currentTarget === "btw") {
-					stopVoiceRecording("btw");
-					return { consume: true };
-				}
-
-				if (voiceState === "idle") {
-					startVoiceRecording("btw").catch(() => setVoiceState("idle"));
-					return { consume: true };
-				}
-
-				if (voiceState === "recording" || voiceState === "finalizing" || voiceState === "warmup") {
-					return { consume: true };
-				}
-				return undefined;
-			}
-
-			// ── Escape key — clear voice transcript or dismiss BTW widget ──
+			// ── Escape key — clear voice transcript ──
 			if (matchesKey(data, "escape")) {
 				// During recording: cancel recording and clear transcript
 				if (voiceState === "recording" || voiceState === "warmup" || voiceState === "finalizing") {
@@ -2097,318 +2024,13 @@ export default function (pi: ExtensionAPI) {
 					}
 				}
 
-				if (btwWidgetVisible && voiceState === "idle") {
-					btwWidgetVisible = false;
-					if (ctx?.hasUI) ctx.ui.setWidget("btw", undefined);
-					return undefined;
-				}
+
 			}
 
 			return undefined;
 		});
 	}
 
-	// ─── BTW: Side Conversations ─────────────────────────────────────────────
-	// BTW is a side-channel for quick questions while the main agent works.
-	//
-	// Key principles (modeled after Claude Code's /btw):
-	// - Full visibility into current conversation (system prompt + all messages)
-	// - Ephemeral: answers shown in widget, never enter conversation history
-	// - Runs on a SEPARATE lightweight model so it never interrupts the main agent
-	// - No tool access: answers only from what's already in context
-	// - Single response: no follow-up turns
-	// - Low cost: reuses conversation context, uses cheapest available model
-	//
-	// /btw is the inverse of a subagent:
-	//   /btw  → sees full conversation, has no tools
-	//   agent → has full tools, starts with empty context
-
-	function buildBtwContext(): string {
-		// ── 1. Role & behavior instructions ──
-		let btwContext = [
-			"You are a side-channel assistant answering a quick question during an active coding session.",
-			"You have FULL VISIBILITY into the current conversation — the system prompt, all user messages,",
-			"all assistant responses, tool calls, and tool results from the main session.",
-			"",
-			"Rules:",
-			"- Be concise and direct. This is a quick side question, not a main task.",
-			"- Answer from what's already in the conversation context. You cannot read files, run commands, or search.",
-			"- Single response only — no follow-up turns.",
-			"- If the user asks about code the agent already read, decisions it made, or anything from the session, answer from that context.",
-			"- If the question is outside the conversation context, say so briefly.",
-			"",
-		].join("\n");
-
-		// ── 2. Full system prompt from the main session ──
-		const systemPrompt = ctx?.getSystemPrompt() ?? "";
-		if (systemPrompt) {
-			btwContext += "=== MAIN SESSION SYSTEM PROMPT ===\n";
-			btwContext += systemPrompt.slice(0, 8000) + "\n\n";
-		}
-
-		// ── 3. Conversation history from session manager ──
-		const sm = ctx?.sessionManager;
-		if (sm) {
-			try {
-				const entries = sm.getBranch();
-				if (entries.length > 0) {
-					btwContext += "=== CONVERSATION HISTORY ===\n";
-					// Include recent entries (last 50 to keep token budget reasonable)
-					const recent = entries.slice(-50);
-					for (const entry of recent) {
-						if (entry.type === "message") {
-							const msg = (entry as any).message;
-							if (!msg) continue;
-							const role = msg.role || "unknown";
-
-							if (role === "user") {
-								// User message
-								const content = typeof msg.content === "string"
-									? msg.content
-									: Array.isArray(msg.content)
-										? msg.content
-											.filter((c: any) => c.type === "text")
-											.map((c: any) => c.text)
-											.join("\n")
-										: String(msg.content || "");
-								if (content.trim()) {
-									btwContext += `\nUSER: ${content.slice(0, 2000)}\n`;
-								}
-							} else if (role === "assistant") {
-								// Assistant response — extract text content
-								const parts = Array.isArray(msg.content) ? msg.content : [];
-								const textParts = parts
-									.filter((c: any) => c.type === "text")
-									.map((c: any) => c.text || "");
-								const toolCalls = parts
-									.filter((c: any) => c.type === "toolCall" || c.type === "tool_use")
-									.map((c: any) => `[tool: ${c.name || c.toolName || "?"}(${JSON.stringify(c.arguments || c.input || {}).slice(0, 200)})]`);
-
-								if (textParts.length > 0) {
-									btwContext += `\nASSISTANT: ${textParts.join("\n").slice(0, 3000)}\n`;
-								}
-								if (toolCalls.length > 0) {
-									btwContext += `  Tools used: ${toolCalls.join(", ").slice(0, 500)}\n`;
-								}
-							} else if (role === "toolResult" || role === "tool") {
-								// Tool results — include brief summary
-								const content = typeof msg.content === "string"
-									? msg.content
-									: Array.isArray(msg.content)
-										? msg.content
-											.filter((c: any) => c.type === "text")
-											.map((c: any) => c.text)
-											.join("\n")
-										: "";
-								if (content.trim()) {
-									const toolName = msg.toolName || msg.name || "tool";
-									btwContext += `  [${toolName} result]: ${content.slice(0, 1000)}\n`;
-								}
-							}
-						} else if (entry.type === "compaction") {
-							// Compaction summary — very useful context
-							const summary = (entry as any).summary || (entry as any).text || "";
-							if (summary) {
-								btwContext += `\n[Session summary]: ${String(summary).slice(0, 2000)}\n`;
-							}
-						}
-					}
-					btwContext += "\n=== END CONVERSATION ===\n\n";
-				}
-			} catch (e) {
-				voiceDebug("BTW: failed to read conversation history", { error: String(e) });
-			}
-		}
-
-		// ── 4. Current workspace context ──
-		try {
-			const cwd = currentCwd || process.cwd();
-			btwContext += `Working directory: ${cwd}\n`;
-
-			const diffResult = spawnSync("git", ["diff", "--stat", "HEAD"], {
-				cwd, stdio: ["pipe", "pipe", "pipe"], timeout: 3000,
-			});
-			const diffStat = diffResult.stdout?.toString().trim();
-			if (diffStat) {
-				btwContext += `\nRecent changes (git diff --stat):\n${diffStat.slice(0, 500)}\n`;
-			}
-
-			const statusResult = spawnSync("git", ["status", "--short"], {
-				cwd, stdio: ["pipe", "pipe", "pipe"], timeout: 3000,
-			});
-			const gitStatus = statusResult.stdout?.toString().trim();
-			if (gitStatus) {
-				btwContext += `\ngit status:\n${gitStatus.slice(0, 500)}\n`;
-			}
-		} catch {}
-
-		// ── 5. Prior BTW thread (for multi-turn BTW continuity) ──
-		if (btwThread.length > 0) {
-			btwContext += "\n=== PRIOR BTW EXCHANGES ===\n";
-			for (const ex of btwThread) {
-				btwContext += `BTW Q: ${ex.question}\nBTW A: ${ex.answer}\n\n`;
-			}
-		}
-
-		return btwContext;
-	}
-
-	function updateBtwWidget() {
-		if (!ctx?.hasUI) return;
-
-		if (!btwWidgetVisible || btwThread.length === 0) {
-			ctx.ui.setWidget("btw", undefined);
-			return;
-		}
-
-		const last = btwThread[btwThread.length - 1];
-		const lines: string[] = [
-			` BTW (${btwThread.length} exchange${btwThread.length > 1 ? "s" : ""})`,
-			"",
-		];
-
-		lines.push(`  Q: ${last.question.slice(0, 70)}${last.question.length > 70 ? "…" : ""}`);
-		const answerLines = last.answer.split("\n");
-		for (const line of answerLines.slice(0, 8)) {
-			lines.push(`  ${line.slice(0, 74)}`);
-		}
-		if (answerLines.length > 8) lines.push("  …");
-
-		lines.push("");
-		lines.push("  /btw:clear | /btw:inject");
-
-		ctx.ui.setWidget("btw", lines, { placement: "aboveEditor" });
-	}
-
-	// BUG FIX: ctx!.ui could crash if ctx is null after session_switch.
-	// Also BTW answer lines can exceed terminal width.
-
-	async function handleBtw(message: string) {
-		if (!ctx?.hasUI) return;
-
-		btwWidgetVisible = true;
-
-		ctx.ui.setWidget("btw", [
-			" BTW",
-			"",
-			`  Q: ${message.slice(0, 100)}${message.length > 100 ? "…" : ""}`,
-			"",
-			"  Thinking…",
-		], { placement: "aboveEditor" });
-
-		const btwContext = buildBtwContext();
-
-		// ── Pick a SEPARATE lightweight model for BTW ──
-		// The main agent's model (ctx.model) is often busy streaming.
-		// Using it directly would interrupt/compete with the active turn.
-		// Instead, find a small fast model from the registry, or fall back
-		// to sendUserMessage with deliverAs: "followUp".
-		const preferredBtwModels = [
-			// Cheap/fast models ideal for side-channel questions
-			"gpt-4.1-mini", "gpt-4o-mini", "gpt-4.1-nano",
-			"claude-haiku", "claude-3-5-haiku", "claude-3-haiku",
-			"gemini-2.0-flash", "gemini-2.5-flash", "gemini-flash",
-			"deepseek-chat", "mistral-small",
-		];
-
-		let btwModel: typeof ctx.model = undefined;
-
-		// Try to find a lightweight model from the registry
-		const registry = ctx.modelRegistry;
-		if (registry) {
-			const available = registry.getAvailable();
-			// First: try exact match on preferred names
-			for (const pref of preferredBtwModels) {
-				const match = available.find(m =>
-					m.id.toLowerCase().includes(pref) || m.name.toLowerCase().includes(pref)
-				);
-				if (match) {
-					btwModel = match;
-					break;
-				}
-			}
-			// Second: if no preferred found, pick cheapest available model that isn't the main one
-			if (!btwModel && available.length > 1 && ctx.model) {
-				const candidates = available
-					.filter(m => m.id !== ctx.model?.id)
-					.sort((a, b) => (a.cost?.output ?? 999) - (b.cost?.output ?? 999));
-				if (candidates.length > 0) {
-					btwModel = candidates[0];
-				}
-			}
-		}
-
-		// If no separate model found, notify user instead of interrupting main agent
-		if (!btwModel) {
-			voiceDebug("BTW: no separate model available");
-			const exchange: BtwExchange = {
-				question: message,
-				answer: "(No lightweight model available for BTW. Use /btw:inject to send to main agent when it's idle.)",
-				timestamp: Date.now(),
-			};
-			btwThread.push(exchange);
-			pi.appendEntry("btw", exchange);
-			updateBtwWidget();
-			ctx.ui.notify("BTW: no side model found. Use /btw:inject when agent is idle.", "warning");
-			return;
-		}
-
-		voiceDebug("BTW: using separate model", { model: btwModel.name, id: btwModel.id });
-
-		try {
-			let answer = "";
-			const eventStream = streamSimple(btwModel, {
-				systemPrompt: btwContext,
-				messages: [{ role: "user" as const, content: message, timestamp: Date.now() }],
-			});
-
-			for await (const event of eventStream) {
-				if (event.type === "text_delta") {
-					answer += event.delta;
-				} else if (event.type === "error") {
-					answer = "(Error during BTW streaming)";
-					break;
-				} else if (event.type === "done") {
-					break;
-				}
-
-				if (ctx?.hasUI) {
-					const displayLines: string[] = [
-						` BTW (${btwModel.name})`,
-						"",
-						`  Q: ${message.slice(0, 80)}`,
-						"",
-					];
-					for (const line of answer.split("\n").slice(0, 10)) {
-						displayLines.push(`  ${line.slice(0, 76)}`);
-					}
-					ctx.ui.setWidget("btw", displayLines, { placement: "aboveEditor" });
-				}
-			}
-
-			const exchange: BtwExchange = {
-				question: message,
-				answer: answer.trim() || "(empty response)",
-				model: btwModel.name,
-				timestamp: Date.now(),
-			};
-
-			btwThread.push(exchange);
-			pi.appendEntry("btw", exchange);
-			updateBtwWidget();
-		} catch (err: any) {
-			voiceDebug("BTW: streaming failed", { error: err.message });
-			const exchange: BtwExchange = {
-				question: message,
-				answer: `(BTW failed: ${err.message}. Use /btw:inject to send to main agent when idle.)`,
-				timestamp: Date.now(),
-			};
-			btwThread.push(exchange);
-			pi.appendEntry("btw", exchange);
-			updateBtwWidget();
-			ctx?.ui.notify(`BTW error: ${err.message}. Use /btw:inject when agent is idle.`, "warning");
-		}
-	}
 
 	// ─── Shortcuts ───────────────────────────────────────────────────────────
 
@@ -2424,14 +2046,14 @@ export default function (pi: ExtensionAPI) {
 				// Ctrl+Shift+V stops dictation mode
 				dictationMode = false;
 				if (voiceState === "recording") {
-					await stopVoiceRecording("editor");
+					await stopVoiceRecording();
 				}
 				handlerCtx.ui.notify("Dictation mode stopped.", "info");
 				return;
 			}
 			if (voiceState === "idle") {
 				spaceConsumed = true;
-				const ok = await startVoiceRecording("editor");
+				const ok = await startVoiceRecording();
 				if (!ok) {
 					spaceConsumed = false;
 				}
@@ -2439,7 +2061,7 @@ export default function (pi: ExtensionAPI) {
 				spaceConsumed = false;
 				spaceDownTime = null;
 				clearHoldTimer();
-				await stopVoiceRecording("editor");
+				await stopVoiceRecording();
 			}
 		},
 	});
@@ -2504,36 +2126,8 @@ export default function (pi: ExtensionAPI) {
 		config = loaded.config;
 		configSource = loaded.source;
 		updateSocketPath(config, currentCwd);
-		btwThread = [];
-		btwWidgetVisible = false;
-		if (ctx.hasUI) ctx.ui.setWidget("btw", undefined);
 		setupHoldToTalk();
 		updateVoiceStatus();
-	});
-
-	// ─── BTW Message Renderer ────────────────────────────────────────────────
-
-	pi.registerMessageRenderer<BtwExchange>("btw", (message, _options: MessageRenderOptions, _theme: Theme): Component | undefined => {
-		const ex = message.details;
-		if (!ex) return undefined;
-		return {
-			invalidate() {},
-			render(width: number): string[] {
-				const maxW = Math.max(10, Math.min(width - 8, 56));
-				const q = ex.question.length > maxW ? ex.question.slice(0, maxW - 1) + "…" : ex.question;
-				const aMax = Math.min(maxW, 200);
-				const a = ex.answer.length > aMax ? ex.answer.slice(0, aMax - 1) + "…" : ex.answer;
-				// Wrap long answer lines to prevent terminal overflow
-				const aLines: string[] = [];
-				for (let i = 0; i < a.length; i += maxW) {
-					aLines.push(`BTW A: ${a.slice(i, i + maxW)}`);
-				}
-				return [
-					`BTW Q: ${q}`,
-					...aLines,
-				];
-			},
-		};
 	});
 
 	// ─── /voice command ──────────────────────────────────────────────────────
@@ -2596,11 +2190,11 @@ export default function (pi: ExtensionAPI) {
 				if (dictationMode) {
 					dictationMode = false;
 					if (voiceState === "recording") {
-						await stopVoiceRecording("editor");
+						await stopVoiceRecording();
 					}
 					cmdCtx.ui.notify("Dictation mode stopped.", "info");
 				} else if (voiceState === "recording") {
-					await stopVoiceRecording("editor");
+					await stopVoiceRecording();
 					cmdCtx.ui.notify("Recording stopped and transcribed.", "info");
 				} else if (voiceState === "warmup") {
 					clearHoldTimer();
@@ -2627,7 +2221,7 @@ export default function (pi: ExtensionAPI) {
 				dictationMode = true;
 				dictationText = ctx?.hasUI ? (ctx.ui.getEditorText() || "") : "";
 				editorTextBeforeVoice = dictationText;
-				const ok = await startVoiceRecording("editor");
+				const ok = await startVoiceRecording();
 				if (ok) {
 					cmdCtx.ui.notify([
 						"🎤 Continuous dictation mode active.",
@@ -2655,8 +2249,7 @@ export default function (pi: ExtensionAPI) {
 					const time = new Date(entry.timestamp).toLocaleTimeString();
 					const dur = entry.duration.toFixed(1);
 					const preview = entry.text.slice(0, 60) + (entry.text.length > 60 ? "…" : "");
-					const tag = entry.target === "btw" ? " [BTW]" : "";
-					lines.push(`  ${time} (${dur}s)${tag}: ${preview}`);
+					lines.push(`  ${time} (${dur}s): ${preview}`);
 				}
 				if (recordingHistory.length > 20) {
 					lines.push(`  … and ${recordingHistory.length - 20} more`);
@@ -2748,7 +2341,6 @@ export default function (pi: ExtensionAPI) {
 					`  socket:     ${activeSocketPath}`,
 					`  daemon:     ${daemonUp ? "running" : "stopped"}${daemonInfo}`,
 					`  hold-key:   SPACE (hold ≥${HOLD_THRESHOLD_MS}ms) or Ctrl+Shift+V (toggle)`,
-					`  btw-key:    Ctrl+Shift+B (hold to record → auto-btw)`,
 					`  kitty:      ${kittyReleaseDetected ? "yes" : "no"}`,
 				].join("\n"), "info");
 				return;
@@ -2879,30 +2471,6 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// ─── /btw commands ───────────────────────────────────────────────────────
-
-	pi.registerCommand("btw", {
-		description: "Side conversation: /btw <message> | /btw:new | /btw:clear | /btw:inject | /btw:summarize",
-		handler: async (args, cmdCtx) => {
-			ctx = cmdCtx;
-			const message = (args || "").trim();
-
-			if (!message) {
-				cmdCtx.ui.notify(
-					"Usage: /btw <message>\n" +
-					"  /btw:new [msg]  — new thread\n" +
-					"  /btw:clear      — dismiss widget\n" +
-					"  /btw:inject     — push thread to agent\n" +
-					"  /btw:summarize  — summarize then inject",
-					"info",
-				);
-				return;
-			}
-
-			await handleBtw(message);
-		},
-	});
-
 	// ─── Dedicated setup command ─────────────────────────────────────────────
 
 	pi.registerCommand("voice-setup", {
@@ -2919,126 +2487,4 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerCommand("btw:new", {
-		description: "Start a fresh BTW thread",
-		handler: async (args, cmdCtx) => {
-			ctx = cmdCtx;
-			btwThread = [];
-			pi.appendEntry("btw-reset", { timestamp: Date.now() });
-			btwWidgetVisible = false;
-			cmdCtx.ui.setWidget("btw", undefined);
-			cmdCtx.ui.notify("BTW thread cleared.", "info");
-
-			const message = (args || "").trim();
-			if (message) {
-				await handleBtw(message);
-			}
-		},
-	});
-
-	pi.registerCommand("btw:clear", {
-		description: "Dismiss BTW widget and clear thread",
-		handler: async (_args, cmdCtx) => {
-			ctx = cmdCtx;
-			btwThread = [];
-			btwWidgetVisible = false;
-			cmdCtx.ui.setWidget("btw", undefined);
-			pi.appendEntry("btw-reset", { timestamp: Date.now() });
-			cmdCtx.ui.notify("BTW cleared.", "info");
-		},
-	});
-
-	pi.registerCommand("btw:inject", {
-		description: "Push BTW thread into main agent context",
-		handler: async (args, cmdCtx) => {
-			ctx = cmdCtx;
-
-			if (btwThread.length === 0) {
-				cmdCtx.ui.notify("No BTW thread to inject.", "warning");
-				return;
-			}
-
-			const instructions = (args || "").trim();
-			let content = "Here is a side conversation I had (via /btw). Please take it into account:\n\n";
-
-			for (const ex of btwThread) {
-				content += `Me: ${ex.question}\nAssistant: ${ex.answer}\n\n`;
-			}
-
-			if (instructions) {
-				content += `\nAdditional instructions: ${instructions}`;
-			}
-
-			pi.sendUserMessage(content, { deliverAs: "followUp" });
-
-			btwThread = [];
-			btwWidgetVisible = false;
-			cmdCtx.ui.setWidget("btw", undefined);
-			pi.appendEntry("btw-reset", { timestamp: Date.now(), reason: "injected" });
-			cmdCtx.ui.notify("BTW thread injected into main context.", "info");
-		},
-	});
-
-	pi.registerCommand("btw:summarize", {
-		description: "Summarize BTW thread then inject into main agent",
-		handler: async (args, cmdCtx) => {
-			ctx = cmdCtx;
-
-			if (btwThread.length === 0) {
-				cmdCtx.ui.notify("No BTW thread to summarize.", "warning");
-				return;
-			}
-
-			const instructions = (args || "").trim();
-			let threadText = "";
-			for (const ex of btwThread) {
-				threadText += `Q: ${ex.question}\nA: ${ex.answer}\n\n`;
-			}
-
-			const model = ctx.model;
-			if (!model) {
-				cmdCtx.ui.notify("No model available for summarization.", "error");
-				return;
-			}
-
-			cmdCtx.ui.notify("Summarizing BTW thread…", "info");
-
-			try {
-				let summary = "";
-				const summaryPrompt = instructions
-					? `Summarize this conversation thread concisely. Focus on: ${instructions}\n\n${threadText}`
-					: `Summarize this conversation thread concisely, capturing key decisions and information:\n\n${threadText}`;
-
-				const eventStream = streamSimple(model, {
-					systemPrompt: "You are a concise summarizer. Output only the summary, no preamble.",
-					messages: [{ role: "user" as const, content: summaryPrompt, timestamp: Date.now() }],
-				});
-
-				for await (const event of eventStream) {
-					if (event.type === "text_delta") summary += event.delta;
-					else if (event.type === "error") break;
-					else if (event.type === "done") break;
-				}
-
-				summary = summary.trim();
-				if (!summary) {
-					cmdCtx.ui.notify("Empty summary — injecting full thread instead.", "warning");
-					summary = threadText;
-				}
-
-				pi.sendUserMessage(
-					`Here's a summary of a side conversation I had (via /btw):\n\n${summary}`,
-					{ deliverAs: "followUp" },
-				);
-
-				btwThread = [];
-				btwWidgetVisible = false;
-				cmdCtx.ui.setWidget("btw", undefined);
-				pi.appendEntry("btw-reset", { timestamp: Date.now(), reason: "summarized" });
-				cmdCtx.ui.notify("BTW summary injected.", "info");
-			} catch (err: any) {
-				cmdCtx.ui.notify(`Summarization failed: ${err.message}`, "error");
-			}
-		},
-	});
 }
