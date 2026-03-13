@@ -10,11 +10,8 @@ else
   PACKAGE_ROOT=""
 fi
 
-# Enable nounset after handling BASH_SOURCE
 set -u
 
-MODE="local"
-BACKEND="faster-whisper"
 SCOPE="global"
 PROJECT_DIR="$PWD"
 DEEPGRAM_KEY="${DEEPGRAM_API_KEY:-}"
@@ -23,367 +20,160 @@ PERSIST_DEEPGRAM_KEY=0
 
 usage() {
   cat <<'EOF'
-pi-listen macOS bootstrap
+pi-listen macOS bootstrap — Deepgram streaming voice input for Pi
 
 Usage:
   scripts/setup-macos.sh [options]
 
 Options:
-  --mode local|api              Setup mode (default: local)
-  --backend NAME                Local backend: faster-whisper | moonshine | whisper-cpp | parakeet
-  --scope global|project        Where to write settings and install the package (default: global)
-  --project-dir PATH            Project directory used for --scope project (default: current directory)
-  --deepgram-key KEY            Deepgram API key for api mode (defaults to current DEEPGRAM_API_KEY)
-  --persist-deepgram-key        Append DEEPGRAM_API_KEY to ~/.zshrc when a key is available
+  --scope global|project        Where to write settings (default: global)
+  --project-dir PATH            Project directory for --scope project (default: .)
+  --deepgram-key KEY            Deepgram API key (defaults to DEEPGRAM_API_KEY env)
+  --persist-deepgram-key        Append DEEPGRAM_API_KEY to ~/.zshrc
   --skip-pi-install             Skip `pi install npm:@codexstar/pi-listen`
   -h, --help                    Show this help
 
-Examples:
-  scripts/setup-macos.sh --mode local --backend faster-whisper
-  scripts/setup-macos.sh --mode local --backend whisper-cpp --scope project
-  scripts/setup-macos.sh --mode api --deepgram-key dg_xxx --persist-deepgram-key
+Prerequisites:
+  - macOS with Homebrew
+  - Pi CLI (`npm i -g @mariozechner/pi-coding-agent`)
+  - SoX (brew install sox) — audio capture
+  - Deepgram API key (free $200 credits at https://dpgr.am/pi-voice)
+
+You should not need to run `/voice setup` on the happy path —
+this script configures everything.
 EOF
 }
 
-log() {
-  printf '\n[%s] %s\n' "pi-listen" "$*"
-}
-
-warn() {
-  printf '\n[%s] WARNING: %s\n' "pi-listen" "$*" >&2
-}
-
-have() {
-  command -v "$1" >/dev/null 2>&1
-}
-
-append_if_missing() {
-  local file="$1"
-  local line="$2"
-  mkdir -p "$(dirname "$file")"
-  touch "$file"
-  APPEND_FILE="$file" APPEND_LINE="$line" python3 - <<'PY'
-from pathlib import Path
-import os
-
-path = Path(os.environ["APPEND_FILE"])
-line = os.environ["APPEND_LINE"]
-existing = path.read_text() if path.exists() else ""
-if line not in existing:
-    with path.open("a", encoding="utf8") as handle:
-        handle.write("\n" + line + "\n")
-PY
-}
-
-selected_backend() {
-  if [[ "$MODE" == "api" ]]; then
-    printf 'deepgram\n'
-  else
-    printf '%s\n' "$BACKEND"
-  fi
-}
-
-selected_model() {
-  case "$(selected_backend)" in
-    faster-whisper) printf 'small\n' ;;
-    moonshine) printf 'moonshine/base\n' ;;
-    whisper-cpp) printf 'small\n' ;;
-    parakeet) printf 'nvidia/parakeet-tdt-0.6b-v2\n' ;;
-    deepgram) printf 'nova-3\n' ;;
-    *)
-      warn "No default model for backend $(selected_backend)"
-      exit 1
-      ;;
-  esac
-}
-
-settings_path() {
-  if [[ "$SCOPE" == "project" ]]; then
-    printf '%s/.pi/settings.json\n' "$PROJECT_DIR"
-  else
-    printf '%s/.pi/agent/settings.json\n' "$HOME"
-  fi
-}
-
-install_pi_package() {
-  if (( SKIP_PI_INSTALL )); then
-    return
-  fi
-
-  if ! have pi; then
-    warn "The 'pi' command was not found, so package installation was skipped. Install Pi first, then run: pi install npm:@codexstar/pi-listen"
-    return
-  fi
-
-  if [[ "$SCOPE" == "project" ]]; then
-    log "Installing pi-listen into Pi project settings"
-    (
-      cd "$PROJECT_DIR"
-      pi install -l npm:@codexstar/pi-listen
-    )
-  else
-    log "Installing pi-listen into global Pi settings"
-    pi install npm:@codexstar/pi-listen
-  fi
-}
-
-write_voice_config() {
-  local settings_file
-  settings_file="$(settings_path)"
-  local backend model
-  backend="$(selected_backend)"
-  model="$(selected_model)"
-
-  mkdir -p "$(dirname "$settings_file")"
-  SETTINGS_PATH="$settings_file" \
-  VOICE_MODE="$MODE" \
-  VOICE_BACKEND="$backend" \
-  VOICE_MODEL="$model" \
-  VOICE_SCOPE="$SCOPE" \
-  python3 - <<'PY'
-import json
-import os
-from datetime import datetime, timezone
-from pathlib import Path
-
-settings_path = Path(os.environ["SETTINGS_PATH"])
-if settings_path.exists():
-    try:
-        data = json.loads(settings_path.read_text())
-    except Exception:
-        data = {}
-else:
-    data = {}
-
-timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-data["voice"] = {
-    "version": 2,
-    "enabled": True,
-    "language": "en",
-    "mode": os.environ["VOICE_MODE"],
-    "backend": os.environ["VOICE_BACKEND"],
-    "model": os.environ["VOICE_MODEL"],
-    "scope": os.environ["VOICE_SCOPE"],
-    "btwEnabled": True,
-    "onboarding": {
-        "completed": True,
-        "schemaVersion": 2,
-        "completedAt": timestamp,
-        "lastValidatedAt": timestamp,
-        "source": "setup-command"
-    }
-}
-settings_path.write_text(json.dumps(data, indent=2) + "\n")
-PY
-
-  log "Wrote ready-to-use voice config to $settings_file"
-}
-
-smoke_test() {
-  if [[ -z "$PACKAGE_ROOT" ]]; then
-    log "Skipping daemon smoke test (running via curl pipe — daemon.py not available locally)"
-    log "Run '/voice test' inside pi to verify the full pipeline"
-    return 0
-  fi
-
-  local backend model socket log_file err_file
-  backend="$(selected_backend)"
-  model="$(selected_model)"
-  socket="$(mktemp -u /tmp/pi-listen-bootstrap-XXXXXX.sock)"
-  log_file="$(mktemp /tmp/pi-listen-daemon-stdout-XXXXXX.log)"
-  err_file="$(mktemp /tmp/pi-listen-daemon-stderr-XXXXXX.log)"
-
-  log "Checking backend availability via transcribe.py"
-  python3 "$PACKAGE_ROOT/transcribe.py" --list-backends | python3 -c '
-import json
-import sys
-backend_name = sys.argv[1]
-backends = json.load(sys.stdin)
-selected = next((b for b in backends if b.get("name") == backend_name), None)
-if not selected:
-    raise SystemExit(f"Backend {backend_name} was not returned by transcribe.py --list-backends")
-if not selected.get("available"):
-    raise SystemExit(f"Backend {backend_name} is still not available after setup")
-print(json.dumps({"backend": selected["name"], "available": selected["available"], "install_detection": selected.get("install_detection") or "unknown"}))
-' "$backend"
-
-  log "Starting daemon smoke test for backend=$backend model=$model"
-  python3 "$PACKAGE_ROOT/daemon.py" start --socket "$socket" --backend "$backend" --model "$model" >"$log_file" 2>"$err_file" &
-  local daemon_pid=$!
-
-  cleanup() {
-    python3 "$PACKAGE_ROOT/daemon.py" stop --socket "$socket" >/dev/null 2>&1 || true
-    wait "$daemon_pid" >/dev/null 2>&1 || true
-    rm -f "$socket" "$socket.pid" "$log_file" "$err_file"
-  }
-  trap cleanup RETURN
-
-  local attempt
-  for attempt in {1..120}; do
-    if python3 "$PACKAGE_ROOT/daemon.py" ping --socket "$socket" >/dev/null 2>&1; then
-      break
-    fi
-    sleep 1
-  done
-
-  if ! python3 "$PACKAGE_ROOT/daemon.py" ping --socket "$socket" >/dev/null 2>&1; then
-    warn "Daemon failed to start cleanly"
-    warn "Daemon stdout log: $log_file"
-    warn "Daemon stderr log: $err_file"
-    tail -n 40 "$err_file" >&2 || true
-    return 1
-  fi
-
-  python3 "$PACKAGE_ROOT/daemon.py" status --socket "$socket" >/dev/null
-  log "Daemon smoke test passed"
-}
-
-while (($#)); do
-  case "$1" in
-    --mode)
-      MODE="${2:-}"
-      shift 2
-      ;;
-    --backend)
-      BACKEND="${2:-}"
-      shift 2
-      ;;
-    --scope)
-      SCOPE="${2:-}"
-      shift 2
-      ;;
-    --project-dir)
-      PROJECT_DIR="${2:-}"
-      shift 2
-      ;;
-    --deepgram-key)
-      DEEPGRAM_KEY="${2:-}"
-      shift 2
-      ;;
-    --persist-deepgram-key)
-      PERSIST_DEEPGRAM_KEY=1
-      shift
-      ;;
-    --skip-pi-install)
-      SKIP_PI_INSTALL=1
-      shift
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      warn "Unknown argument: $1"
-      usage
-      exit 1
-      ;;
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --scope)          SCOPE="$2"; shift 2 ;;
+    --project-dir)    PROJECT_DIR="$2"; shift 2 ;;
+    --deepgram-key)   DEEPGRAM_KEY="$2"; shift 2 ;;
+    --persist-deepgram-key) PERSIST_DEEPGRAM_KEY=1; shift ;;
+    --skip-pi-install) SKIP_PI_INSTALL=1; shift ;;
+    -h|--help)        usage; exit 0 ;;
+    *)                echo "Unknown option: $1"; usage; exit 1 ;;
   esac
 done
 
-if [[ "$MODE" != "local" && "$MODE" != "api" ]]; then
-  warn "--mode must be local or api"
-  exit 1
-fi
+log()  { printf '  \033[1;32m✓\033[0m %s\n' "$*"; }
+warn() { printf '  \033[1;33m!\033[0m %s\n' "$*"; }
+fail() { printf '  \033[1;31m✗\033[0m %s\n' "$*"; exit 1; }
 
-if [[ "$SCOPE" != "global" && "$SCOPE" != "project" ]]; then
-  warn "--scope must be global or project"
-  exit 1
-fi
+# ── Step 1: Install SoX ──────────────────────────────────────────────────
 
-PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
-
-case "$BACKEND" in
-  faster-whisper|moonshine|whisper-cpp|parakeet) ;;
-  *)
-    warn "Unsupported backend: $BACKEND"
-    exit 1
-    ;;
-esac
-
-if ! have brew; then
-  warn "Homebrew is required for automatic macOS setup. Install it from https://brew.sh/ and rerun this script."
-  exit 1
-fi
-
-if ! have python3; then
-  log "Installing python3 via Homebrew"
-  brew install python
-fi
-
-if ! have rec; then
-  log "Installing SoX"
+if command -v rec &>/dev/null; then
+  log "SoX already installed ($(rec --version 2>/dev/null | head -1 || echo 'unknown'))"
+else
+  log "Installing SoX via Homebrew…"
   brew install sox
-else
-  log "SoX already available"
+  log "SoX installed"
 fi
 
-log "Ensuring pip tooling is ready"
-python3 -m pip install --upgrade pip >/dev/null
+# ── Step 2: Install pi-listen extension ───────────────────────────────────
 
-if [[ "$MODE" == "local" ]]; then
-  case "$BACKEND" in
-    faster-whisper)
-      log "Installing faster-whisper"
-      python3 -m pip install faster-whisper
-      ;;
-    moonshine)
-      log "Installing moonshine"
-      python3 -m pip install 'useful-moonshine[onnx]'
-      ;;
-    whisper-cpp)
-      log "Installing whisper-cpp"
-      brew install whisper-cpp
-      ;;
-    parakeet)
-      log "Installing parakeet"
-      python3 -m pip install 'nemo_toolkit[asr]'
-      ;;
-  esac
+if [[ $SKIP_PI_INSTALL -eq 0 ]]; then
+  log "Installing pi-listen extension…"
+  pi install npm:@codexstar/pi-listen
+  log "pi-listen installed"
 else
-  if [[ -z "$DEEPGRAM_KEY" ]]; then
-    warn "API mode requires DEEPGRAM_API_KEY. Pass --deepgram-key or export DEEPGRAM_API_KEY first."
-    exit 1
-  fi
-  export DEEPGRAM_API_KEY="$DEEPGRAM_KEY"
-  log "Loaded DEEPGRAM_API_KEY into the current shell process"
-  if (( PERSIST_DEEPGRAM_KEY )); then
-    append_if_missing "$HOME/.zshrc" "export DEEPGRAM_API_KEY=$DEEPGRAM_KEY"
-    log "Persisted DEEPGRAM_API_KEY to ~/.zshrc"
+  log "Skipping pi install (--skip-pi-install)"
+fi
+
+# ── Step 3: Deepgram API key ──────────────────────────────────────────────
+
+if [[ -z "$DEEPGRAM_KEY" ]]; then
+  warn "DEEPGRAM_API_KEY not set."
+  warn "Get a free key → https://dpgr.am/pi-voice (\$200 credits, no card)"
+  warn "Then: export DEEPGRAM_API_KEY=your_key_here"
+  warn "Or run: scripts/setup-macos.sh --deepgram-key YOUR_KEY"
+fi
+
+if [[ $PERSIST_DEEPGRAM_KEY -eq 1 && -n "$DEEPGRAM_KEY" ]]; then
+  ZSHRC="$HOME/.zshrc"
+  if grep -q "DEEPGRAM_API_KEY" "$ZSHRC" 2>/dev/null; then
+    sed -i '' "s|^export DEEPGRAM_API_KEY=.*|export DEEPGRAM_API_KEY=\"$DEEPGRAM_KEY\"|" "$ZSHRC"
+    log "Updated DEEPGRAM_API_KEY in $ZSHRC"
+  else
+    echo "" >> "$ZSHRC"
+    echo "export DEEPGRAM_API_KEY=\"$DEEPGRAM_KEY\"" >> "$ZSHRC"
+    log "Added DEEPGRAM_API_KEY to $ZSHRC"
   fi
 fi
 
-install_pi_package
-smoke_test
-write_voice_config
+# ── Step 4: Write voice settings ──────────────────────────────────────────
 
-cat <<EOF
+if [[ "$SCOPE" == "project" ]]; then
+  SETTINGS_DIR="$PROJECT_DIR/.pi"
+else
+  SETTINGS_DIR="$HOME/.pi/agent"
+fi
 
-Done.
+SETTINGS_FILE="$SETTINGS_DIR/settings.json"
+mkdir -p "$SETTINGS_DIR"
 
-Happy path result:
-  - dependencies installed
-  - selected backend validated
-  - daemon smoke test passed
-  - Pi voice settings written automatically
+# Merge voice key into existing settings (or create new)
+if [[ -f "$SETTINGS_FILE" ]]; then
+  # Use python to merge JSON safely
+  python3 -c "
+import json, sys
+with open('$SETTINGS_FILE') as f:
+    settings = json.load(f)
+settings['voice'] = {
+    'version': 2,
+    'enabled': True,
+    'language': 'en',
+    'scope': '$SCOPE',
+    'onboarding': {
+        'completed': True,
+        'schemaVersion': 2,
+        'completedAt': __import__('datetime').datetime.utcnow().isoformat() + 'Z',
+        'source': 'setup-script'
+    }
+}
+if '$DEEPGRAM_KEY':
+    settings['voice']['deepgramApiKey'] = '$DEEPGRAM_KEY'
+with open('$SETTINGS_FILE', 'w') as f:
+    json.dump(settings, f, indent=2)
+    f.write('\n')
+" 2>/dev/null || python3 -c "
+import json
+settings = {'voice': {
+    'version': 2, 'enabled': True, 'language': 'en', 'scope': '$SCOPE',
+    'onboarding': {'completed': True, 'schemaVersion': 2, 'source': 'setup-script'}
+}}
+with open('$SETTINGS_FILE', 'w') as f:
+    json.dump(settings, f, indent=2)
+    f.write('\n')
+"
+else
+  python3 -c "
+import json
+settings = {'voice': {
+    'version': 2, 'enabled': True, 'language': 'en', 'scope': '$SCOPE',
+    'deepgramApiKey': '$DEEPGRAM_KEY' if '$DEEPGRAM_KEY' else None,
+    'onboarding': {
+        'completed': True, 'schemaVersion': 2,
+        'completedAt': __import__('datetime').datetime.utcnow().isoformat() + 'Z',
+        'source': 'setup-script'
+    }
+}}
+with open('$SETTINGS_FILE', 'w') as f:
+    json.dump(settings, f, indent=2)
+    f.write('\n')
+"
+fi
 
-Selected configuration:
-  mode: $MODE
-  backend: $(selected_backend)
-  model: $(selected_model)
-  scope: $SCOPE
+log "Settings written to $SETTINGS_FILE"
 
-Next steps:
-  1. Grant microphone permission once:
-       System Settings -> Privacy & Security -> Microphone
-       Allow your terminal app (Ghostty / Terminal / iTerm)
+# ── Step 5: Verify ───────────────────────────────────────────────────────
 
-  2. Start Pi:
-       $( [[ "$SCOPE" == "project" ]] && printf 'cd %q && ' "$PROJECT_DIR" )pi
-
-  3. Try hold-to-talk in an empty editor.
-
-You should not need to run /voice setup on the happy path.
-If you want a quick verification inside Pi, run:
-  /voice test
-  /voice doctor
-EOF
+echo ""
+echo "  Setup complete!"
+echo ""
+echo "  Next: open Pi and hold SPACE to talk."
+if [[ -z "$DEEPGRAM_KEY" ]]; then
+  echo ""
+  echo "  ⚠  Don't forget: export DEEPGRAM_API_KEY=your_key"
+fi
+echo ""

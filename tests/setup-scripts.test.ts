@@ -14,10 +14,6 @@ describe("bootstrap setup scripts", () => {
 		expect(script).toContain("DEEPGRAM_API_KEY");
 		expect(script).toContain("settings.json");
 		expect(script).toContain("onboarding");
-		expect(script).toContain("daemon.py");
-		expect(script).toContain("transcribe.py");
-		expect(script).not.toContain('os.environ["BACKEND_NAME"]');
-		expect(script).toContain('sys.argv[1]');
 
 		const syntax = spawnSync("bash", ["-n", "scripts/setup-macos.sh"], {
 			encoding: "utf8",
@@ -27,17 +23,14 @@ describe("bootstrap setup scripts", () => {
 		expect(syntax.stderr).toBe("");
 	});
 
-	test("ships a Windows bootstrap script with winget + pi install flow", () => {
+	test("ships a Windows bootstrap script with Deepgram setup flow", () => {
 		expect(existsSync("scripts/setup-windows.ps1")).toBe(true);
 		const script = read("scripts/setup-windows.ps1");
 		expect(script).toContain("ChrisBagwell.SoX");
-		expect(script).toContain("Python.Python.3.12");
 		expect(script).toContain("pi install npm:@codexstar/pi-listen");
 		expect(script).toContain("DEEPGRAM_API_KEY");
 		expect(script).toContain("settings.json");
 		expect(script).toContain("onboarding");
-		expect(script).toContain("daemon.py");
-		expect(script).toContain("transcribe.py");
 	});
 
 	test("documents the setup scripts in the README", () => {

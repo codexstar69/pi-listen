@@ -122,14 +122,13 @@ brew install sox
 │  │  (extension)  │    │  (settings)  │    │  (setup wizard)  │  │
 │  └──────┬───────┘    └──────────────┘    └──────────────────┘  │
 │         │                                                       │
-│         │ Unix Socket (newline-delimited JSON)                  │
+│         │  SoX → Deepgram WebSocket (streaming)                 │
+│         │  Live interim + final transcripts                     │
 │         ▼                                                       │
-│  ┌──────────────┐    ┌──────────────┐                          │
-│  │  daemon.py    │◄──│ transcribe.py │                          │
-│  │  (persistent) │    │ (backends)   │                          │
-│  └──────────────┘    └──────────────┘                          │
-│                                                                 │
-│  Backends: faster-whisper │ moonshine │ whisper-cpp │ deepgram  │
+│  ┌──────────────────────────────────────────┐                  │
+│  │  Deepgram Nova-3 (cloud STT)             │                  │
+│  │  wss://api.deepgram.com/v1/listen        │                  │
+│  └──────────────────────────────────────────┘                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -137,27 +136,16 @@ brew install sox
 
 | Component | Language | Purpose |
 |-----------|----------|---------|
-| `extensions/voice.ts` | TypeScript | Main extension: recording, daemon IPC, BTW, UI |
-| `extensions/voice/config.ts` | TypeScript | Config loading, saving, migration, socket path generation |
-| `extensions/voice/diagnostics.ts` | TypeScript | Environment scanning, backend detection, recommendations |
-| `extensions/voice/onboarding.ts` | TypeScript | Interactive first-run setup wizard |
-| `extensions/voice/install.ts` | TypeScript | Provisioning plan builder |
-| `daemon.py` | Python | Persistent STT daemon with warm model cache |
-| `transcribe.py` | Python | Multi-backend transcription engine |
+| `extensions/voice.ts` | TypeScript | Main extension: streaming, hold-to-talk, UI widgets |
+| `extensions/voice/config.ts` | TypeScript | Config loading, saving, migration |
+| `extensions/voice/onboarding.ts` | TypeScript | Interactive setup wizard (Deepgram key + scope) |
 
----
+### Prerequisites
 
-## STT Backends
-
-| Backend | Type | Speed | Quality | Install |
-|---------|------|-------|---------|---------|
-| **faster-whisper** | Local | ⭐⭐⭐ | ⭐⭐⭐⭐ | `pip install faster-whisper` |
-| **moonshine** | Local | ⭐⭐⭐⭐ | ⭐⭐⭐ | `pip install useful-moonshine[onnx]` |
-| **whisper-cpp** | Local | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | `brew install whisper-cpp` |
-| **deepgram** | Cloud | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | `DEEPGRAM_API_KEY` env var |
-| **parakeet** | Local | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ | `pip install nemo_toolkit[asr]` |
-
-See [docs/backends.md](docs/backends.md) for detailed backend comparison, model lists, and platform notes.
+| Dependency | Install | Purpose |
+|-----------|---------|---------|
+| SoX | `brew install sox` | Audio capture (`rec` command) |
+| Deepgram API key | [Free $200 credits](https://dpgr.am/pi-voice) | Cloud STT via WebSocket |
 
 ---
 
