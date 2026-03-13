@@ -103,8 +103,8 @@ const CHANNELS = 1;
 const ENCODING = "linear16";
 const DEEPGRAM_WS_URL = "wss://api.deepgram.com/v1/listen";
 const KEEPALIVE_INTERVAL_MS = 8000;
-const FINALIZE_SAFETY_TIMEOUT_MS = 2500;  // Max wait for remaining transcripts after CloseStream
-const FINALIZE_NO_DATA_TIMEOUT_MS = 600;  // If no data for 600ms after CloseStream, assume done
+const FINALIZE_SAFETY_TIMEOUT_MS = 1200;  // Max wait for remaining transcripts after CloseStream
+const FINALIZE_NO_DATA_TIMEOUT_MS = 300;  // If no data for 300ms after CloseStream, assume done
 const MAX_RECORDING_SECS = 120;
 
 // Hold-to-talk timing
@@ -389,8 +389,8 @@ function buildDeepgramWsUrl(config: VoiceConfig): string {
 		encoding: ENCODING,
 		sample_rate: String(SAMPLE_RATE),
 		channels: String(CHANNELS),
-		endpointing: "300",
-		utterance_end_ms: "1000",
+		endpointing: "200",
+		utterance_end_ms: "500",
 		language: config.language || "en",
 		model: config.model || "nova-3",
 		smart_format: "true",
@@ -595,7 +595,7 @@ function stopStreamingSession(session: StreamingSession): void {
 				finalizeSession(session);
 			}
 		}
-	}, 500);
+	}, 150);
 }
 
 function finalizeSession(session: StreamingSession): void {
