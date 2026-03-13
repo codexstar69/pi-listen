@@ -1096,127 +1096,87 @@ export default function (pi: ExtensionAPI) {
 		encounters: 0,
 	};
 
-	// ─── Evolution Sprites (pixel art via Unicode blocks) ───────────────
-	// ─── ANSI True Color helpers ────────────────────────────────────────
-	function rgb(r: number, g: number, b: number, text: string): string {
-		return `\x1b[38;2;${r};${g};${b}m${text}\x1b[0m`;
-	}
-	/** ▀ char: top half = fg, bottom half = bg */
-	function halfTop(tr: number, tg: number, tb: number, br: number, bg: number, bb: number): string {
-		return `\x1b[38;2;${tr};${tg};${tb};48;2;${br};${bg};${bb}m▀\x1b[0m`;
-	}
-	/** ▄ char: top half = bg, bottom half = fg */
-	function halfBot(tr: number, tg: number, tb: number, br: number, bg: number, bb: number): string {
-		return `\x1b[38;2;${br};${bg};${bb};48;2;${tr};${tg};${tb}m▄\x1b[0m`;
-	}
-	function block(r: number, g: number, b: number): string {
-		return `\x1b[38;2;${r};${g};${b}m█\x1b[0m`;
-	}
+	// ─── Creature: simple, single-line, creative eyes ──────────────────
+	// Clean terminal aesthetic. Charming, not pixel art.
+	// Evolution changes the creature's form, not its rendering technique.
 
-	// Color palette from concept art
-	const CC = {
-		gr: [120, 220, 120] as const,  // green outline
-		cy: [100, 200, 240] as const,  // cyan (eyes, crown)
-		dk: [35, 40, 55] as const,     // dark face interior
-		pu: [160, 100, 200] as const,  // purple
-		pd: [120, 70, 160] as const,   // dark purple
-		tl: [80, 200, 180] as const,   // teal
-		bl: [80, 120, 200] as const,   // blue
-		pk: [220, 100, 140] as const,  // pink hearts
-		wh: [200, 220, 240] as const,  // white highlights
-		bg: [0, 0, 0] as const,        // transparent (terminal bg)
-	};
+	let _nextBlinkAt = Date.now() + 3000 + Math.random() * 2000;
+	let _blinkUntil = 0;
+	let _doubleBlink = false;
 
-	function getPetSprite(evolution: number, mood: string, _level: number): string[] {
-		const t = Date.now() / 1000;
-		const { gr, cy, dk, pu, pd, tl, bl, pk, wh, bg: _bg } = CC;
-		const B = (c: readonly [number, number, number]) => block(c[0], c[1], c[2]);
-		const HT = (top: readonly [number, number, number], bot: readonly [number, number, number]) => halfTop(top[0], top[1], top[2], bot[0], bot[1], bot[2]);
-		const HB = (top: readonly [number, number, number], bot: readonly [number, number, number]) => halfBot(top[0], top[1], top[2], bot[0], bot[1], bot[2]);
-		const heart = () => rgb(pk[0], pk[1], pk[2], "♥");
-		const whisker = () => rgb(gr[0], gr[1], gr[2], "═");
-		const bg = _bg;
+	function getCreature(evolution: number, mood: string, audioLevel: number): string {
+		const now = Date.now();
+		const t = now / 1000;
+
+		// ── Natural blink with occasional double-blink ──
+		if (now >= _nextBlinkAt && now > _blinkUntil) {
+			_blinkUntil = now + 130;
+			if (Math.random() < 0.18) {
+				_doubleBlink = true;
+				_nextBlinkAt = now + 280;
+			} else {
+				_doubleBlink = false;
+				_nextBlinkAt = now + 2500 + Math.random() * 3500;
+			}
+		}
+		if (_doubleBlink && now >= _nextBlinkAt && now > _blinkUntil) {
+			_blinkUntil = now + 100;
+			_doubleBlink = false;
+			_nextBlinkAt = now + 2500 + Math.random() * 3500;
+		}
+		const blinking = now < _blinkUntil;
+
+		const loud = audioLevel > 0.42;
+		const mid = audioLevel > 0.15;
+
+		// ── Eyes: the soul of the creature ──
+		let eyes: string;
+		if (blinking) {
+			eyes = "–   –";
+		} else if (loud) {
+			eyes = "◕   ◕";
+		} else if (mid) {
+			eyes = "●   ●";
+		} else {
+			const drift = Math.sin(t * 0.3);
+			eyes = drift > 0.7 ? " •  •" : drift < -0.7 ? "•  • " : "•   •";
+		}
+
+		// ── Cheeks flush with energy ──
+		const cheekL = loud ? "˚" : mid ? "·" : " ";
+		const cheekR = loud ? "˚" : mid ? "·" : " ";
+
+		// ── Mouth reacts to mood ──
+		const mouth = mood === "ecstatic" ? "ω" : loud ? "○" : "";
 
 		if (evolution === 0) {
-			// Egg
-			const crack = mood === "excited" && Math.sin(t * 4) > 0;
-			const c = crack ? rgb(gr[0], gr[1], gr[2], "╱") : B(tl);
-			return [
-				`    ${HB(bg, gr)}${HB(bg, gr)}${HB(bg, gr)}${HB(bg, gr)}    `,
-				`   ${B(gr)}${B(tl)}${B(tl)}${B(tl)}${B(tl)}${B(gr)}   `,
-				`   ${B(gr)}${B(tl)}${c}${B(tl)}${c}${B(gr)}   `,
-				`    ${HT(gr, bg)}${HT(gr, bg)}${HT(gr, bg)}${HT(gr, bg)}    `,
-			];
+			// Egg — just a wobbling oval with a crack hint
+			const wobble = Math.sin(t * 3) > 0.7;
+			return wobble ? " (  ᨏ  )" : " (  ·  )";
 		}
 		if (evolution === 1) {
-			// Baby — small round pixel blob
-			const blink = Math.sin(t * 0.8) > 0.92;
-			const eL = blink ? B(dk) : B(cy);
-			const eR = blink ? B(dk) : B(cy);
-			return [
-				`   ${HB(bg, gr)}${B(gr)}${HB(bg, gr)}${HB(bg, gr)}${B(gr)}${HB(bg, gr)}   `,
-				`   ${B(gr)}${B(dk)}${eL}${B(dk)}${eR}${B(dk)}${B(gr)}   `,
-				`   ${B(gr)}${B(dk)}${B(dk)}${rgb(wh[0], wh[1], wh[2], "▿")}${B(dk)}${B(dk)}${B(gr)}   `,
-				`    ${HT(gr, bg)}${HT(gr, bg)}${HT(gr, bg)}${HT(gr, bg)}    `,
-			];
+			// Baby — tiny round blob, just eyes
+			return `(${cheekL} ${eyes} ${cheekR})`;
 		}
 		if (evolution === 2) {
-			// Teen — ears, whiskers
-			const blink = Math.sin(t * 0.7) > 0.93;
-			const eL = blink ? B(dk) : B(cy);
-			const eR = blink ? B(dk) : B(cy);
-			const m = mood === "ecstatic" ? "ω" : "▿";
-			return [
-				`   ${HB(bg, gr)} ${HB(bg, dk)}${HB(bg, dk)}${HB(bg, dk)}${HB(bg, dk)}${HB(bg, dk)}${HB(bg, dk)} ${HB(bg, gr)}   `,
-				`   ${B(gr)} ${B(dk)}${eL}${eL}${B(dk)}${B(dk)}${eR}${eR}${B(dk)} ${B(gr)}   `,
-				`  ${whisker()}${B(gr)} ${B(dk)}${B(dk)}${B(dk)}${rgb(wh[0], wh[1], wh[2], m)}${B(dk)}${B(dk)}${B(dk)} ${B(gr)}${whisker()} `,
-				`    ${HT(gr, bg)}${HT(pu, bg)}${HT(pu, bg)}${HT(pu, bg)}${HT(pu, bg)}${HT(pu, bg)}${HT(pu, bg)}${HT(gr, bg)}    `,
-			];
+			// Teen — ears appear, whiskers
+			const earL = loud ? "⟋" : "ᘏ";
+			const earR = loud ? "⟍" : "ᘏ";
+			return `${earL}(${cheekL} ${eyes} ${cheekR})${earR}`;
 		}
 		if (evolution === 3) {
-			// Adult — the full pixel cat from concept art
-			const blink = Math.sin(t * 0.6) > 0.94;
-			const eL = blink ? B(dk) : B(cy);
-			const eR = blink ? B(dk) : B(cy);
-			const m = mood === "ecstatic" ? "ω" : mood === "excited" ? "▿" : "·";
-			const tail = Math.sin(t * 2.5) > 0;
-			const heartFloat = mood === "ecstatic" || mood === "excited";
-			const h1 = heartFloat && Math.sin(t * 2) > 0 ? heart() : " ";
-			const h2 = heartFloat && Math.sin(t * 2.8 + 1) > 0.3 ? heart() : " ";
-			const armUp = mood === "ecstatic" && Math.sin(t * 3) > 0;
-			return [
-				`                ${h2}`,
-				`      ${HB(bg, cy)} ${HB(bg, cy)}${B(cy)}${HB(bg, cy)} ${HB(bg, cy)}      `,
-				`    ${HB(bg, gr)}${HT(gr, bg)}${HT(cy, dk)}${HT(cy, dk)}${HT(cy, dk)}${HT(cy, dk)}${HT(cy, dk)}${HT(cy, dk)}${HT(gr, bg)}${HB(bg, gr)} ${h1}`,
-				`   ${B(gr)} ${B(dk)}${B(dk)}${B(dk)}${B(dk)}${B(dk)}${B(dk)}${B(dk)}${B(dk)} ${B(gr)}  `,
-				`  ${whisker()}${B(gr)}${B(dk)}${eL}${eL}${B(dk)}${B(dk)}${eR}${eR}${B(dk)}${B(gr)}${whisker()} `,
-				`   ${B(gr)} ${B(dk)}${B(dk)}${B(dk)}${rgb(wh[0], wh[1], wh[2], m)}${B(dk)}${B(dk)}${B(dk)} ${B(gr)}  `,
-				` ${armUp ? rgb(tl[0], tl[1], tl[2], "╱") : " "}${B(gr)}${B(tl)}${B(tl)}${B(gr)}${B(gr)}${B(bl)}${B(bl)}${B(pu)}${B(pu)}${B(tl)}${B(gr)}  `,
-				`   ${B(gr)}${B(pu)}${B(tl)}${B(pu)}${B(pu)}${B(bl)}${B(bl)}${B(pu)}${B(pu)}${B(tl)}${B(pu)}${B(gr)}  `,
-				`    ${B(pd)}${B(pd)}${B(pu)}${B(pu)}  ${B(pu)}${B(pu)}${B(pd)}${B(pd)}  `,
-				`    ${HT(pd, bg)}${HT(pd, bg)}    ${HT(pd, bg)}${HT(pd, bg)} ${tail ? rgb(tl[0], tl[1], tl[2], "~") : " "}`,
-			];
+			// Adult — full cat with tail
+			const earL = loud ? "⟋" : "ᘏ";
+			const earR = loud ? "⟍" : "ᘏ";
+			const tail = Math.sin(t * 2) > 0 ? "~" : "∼";
+			return `${earL}(${cheekL} ${eyes} ${cheekR})${earR}${tail}${mouth ? " " + mouth : ""}`;
 		}
-		// Legendary — crowned pixel cat with sparkles
-		const blink = Math.sin(t * 0.5) > 0.95;
-		const eL = blink ? B(dk) : B(cy);
-		const eR = blink ? B(dk) : B(cy);
-		const sp1 = Math.sin(t * 3) > 0.3 ? rgb(wh[0], wh[1], wh[2], "✧") : " ";
-		const sp2 = Math.sin(t * 3 + 2) > 0.3 ? rgb(wh[0], wh[1], wh[2], "✧") : " ";
-		const tail = Math.sin(t * 2) > 0;
-		const h1 = Math.sin(t * 2) > 0 ? heart() : " ";
-		const h2 = Math.sin(t * 2.1 + 1) > 0.2 ? heart() : " ";
-		return [
-			`      ${HB(bg, cy)} ${HB(bg, cy)}${B(cy)}${HB(bg, cy)} ${HB(bg, cy)}     ${h2}`,
-			` ${sp1} ${HB(bg, gr)}${HT(gr, bg)}${HT(cy, dk)}${HT(cy, dk)}${HT(cy, dk)}${HT(cy, dk)}${HT(cy, dk)}${HT(cy, dk)}${HT(gr, bg)}${HB(bg, gr)} ${sp2}${h1}`,
-			`   ${B(gr)} ${B(dk)}${B(dk)}${B(dk)}${B(dk)}${B(dk)}${B(dk)}${B(dk)}${B(dk)} ${B(gr)}  `,
-			`  ${whisker()}${B(gr)}${rgb(wh[0], wh[1], wh[2], "✧")}${eL}${eL}${B(dk)}${B(dk)}${eR}${eR}${rgb(wh[0], wh[1], wh[2], "✧")}${B(gr)}${whisker()} `,
-			`   ${B(gr)} ${B(dk)}${B(dk)}${B(dk)}${rgb(wh[0], wh[1], wh[2], "ω")}${B(dk)}${B(dk)}${B(dk)} ${B(gr)}  `,
-			` ${rgb(tl[0], tl[1], tl[2], "╱")}${B(gr)}${B(tl)}${B(tl)}${B(gr)}${B(gr)}${B(bl)}${B(bl)}${B(pu)}${B(pu)}${B(tl)}${B(gr)}  `,
-			`   ${B(gr)}${B(pu)}${B(tl)}${B(pu)}${B(pu)}${B(bl)}${B(bl)}${B(pu)}${B(pu)}${B(tl)}${B(pu)}${B(gr)}  `,
-			`    ${B(pd)}${B(pd)}${B(pu)}${B(pu)}  ${B(pu)}${B(pu)}${B(pd)}${B(pd)}  `,
-			`    ${HT(pd, bg)}${HT(pd, bg)}    ${HT(pd, bg)}${HT(pd, bg)} ${tail ? rgb(tl[0], tl[1], tl[2], "~") : " "}`,
-		];
+		// Legendary — sparkles + crown hint
+		const earL = loud ? "⟋" : "ᘏ";
+		const earR = loud ? "⟍" : "ᘏ";
+		const tail = Math.sin(t * 2) > 0 ? "~" : "∼";
+		const sparkle = Math.sin(t * 3) > 0.3 ? "✧" : " ";
+		return `${sparkle} ${earL}(${cheekL} ${eyes} ${cheekR})${earR}${tail} ${sparkle}`;
 	}
 
 	// ─── XP & Level System ──────────────────────────────────────────────
@@ -1395,15 +1355,14 @@ export default function (pi: ExtensionAPI) {
 					invalidate() {},
 					render(width: number): string[] {
 						const maxW = Math.max(0, Math.min(width - 4, 72));
-						const spriteLines = getPetSprite(pet.evolution, pet.mood, pet.level);
+						const creature = getCreature(pet.evolution, pet.mood, 0);
 						const meterLen = Math.max(4, Math.min(10, maxW - 40));
 						const filled = Math.round(progress * meterLen);
 						const meter = theme.fg("accent", "⣿".repeat(filled)) + theme.fg("muted", "⠁".repeat(meterLen - filled));
 						const hint = theme.fg("dim", progress < 1 ? "hold…" : "ready!");
 						const lvl = theme.fg("warning", `Lv.${pet.level}`);
 						const out: string[] = [];
-						for (const sl of spriteLines) out.push(` ${theme.fg("accent", sl)}`);
-						out.push(` ${theme.fg("muted", "○")} ${lvl} ${meter} ${hint}`);
+						out.push(` ${theme.fg("muted", "○")} ${lvl} ${theme.fg("accent", creature)} ${meter} ${hint}`);
 						return out;
 					},
 				};
@@ -1455,7 +1414,7 @@ export default function (pi: ExtensionAPI) {
 
 					// Pet mood from audio
 					pet.mood = audioLevelSmoothed > 0.4 ? "ecstatic" : audioLevelSmoothed > 0.12 ? "excited" : "happy";
-					const spriteLines = getPetSprite(pet.evolution, pet.mood, pet.level);
+					const creature = getCreature(pet.evolution, pet.mood, audioLevelSmoothed);
 					const lvl = theme.fg("warning", `Lv.${pet.level}`);
 					const xpBar = buildXPBar(pet.xp, pet.xpToNext, 10);
 					const xpDisplay = theme.fg("success", xpBar);
@@ -1471,31 +1430,21 @@ export default function (pi: ExtensionAPI) {
 						const critStr = battle.crit ? theme.fg("error", " ⚡CRIT!") : "";
 						const dmgStr = battle.playerDamage > 0 ? theme.fg("error", ` -${battle.playerDamage}`) : "";
 
-						// Enemy info line
 						out.push(` ${theme.fg("error", "⚔")} ${theme.fg("dim", battle.enemyName)} ${enemyHPDisplay}${dmgStr}${comboStr}${critStr}`);
-						// Pet sprite lines
-						for (const sl of spriteLines) out.push(` ${theme.fg("accent", sl)}`);
-						// Status line
-						out.push(` ${theme.fg("error", getRecordDot())} ${lvl} ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)}`);
+						out.push(` ${theme.fg("error", getRecordDot())} ${theme.fg("accent", creature)} ${lvl} ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)}`);
 						return out;
 					}
 
 					if (battle.active && battle.defeated) {
 						const sparkle = Math.sin(Date.now() / 200) > 0 ? "✦" : "✧";
 						out.push(` ${theme.fg("success", sparkle)} ${theme.fg("success", "VICTORY!")} ${theme.fg("warning", `+${battle.xpReward}XP`)}`);
-						for (const sl of spriteLines) out.push(` ${theme.fg("accent", sl)}`);
-						out.push(` ${lvl} ${xpDisplay} ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)}`);
+						out.push(` ${theme.fg("accent", creature)} ${lvl} ${xpDisplay} ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)}`);
 						return out;
 					}
 
-					// Normal recording — Tamagotchi mode
-					const hearts = audioLevelSmoothed > 0.3 ? "♥ " : audioLevelSmoothed > 0.1 ? "♡ " : "";
-					const heartsDisplay = hearts ? theme.fg("error", hearts) : "";
-
-					// Pet sprite (multi-line)
-					for (const sl of spriteLines) out.push(` ${theme.fg("accent", sl)}  ${heartsDisplay}`);
-					// Status bar: dot + level + xp + wave + time + hint
-					out.push(` ${theme.fg("error", getRecordDot())} ${lvl} XP${xpDisplay} ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`);
+					// Normal recording — single line with creature + wave + status
+					const content = ` ${theme.fg("error", getRecordDot())} ${theme.fg("accent", creature)} ${lvl} XP${xpDisplay} ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`;
+					out.push(content);
 					return out;
 				},
 			};
