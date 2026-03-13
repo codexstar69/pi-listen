@@ -1030,16 +1030,15 @@ export default function (pi: ExtensionAPI) {
 		return text.replace(/\[[^m]*m/g, "");
 	}
 
-	// ─── Premium Wave: Perlin-inspired multi-octave fluid visualization ─────
-	// Each bar is driven by layered noise functions that create organic, breathing
-	// movement. Audio level controls amplitude + energy, not just pattern selection.
+	// ─── Premium Wave: Braille-dot fluid visualization ──────────────────────
+	// Ultra-fine grain perlin noise waveform. Each braille char = 2x vertical res.
 
 	const _noiseTable: number[] = [];
 	for (let i = 0; i < 256; i++) _noiseTable.push(Math.random());
 	function smoothNoise(x: number): number {
 		const xi = Math.floor(x) & 255;
 		const xf = x - Math.floor(x);
-		const t = xf * xf * (3 - 2 * xf); // smoothstep
+		const t = xf * xf * (3 - 2 * xf);
 		return _noiseTable[xi] * (1 - t) + _noiseTable[(xi + 1) & 255] * t;
 	}
 	function fbmNoise(x: number, octaves: number): number {
@@ -1052,28 +1051,23 @@ export default function (pi: ExtensionAPI) {
 		return val;
 	}
 
-	function buildPremiumWave(frame: number, width: number, level: number): string {
+	function buildPremiumWave(_frame: number, width: number, level: number): string {
 		const t = Date.now() / 1000;
-		const bars = " ▁▂▃▄▅▆▇█";
-		const len = Math.max(7, Math.min(width, 14));
+		const bars = "⠁⠃⠇⡇⣇⣧⣷⣿";
+		const len = Math.max(8, Math.min(width, 16));
 		let out = "";
 
-		// Audio reactivity: level drives amplitude, speed, and octave complexity
-		const energy = Math.pow(level, 0.7); // perceptual curve
+		const energy = Math.pow(level, 0.7);
 		const speed = 1.8 + energy * 4.5;
 		const octaves = energy > 0.3 ? 4 : 3;
-		const baseAmplitude = 0.08 + energy * 0.92;
+		const baseAmplitude = 0.10 + energy * 0.90;
 
 		for (let i = 0; i < len; i++) {
 			const pos = i / len;
-			// Primary wave: slow organic drift
 			const n1 = fbmNoise(pos * 3.0 + t * speed * 0.4, octaves);
-			// Secondary wave: faster shimmer
 			const n2 = fbmNoise(pos * 5.5 + t * speed * 0.9 + 100, 2) * 0.3;
-			// Tertiary: breathing pulse centered in the middle
-			const center = 1.0 - Math.abs(pos - 0.5) * 1.6;
-			const breath = Math.sin(t * 1.2) * 0.12 * center;
-
+			const center = 1.0 - Math.abs(pos - 0.5) * 1.4;
+			const breath = Math.sin(t * 1.2) * 0.1 * center;
 			const raw = (n1 + n2 + breath) * baseAmplitude;
 			const value = Math.max(0, Math.min(1, raw));
 			const idx = Math.min(bars.length - 1, Math.round(value * (bars.length - 1)));
@@ -1082,91 +1076,102 @@ export default function (pi: ExtensionAPI) {
 		return out;
 	}
 
-	// ─── Cat Expression Engine ──────────────────────────────────────────────
-	// Micro-expressions driven by audio level with natural blink timing.
-	// Uses variable blink intervals (2.8–5.2s) like real eye blinks.
+	// ─── Mochi: A tiny spirit creature ──────────────────────────────────────
+	// Forest-spirit companion. Breathes, blinks naturally, reacts to your voice.
+	// Not a cat. Not a toy. A little presence that makes you feel less alone.
 
 	let _nextBlinkAt = Date.now() + 3000 + Math.random() * 2000;
 	let _blinkUntil = 0;
+	let _doubleBlink = false;
 
-	function getCatFace(level: number): string {
+	function getCreature(level: number): string {
 		const now = Date.now();
+		const t = now / 1000;
 
-		// Natural blink: variable interval, quick 150ms close
+		// ── Natural blink with occasional double-blink ──
 		if (now >= _nextBlinkAt && now > _blinkUntil) {
-			_blinkUntil = now + 150;
-			_nextBlinkAt = now + 2800 + Math.random() * 2400; // 2.8–5.2s
+			_blinkUntil = now + 130;
+			if (Math.random() < 0.18) {
+				_doubleBlink = true;
+				_nextBlinkAt = now + 280;
+			} else {
+				_doubleBlink = false;
+				_nextBlinkAt = now + 2500 + Math.random() * 3500;
+			}
+		}
+		if (_doubleBlink && now >= _nextBlinkAt && now > _blinkUntil) {
+			_blinkUntil = now + 100;
+			_doubleBlink = false;
+			_nextBlinkAt = now + 2500 + Math.random() * 3500;
 		}
 		const blinking = now < _blinkUntil;
 
-		const loud = level > 0.45;
+		const loud = level > 0.42;
 		const mid = level > 0.15;
 
-		if (blinking) return "╭(－  －)╮";
-		if (loud)     return "╭(◉  ◉)╮";
-		if (mid)      return "╭(●  ●)╮";
-		return "╭(◕  ◕)╮";
+		// ── Ears tilt with energy ──
+		const earL = loud ? "⟋" : "ᘏ";
+		const earR = loud ? "⟍" : "ᘏ";
+
+		// ── Eyes dilate with sound, spaced for warmth ──
+		let eyes: string;
+		if (blinking) {
+			eyes = "–   –";
+		} else if (loud) {
+			eyes = "◕   ◕";
+		} else if (mid) {
+			eyes = "●   ●";
+		} else {
+			// Gentle idle: slow look-around
+			const drift = Math.sin(t * 0.3);
+			eyes = drift > 0.7 ? " •  •" : drift < -0.7 ? "•  • " : "•   •";
+		}
+
+		// ── Cheeks flush when speaking ──
+		const cheekL = loud ? "˚" : mid ? "·" : " ";
+		const cheekR = loud ? "˚" : mid ? "·" : " ";
+
+		// ── Breathing body pulse ──
+		const breathPhase = Math.sin(t * 0.8);
+		const bodyL = breathPhase > 0.3 ? "(" : "(";
+		const bodyR = breathPhase > 0.3 ? ")" : ")";
+
+		return ` ${earL}    ${earR}  ${bodyL}${cheekL} ${eyes} ${cheekR}${bodyR}`;
 	}
 
-	// ─── Breathing Record Dot ───────────────────────────────────────────────
-	// Smooth sine-driven pulse instead of harsh on/off threshold.
-
+	// ─── Breathing Record Indicator ─────────────────────────────────────────
 	function getRecordDot(): string {
-		const phase = (Math.sin(Date.now() / 500) + 1) / 2; // 0→1 smooth
-		if (phase > 0.7) return "●";
-		if (phase > 0.3) return "◉";
+		const phase = (Math.sin(Date.now() / 600) + 1) / 2;
+		if (phase > 0.65) return "●";
+		if (phase > 0.35) return "◉";
 		return "○";
 	}
 
-	// ─── Tail Animation ────────────────────────────────────────────────────
-	// Fluid tail sway driven by audio energy.
-
-	function getTail(level: number): string {
-		const t = Date.now() / 1000;
-		const sway = Math.sin(t * (2.0 + level * 4.0));
-		if (level > 0.4) return sway > 0.3 ? "~" : sway < -0.3 ? "˷" : "⁓";
-		return sway > 0 ? "~" : " ";
-	}
 
 	function showWarmupWidget() {
 		if (!ctx?.hasUI) return;
 
 		const startTime = Date.now();
-		const useCat = config.catAnimation !== false;
-		const catFrames = [
-			"╭(－  －)╮",
-			"╭(◕  ◕)╮",
-			"╭(●  ●)╮",
-			"╭(◉  ◉)╮",
-		];
 
 		const renderWarmup = () => {
 			if (!ctx?.hasUI) return;
 			const elapsed = Date.now() - startTime;
 			const progress = Math.min(elapsed / HOLD_THRESHOLD_MS, 1);
-			const remainingSecs = Math.max(0, Math.ceil((HOLD_THRESHOLD_MS - elapsed) / 1000));
 
 			ctx.ui.setWidget("voice-recording", (tui, theme) => {
 				return {
 					invalidate() {},
 					render(width: number): string[] {
 						const maxW = Math.max(0, Math.min(width - 4, 62));
-						const border = theme.fg("border", "─".repeat(maxW));
-						const meterLen = Math.max(5, Math.min(8, maxW - 38));
+						const meterLen = Math.max(5, Math.min(10, maxW - 38));
 						const filled = Math.round(progress * meterLen);
-						const meter = theme.fg("accent", "▬".repeat(filled)) + theme.fg("muted", "─".repeat(meterLen - filled));
-						const hint = theme.fg("dim", remainingSecs > 1 ? `${remainingSecs}s` : "ready");
+						const meter = theme.fg("accent", "⣿".repeat(filled)) + theme.fg("muted", "⠁".repeat(meterLen - filled));
+						const hint = theme.fg("dim", progress < 1 ? "hold…" : "ready");
 
-						if (!useCat) {
-							const content = ` ${theme.fg("accent", "MIC")} ${meter} ${hint}`;
-							const stripped = stripAnsi(content).length;
-							return [border, content + " ".repeat(Math.max(0, maxW - stripped)), border];
-						}
-
-						const cat = catFrames[Math.min(catFrames.length - 1, Math.floor(progress * catFrames.length))];
-						const content = ` ${theme.fg("muted", "○")} ${theme.fg("accent", cat)} ${theme.fg("muted", "~")} ${theme.fg("accent", meter)} ${hint}`;
+						const creature = getCreature(0);
+						const content = ` ${theme.fg("muted", "○")} ${theme.fg("accent", creature)} ${theme.fg("accent", meter)} ${hint}`;
 						const stripped = stripAnsi(content).length;
-						return [border, content + " ".repeat(Math.max(0, maxW - stripped)), border];
+						return [content + " ".repeat(Math.max(0, maxW - stripped))];
 					},
 				};
 			}, { placement: "aboveEditor" });
@@ -1207,26 +1212,15 @@ export default function (pi: ExtensionAPI) {
 					const mins = Math.floor(elapsed / 60);
 					const secs = elapsed % 60;
 					const timeStr = mins > 0 ? `${mins}:${String(secs).padStart(2, "0")}` : `${secs}s`;
-					const border = theme.fg("border", "─".repeat(maxW));
-					const dotPulse = Math.sin(Date.now() / 420) > -0.15;
-					const dot = dotPulse ? theme.fg("error", "●") : theme.fg("muted", "○");
-					const wave = buildPremiumWave(frame, Math.max(7, Math.min(14, maxW - 38)), audioLevelSmoothed);
+					const wave = buildPremiumWave(frame, Math.max(8, Math.min(16, maxW - 38)), audioLevelSmoothed);
 					const hint = target === "btw"
 						? theme.fg("dim", "Ctrl+Shift+B stop")
 						: theme.fg("dim", "Release SPACE");
 
-					if (!useCat) {
-						const label = target === "btw" ? theme.fg("accent", "BTW") : theme.fg("accent", "REC");
-						const content = ` ${theme.fg("error", getRecordDot())} ${label} ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`;
-						const stripped = stripAnsi(content).length;
-						return [border, content + " ".repeat(Math.max(0, maxW - stripped)), border];
-					}
-
-					const cat = getCatFace(audioLevelSmoothed);
-					const tail = getTail(audioLevelSmoothed);
-					const content = ` ${theme.fg("error", getRecordDot())} ${theme.fg("accent", cat)} ${theme.fg("muted", tail)} ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`;
+					const creature = getCreature(audioLevelSmoothed);
+					const content = ` ${theme.fg("error", getRecordDot())} ${theme.fg("accent", creature)} ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`;
 					const stripped = stripAnsi(content).length;
-					return [border, content + " ".repeat(Math.max(0, maxW - stripped)), border];
+					return [content + " ".repeat(Math.max(0, maxW - stripped))];
 				},
 			};
 		}, { placement: "aboveEditor" });
