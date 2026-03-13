@@ -1,6 +1,6 @@
 {
   "name": "@codexstar/pi-listen",
-  "version": "1.3.9",
+  "version": "1.3.10",
   "description": "Voice input, first-run onboarding, and side-channel BTW conversations for Pi",
   "type": "module",
   "keywords": [
