@@ -114,16 +114,11 @@ const REPEAT_CONFIRM_COUNT = 3;   // Need this many rapid repeat presses to conf
 const REPEAT_CONFIRM_MS = 700;    // Max gap between presses to count as rapid repeat
                                   // macOS initial key-repeat delay is ~417-583ms depending on settings
                                    // Must be > macOS InitialKeyRepeat (~375ms)
-const RECORDING_GRACE_MS = 1200;  // After recording starts, ignore release for this long
-                                   // The holdActivationTimer + async startVoiceRecording
-                                   // creates a gap where no key events arrive, so this must
-                                   // be generous to avoid false stops
-const RELEASE_DETECT_RECORDING_MS = 3000; // During active recording, gap before we consider
-                                           // the key released. Must be very generous because:
-                                           // 1. macOS key repeat is ~90ms but event loop may
-                                           //    be busy with Deepgram WebSocket I/O
-                                           // 2. False stops are far worse than slow stop
-                                           // 3. User expects recording to continue while holding
+const RECORDING_GRACE_MS = 600;   // After recording starts, ignore release for this long
+                                   // Covers async gap from holdActivationTimer → startVoiceRecording
+const RELEASE_DETECT_RECORDING_MS = 250; // During active recording, gap before we consider
+                                          // the key released (non-Kitty only). macOS Terminal
+                                          // key repeat fires every ~30-50ms. 250ms gap = released.
 const CORRUPTION_GUARD_MS = 200;  // Min gap between stop and restart
 
 // Debug logging — set PI_VOICE_DEBUG=1 to enable
