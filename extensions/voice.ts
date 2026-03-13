@@ -469,7 +469,6 @@ export default function (pi: ExtensionAPI) {
 	// ─── Continuous Dictation Mode ───────────────────────────────────────────
 
 	let dictationMode = false;
-	let dictationText = "";
 
 	// ─── Voice Command Execution ─────────────────────────────────────────────
 
@@ -663,7 +662,6 @@ export default function (pi: ExtensionAPI) {
 		errorCooldownUntil = 0;
 		editorTextBeforeVoice = "";
 		dictationMode = false;
-		dictationText = "";
 		hideWidget();
 		setVoiceState("idle");
 	}
@@ -1695,8 +1693,7 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 				dictationMode = true;
-				dictationText = ctx?.hasUI ? (ctx.ui.getEditorText() || "") : "";
-				editorTextBeforeVoice = dictationText;
+				editorTextBeforeVoice = ctx?.hasUI ? (ctx.ui.getEditorText() || "") : "";
 				const ok = await startVoiceRecording();
 				if (ok) {
 					cmdCtx.ui.notify([
