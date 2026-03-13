@@ -80,7 +80,7 @@ import {
 } from "./voice/config";
 import { finalizeOnboardingConfig, runVoiceOnboarding } from "./voice/onboarding";
 import { detectVoiceCommand, processVoiceShortcuts } from "./voice/text-processing";
-import { buildDeepgramWsUrl, resolveDeepgramApiKey, SAMPLE_RATE, CHANNELS, ENCODING, DEEPGRAM_WS_URL } from "./voice/deepgram";
+import { buildDeepgramWsUrl, resolveDeepgramApiKey, SAMPLE_RATE, CHANNELS } from "./voice/deepgram";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
