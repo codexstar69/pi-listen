@@ -1097,80 +1097,108 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	// ─── Evolution Sprites (pixel art via Unicode blocks) ───────────────
+	// ─── ANSI True Color helpers ────────────────────────────────────────
+	// The theme only has named colors. For pixel art we need exact RGB.
+	function rgb(r: number, g: number, b: number, text: string): string {
+		return `\x1b[38;2;${r};${g};${b}m${text}\x1b[0m`;
+	}
+
 	function getPetSprite(evolution: number, mood: string, _level: number): string[] {
 		const t = Date.now() / 1000;
 
-		// ─── Pixel art using half-block characters ──────────────────
-		// ▀ = top half  ▄ = bottom half  █ = full block  ░▒▓ = shading
-		// Each character = 2 vertical pixels. This gives real pixel art.
+		// Color palette from the concept art
+		const G  = (s: string) => rgb(120, 220, 120, s);  // green outline/body
+		const Gd = (s: string) => rgb(80, 160, 80, s);    // dark green
+		const Gl = (s: string) => rgb(160, 240, 160, s);  // light green
+		const C  = (s: string) => rgb(100, 200, 240, s);  // cyan eyes
+		const P  = (s: string) => rgb(160, 100, 200, s);  // purple belly/clothes
+		const Pd = (s: string) => rgb(120, 70, 160, s);   // dark purple
+		const Pk = (s: string) => rgb(220, 100, 140, s);  // pink hearts
+		const T  = (s: string) => rgb(80, 200, 180, s);   // teal accents
+		const W  = (s: string) => rgb(200, 220, 240, s);  // white highlights
 
 		if (evolution === 0) {
-			// Egg — pixel art egg with crack animation
-			const crack = mood === "excited" ? (Math.sin(t * 4) > 0 ? "╱" : "╲") : "│";
+			// Egg
+			const crack = mood === "excited" && Math.sin(t * 4) > 0;
 			return [
-				"    ▄████▄    ",
-				`   █▓░░░▓█   `,
-				`   █░${crack}░${crack}░█   `,
-				"   ▀██████▀   ",
+				`   ${G("▄████▄")}   `,
+				`  ${G("█")}${Gl("░░░░")}${G("█")}  `,
+				`  ${G("█")}${Gl("░")}${crack ? G("╱") : Gl("░")}${Gl("░")}${crack ? G("╲") : Gl("░")}${G("█")}  `,
+				`   ${G("▀████▀")}   `,
 			];
 		}
 		if (evolution === 1) {
-			// Baby — small round pixel creature, big eyes
+			// Baby — small pixel blob
 			const blink = Math.sin(t * 0.8) > 0.92;
-			const eyeL = blink ? "▄" : mood === "ecstatic" ? "✦" : mood === "excited" ? "◕" : "●";
-			const eyeR = blink ? "▄" : mood === "ecstatic" ? "✦" : mood === "excited" ? "◕" : "●";
+			const eL = blink ? G("▄") : C("●");
+			const eR = blink ? G("▄") : C("●");
 			return [
-				"    ▄██▄     ",
-				`   █${eyeL}██${eyeR}█    `,
-				"    ▀██▀     ",
+				`   ${G("▄▀")}${G("██")}${G("▀▄")}   `,
+				`  ${G("█")} ${eL}${G("██")}${eR} ${G("█")}  `,
+				`   ${G("█")}${Gl(" ▿ ")}${G("█")}   `,
+				`    ${G("▀██▀")}    `,
 			];
 		}
 		if (evolution === 2) {
-			// Teen — ears, body, whiskers
+			// Teen — ears, whiskers, body
 			const blink = Math.sin(t * 0.7) > 0.93;
-			const eyeL = blink ? "▄" : mood === "ecstatic" ? "✦" : mood === "excited" ? "◕" : "●";
-			const eyeR = blink ? "▄" : mood === "ecstatic" ? "✦" : mood === "excited" ? "◕" : "●";
-			const mouth = mood === "ecstatic" ? "▿" : "·";
-			const blush = mood === "ecstatic" || mood === "excited" ? "░" : " ";
+			const eL = blink ? G("▄") : C("◆");
+			const eR = blink ? G("▄") : C("◆");
+			const blush = mood === "ecstatic" || mood === "excited" ? Pk("·") : " ";
+			const m = mood === "ecstatic" ? "ω" : "▿";
 			return [
-				"  ▄▀▄  ▄▀▄   ",
-				` █${blush}${eyeL}████${eyeR}${blush}█  `,
-				`  █ (${mouth}) █   `,
-				"   ▀████▀    ",
+				`  ${G("▄▀")}    ${G("▀▄")}  `,
+				`  ${G("█")}${G("▄▀▀▀▀▄")}${G("█")}  `,
+				` ${G("═")}${G("█")}${blush}${eL} ${G("██")} ${eR}${blush}${G("█")}${G("═")}`,
+				`  ${G("█")} ${G("(")}${W(m)}${G(")")} ${G("█")}  `,
+				`   ${G("▀")}${P("████")}${G("▀")}   `,
+				`    ${P("█")}${Pd("▓▓")}${P("█")}    `,
+				`   ${G("▀▀")}  ${G("▀▀")}   `,
 			];
 		}
 		if (evolution === 3) {
-			// Adult — full pixel cat with crown hints, body, arms, tail
+			// Adult — the full pixel cat from the concept art
 			const blink = Math.sin(t * 0.6) > 0.94;
-			const eyeL = blink ? "▄" : mood === "ecstatic" ? "★" : mood === "excited" ? "◕" : "●";
-			const eyeR = blink ? "▄" : mood === "ecstatic" ? "★" : mood === "excited" ? "◕" : "●";
-			const mouth = mood === "ecstatic" ? "ω" : mood === "excited" ? "▿" : "·";
-			const blush = mood === "ecstatic" ? "░" : mood === "excited" ? "░" : " ";
-			const tail = Math.sin(t * 2.5) > 0 ? "▄" : " ";
-			const wave = mood === "ecstatic" ? "╱" : " ";
+			const eL = blink ? G("▄▄") : C("◆ ");
+			const eR = blink ? G("▄▄") : C(" ◆");
+			const m = mood === "ecstatic" ? "ω" : mood === "excited" ? "▿" : "·";
+			const blush = (mood === "ecstatic" || mood === "excited") ? Pk("░") : G("░");
+			const tail = Math.sin(t * 2.5) > 0;
+			const heartFloat = (mood === "ecstatic" || mood === "excited") && Math.sin(t * 2) > 0;
+			const heart1 = heartFloat ? Pk("♥") : " ";
+			const heart2 = heartFloat && Math.sin(t * 2.8 + 1) > 0.3 ? Pk("♥") : " ";
 			return [
-				"  ▄█▀▀▀▀█▄   ",
-				`  █▄▀▄▄▀▄█   `,
-				` █${blush}${eyeL} ██ ${eyeR}${blush}█  `,
-				`  █ (${mouth}) █ ${tail} `,
-				` ${wave}▀██████▀   `,
-				"   ██  ██     ",
+				`            ${heart2} `,
+				`  ${G("▄▀")}      ${G("▀▄")}${heart1}`,
+				`  ${G("█")} ${T("▄▀▀▀▀▄")} ${G("█")} `,
+				` ${G("═")}${G("█")}${blush}${eL}${G("██")}${eR}${blush}${G("█")}${G("═")}`,
+				`  ${G("█")}  ${G("(")}${W(m)}${G(")")}  ${G("█")} `,
+				` ${T("╱")}${G("█")}${T("▄")}${P("██████")}${T("▄")}${G("█")} `,
+				`  ${G("█")}${P("█")}${T("░")}${P("████")}${T("░")}${P("█")}${G("█")} `,
+				`   ${P("█")}${Pd("▓▓")}${P("██")}${Pd("▓▓")}${P("█")}  `,
+				`   ${G("▀▀")}  ${tail ? T("▄▀") : T("▀▄")}  ${G("▀▀")} `,
 			];
 		}
-		// Legendary — crowned, sparkled, full pixel art
+		// Legendary — crowned, sparkled
 		const blink = Math.sin(t * 0.5) > 0.95;
-		const eyeL = blink ? "▄" : mood === "ecstatic" ? "✦" : "★";
-		const eyeR = blink ? "▄" : mood === "ecstatic" ? "✦" : "★";
-		const sparkleL = Math.sin(t * 3) > 0.3 ? "✧" : " ";
-		const sparkleR = Math.sin(t * 3 + 1) > 0.3 ? "✧" : " ";
-		const tail = Math.sin(t * 2) > 0 ? "█▀" : "▀█";
+		const eL = blink ? G("▄▄") : C("✦ ");
+		const eR = blink ? G("▄▄") : C(" ✦");
+		const sp1 = Math.sin(t * 3) > 0.3 ? W("✧") : " ";
+		const sp2 = Math.sin(t * 3 + 2) > 0.3 ? W("✧") : " ";
+		const tail = Math.sin(t * 2) > 0;
+		const heartFloat = Math.sin(t * 1.5) > 0;
+		const heart1 = heartFloat ? Pk("♥") : " ";
+		const heart2 = Math.sin(t * 2.1 + 1) > 0.2 ? Pk("♥") : " ";
 		return [
-			`${sparkleL}  ▄█♛█▄  ${sparkleR}`,
-			"  █▄▀▀▄█   ",
-			` █✧${eyeL} ██ ${eyeR}✧█  `,
-			"  █ (ω) █   ",
-			` ▀██████▀${tail} `,
-			"   ██  ██   ",
+			`    ${C("▄█▀█▄")}     ${heart2}`,
+			` ${sp1}${G("▄▀")}${C("▀")}    ${C("▀")}${G("▀▄")}${sp2}${heart1}`,
+			`  ${G("█")} ${T("▄▀▀▀▀▄")} ${G("█")} `,
+			` ${G("═")}${G("█")}${W("✧")}${eL}${G("██")}${eR}${W("✧")}${G("█")}${G("═")}`,
+			`  ${G("█")}  ${G("(")}${W("ω")}${G(")")}  ${G("█")} `,
+			` ${T("╱")}${G("█")}${T("▄")}${P("██████")}${T("▄")}${G("█")} `,
+			`  ${G("█")}${P("█")}${T("░")}${P("████")}${T("░")}${P("█")}${G("█")} `,
+			`   ${P("█")}${Pd("▓▓")}${P("██")}${Pd("▓▓")}${P("█")}  `,
+			`   ${G("▀▀")}  ${tail ? T("█▀") : T("▀█")}  ${G("▀▀")} `,
 		];
 	}
 
