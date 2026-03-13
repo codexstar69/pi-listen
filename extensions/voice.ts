@@ -81,6 +81,7 @@ import {
 import { finalizeOnboardingConfig, runVoiceOnboarding } from "./voice/onboarding";
 import { detectVoiceCommand, processVoiceShortcuts } from "./voice/text-processing";
 import { buildDeepgramWsUrl, resolveDeepgramApiKey, SAMPLE_RATE, CHANNELS } from "./voice/deepgram";
+import { renderSlime, resetSlime } from "./voice/slime";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -490,6 +491,7 @@ export default function (pi: ExtensionAPI) {
 	let errorCooldownUntil = 0;       // After an error, block re-activation until this timestamp
 	let lastNonSpaceKeyTime = 0;      // Timestamp of last non-space keypress (typing cooldown)
 	let tailRecordingTimer: ReturnType<typeof setTimeout> | null = null; // Delayed stop after release
+	let _lastSlimeRenderTime = Date.now();  // For slime physics dt
 
 	// ─── Recording History ───────────────────────────────────────────────────
 
@@ -692,6 +694,7 @@ export default function (pi: ExtensionAPI) {
 		cancelDelayedStop();
 		clearWarmupWidget();
 		clearRecordingAnimTimer();
+		resetSlime();
 		// Reset audio levels
 		audioLevel = 0;
 		audioLevelSmoothed = 0;
@@ -885,16 +888,35 @@ export default function (pi: ExtensionAPI) {
 			return {
 				invalidate() {},
 				render(width: number): string[] {
+					const now = Date.now();
+					const dt = Math.min(0.1, (now - _lastSlimeRenderTime) / 1000);
+					_lastSlimeRenderTime = now;
+
 					const maxW = Math.max(0, Math.min(width - 4, 72));
-					const elapsed = Math.round((Date.now() - recordingStart) / 1000);
+					const elapsed = Math.round((now - recordingStart) / 1000);
 					const mins = Math.floor(elapsed / 60);
 					const secs = elapsed % 60;
 					const timeStr = mins > 0 ? `${mins}:${String(secs).padStart(2, "0")}` : `${secs}s`;
 					const wave = buildPremiumWave(frame, Math.max(6, Math.min(12, maxW - 30)), audioLevelSmoothed);
 					const hint = theme.fg("dim", "⌴ release");
-					const face = getFace(audioLevelSmoothed);
+					const dot = theme.fg("error", getRecordDot());
 
-					return [` ${theme.fg("error", getRecordDot())} ${theme.fg("accent", face)}  ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`];
+					// Render slime creature driven by audio level
+					const slimeLines = renderSlime(audioLevelSmoothed, dt);
+
+					// Info bar goes on the right of the slime's middle row
+					const infoBar = ` ${dot}  ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`;
+					const midRow = Math.floor(slimeLines.length / 2);
+
+					const out: string[] = [];
+					for (let i = 0; i < slimeLines.length; i++) {
+						if (i === midRow) {
+							out.push(` ${slimeLines[i]}  ${infoBar}`);
+						} else {
+							out.push(` ${slimeLines[i]}`);
+						}
+					}
+					return out;
 				},
 			};
 		}, { placement: "aboveEditor" });
