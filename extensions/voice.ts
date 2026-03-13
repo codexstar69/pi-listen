@@ -78,7 +78,7 @@ import {
 	type VoiceConfig,
 	type VoiceSettingsScope,
 } from "./voice/config";
-import { finalizeOnboardingConfig, promptFirstRunOnboarding, runVoiceOnboarding } from "./voice/onboarding";
+import { finalizeOnboardingConfig, runVoiceOnboarding } from "./voice/onboarding";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
