@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 export type DiagnosticsPreference = "balanced" | "speed" | "privacy" | "accuracy" | "low-resource";
 
 export interface BackendAvailability {
-	name: "faster-whisper" | "moonshine" | "whisper-cpp" | "deepgram" | "parakeet";
+	name: "faster-whisper" | "moonshine" | "whisper-cpp" | "deepgram" | "parakeet" | "parakeet-mlx";
 	available: boolean;
 	type: "local" | "cloud";
 	default_model: string;

@@ -40,6 +40,9 @@ export function buildProvisioningPlan(config: VoiceConfig, diagnostics: Environm
 				case "parakeet":
 					commands.push("python3 -m pip install 'nemo_toolkit[asr]'");
 					break;
+				case "parakeet-mlx":
+					commands.push("pip install parakeet-mlx");
+					break;
 				default:
 					manualSteps.push(`Install the selected backend: ${config.backend}`);
 			}

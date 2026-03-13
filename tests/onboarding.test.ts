@@ -26,6 +26,7 @@ describe("buildSelectableBackends", () => {
 			"moonshine",
 			"whisper-cpp",
 			"parakeet",
+			"parakeet-mlx",
 		]);
 		expect(backends.every((backend) => backend.available === false)).toBe(true);
 	});
@@ -58,6 +59,7 @@ describe("buildSelectableBackends", () => {
 			"moonshine",
 			"whisper-cpp",
 			"parakeet",
+			"parakeet-mlx",
 		]);
 	});
 });

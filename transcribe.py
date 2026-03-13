@@ -309,6 +309,7 @@ def transcribe_deepgram(audio_path: str, model_name: str, language: str) -> dict
 # ─── Backend: parakeet (NVIDIA NeMo) ─────────────────────────────────────────
 
 PARAKEET_MODELS = [
+    "nvidia/parakeet-tdt-0.6b-v3",
     "nvidia/parakeet-tdt-0.6b-v2",
     "nvidia/parakeet-ctc-0.6b",
     "nvidia/parakeet-tdt-1.1b",
@@ -347,6 +348,60 @@ def transcribe_parakeet(audio_path: str, model_name: str, language: str) -> dict
         "text": str(text),
         "duration": round(time.time() - start, 2),
         "backend": "parakeet",
+        "model": model_name,
+    }
+
+
+# ─── Backend: parakeet-mlx (Apple Silicon native via MLX) ────────────────────
+
+PARAKEET_MLX_MODELS = [
+    "mlx-community/parakeet-tdt-0.6b-v3",
+    "mlx-community/parakeet-tdt-0.6b-v2",
+]
+
+# Map model shorthand → HuggingFace repo ID for convenience
+PARAKEET_MLX_REPO_MAP = {
+    "mlx-community/parakeet-tdt-0.6b-v3": "mlx-community/parakeet-tdt-0.6b-v3",
+    "mlx-community/parakeet-tdt-0.6b-v2": "mlx-community/parakeet-tdt-0.6b-v2",
+}
+
+
+def _is_apple_silicon() -> bool:
+    """Check if running on Apple Silicon (arm64 macOS)."""
+    import platform
+    return platform.system() == "Darwin" and platform.machine() == "arm64"
+
+
+def is_parakeet_mlx_available() -> bool:
+    if not _is_apple_silicon():
+        return False
+    try:
+        import parakeet_mlx
+        return True
+    except ImportError:
+        return False
+
+
+def parakeet_mlx_repo_ids(model_name: str) -> list[str]:
+    repo = PARAKEET_MLX_REPO_MAP.get(model_name, model_name)
+    return [repo]
+
+
+def is_parakeet_mlx_model_installed(model_name: str) -> bool:
+    return huggingface_repo_exists(parakeet_mlx_repo_ids(model_name))
+
+
+def transcribe_parakeet_mlx(audio_path: str, model_name: str, language: str) -> dict:
+    from parakeet_mlx import from_pretrained
+    start = time.time()
+    repo_id = PARAKEET_MLX_REPO_MAP.get(model_name, model_name)
+    model = from_pretrained(repo_id)
+    result = model.transcribe(audio_path)
+    text = result.text if hasattr(result, "text") else str(result)
+    return {
+        "text": text.strip(),
+        "duration": round(time.time() - start, 2),
+        "backend": "parakeet-mlx",
         "model": model_name,
     }
 
@@ -399,9 +454,19 @@ BACKENDS = {
         "available": is_parakeet_available,
         "models": PARAKEET_MODELS,
         "installed_models": lambda: detect_installed_models(PARAKEET_MODELS, is_parakeet_model_installed),
-        "default_model": "nvidia/parakeet-tdt-0.6b-v2",
+        "default_model": "nvidia/parakeet-tdt-0.6b-v3",
         "install": "pip install nemo_toolkit[asr]",
         "install_detection": "huggingface-or-nemo-cache",
+        "type": "local",
+    },
+    "parakeet-mlx": {
+        "fn": transcribe_parakeet_mlx,
+        "available": is_parakeet_mlx_available,
+        "models": PARAKEET_MLX_MODELS,
+        "installed_models": lambda: detect_installed_models(PARAKEET_MLX_MODELS, is_parakeet_mlx_model_installed),
+        "default_model": "mlx-community/parakeet-tdt-0.6b-v3",
+        "install": "pip install parakeet-mlx  (Apple Silicon only)",
+        "install_detection": "huggingface-cache",
         "type": "local",
     },
 }
@@ -409,7 +474,7 @@ BACKENDS = {
 
 def detect_backend() -> str:
     """Auto-detect best available backend (prefer local, fastest first)."""
-    priority = ["faster-whisper", "moonshine", "whisper-cpp", "deepgram", "parakeet"]
+    priority = ["parakeet-mlx", "faster-whisper", "moonshine", "whisper-cpp", "deepgram", "parakeet"]
     for name in priority:
         if BACKENDS[name]["available"]():
             return name

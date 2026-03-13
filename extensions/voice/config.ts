@@ -7,7 +7,7 @@ import * as path from "node:path";
 export const SETTINGS_KEY = "voice";
 export const VOICE_CONFIG_VERSION = 2;
 
-export type VoiceBackend = "faster-whisper" | "moonshine" | "whisper-cpp" | "deepgram" | "parakeet" | "auto";
+export type VoiceBackend = "faster-whisper" | "moonshine" | "whisper-cpp" | "deepgram" | "parakeet" | "parakeet-mlx" | "auto";
 export type VoiceMode = "auto" | "local" | "api";
 export type VoiceSettingsScope = "global" | "project";
 export type VoiceConfigSource = VoiceSettingsScope | "default";

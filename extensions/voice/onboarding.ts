@@ -121,9 +121,17 @@ export function buildSelectableBackends(
 			name: "parakeet",
 			available: false,
 			type: "local",
-			default_model: "nvidia/parakeet-tdt-0.6b-v2",
-			models: ["nvidia/parakeet-tdt-0.6b-v2", "nvidia/parakeet-ctc-0.6b", "nvidia/parakeet-tdt-1.1b"],
+			default_model: "nvidia/parakeet-tdt-0.6b-v3",
+			models: ["nvidia/parakeet-tdt-0.6b-v3", "nvidia/parakeet-tdt-0.6b-v2", "nvidia/parakeet-ctc-0.6b", "nvidia/parakeet-tdt-1.1b"],
 			install: "python3 -m pip install 'nemo_toolkit[asr]'",
+		},
+		{
+			name: "parakeet-mlx",
+			available: false,
+			type: "local",
+			default_model: "mlx-community/parakeet-tdt-0.6b-v3",
+			models: ["mlx-community/parakeet-tdt-0.6b-v3", "mlx-community/parakeet-tdt-0.6b-v2"],
+			install: "pip install parakeet-mlx  (Apple Silicon Mac only)",
 		},
 	];
 	const merged = new Map<string, BackendAvailability>();
