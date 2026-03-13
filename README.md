@@ -4,28 +4,29 @@
   <img src="assets/banner.png" alt="pi-listen — Voice input for the Pi coding agent" width="100%" />
 </p>
 
-**Voice input and side-channel conversations for [Pi](https://github.com/mariozechner/pi-coding-agent).**
+**Voice input for [Pi](https://github.com/mariozechner/pi-coding-agent) — hold SPACE to talk, Deepgram streaming STT.**
 
 [![npm version](https://img.shields.io/npm/v/@codexstar/pi-listen.svg)](https://www.npmjs.com/package/@codexstar/pi-listen)
 [![license](https://img.shields.io/npm/l/@codexstar/pi-listen.svg)](https://github.com/codexstar69/pi-listen/blob/main/LICENSE)
-[![tests](https://img.shields.io/badge/tests-37%2F37%20passing-brightgreen)](#testing)
+[![tests](https://img.shields.io/badge/tests-40%2F40%20passing-brightgreen)](#testing)
 
 ---
 
 ## Overview
 
-pi-listen is a Pi extension that adds hands-free voice input and side-channel voice workflows to the [Pi coding agent](https://github.com/mariozechner/pi-coding-agent) CLI.
+pi-listen adds hands-free voice input to the [Pi coding agent](https://github.com/mariozechner/pi-coding-agent) CLI. Hold SPACE to record, release to transcribe directly into the editor with live streaming results.
 
 ### Key Features
 
 | Feature | Description |
 |---------|-------------|
-| **Hold-to-talk** | Hold `SPACE` (empty editor) to record → release to transcribe into the editor |
-| **Persistent STT daemon** | Keeps transcription models warm in memory for zero cold-start latency |
-| **5 STT backends** | faster-whisper · moonshine · whisper-cpp · Deepgram (cloud) · Parakeet (NVIDIA) |
-| **BTW side conversations** | Quick parallel questions (`/btw`) without interrupting the main agent session |
-| **Guided onboarding** | First-run wizard detects your environment and recommends the best setup |
-| **Voice → BTW glue** | `Ctrl+Shift+B` = hold to record → auto-send as a side conversation |
+| **Hold-to-talk** | Hold `SPACE` → record → release → live transcript in editor |
+| **Deepgram streaming** | Real-time WebSocket STT with Nova-3 (interim + final results) |
+| **Voice commands** | "Hey Pi, run tests" → auto-executes |
+| **Voice shortcuts** | "new line", "period", "submit" → inline text expansion |
+| **Continuous dictation** | `/voice dictate` — speak freely, no hold required |
+| **Recording history** | `/voice history` — recent transcriptions |
+| **Kitty protocol** | True key-release detection on supported terminals |
 
 ---
 
@@ -37,38 +38,29 @@ pi-listen is a Pi extension that adds hands-free voice input and side-channel vo
 pi install npm:@codexstar/pi-listen
 ```
 
-### First-Time Setup
-
-After installing, run the bootstrap script to install all system dependencies (Python, SoX, faster-whisper):
+### Prerequisites
 
 ```bash
+brew install sox                          # Audio capture (macOS)
+export DEEPGRAM_API_KEY="your-key-here"   # Free $200 credits at https://dpgr.am/pi-voice
+```
+
+### Bootstrap Script (zero-touch)
+
+```bash
+# macOS — installs SoX, extension, and writes settings
 curl -fsSL https://raw.githubusercontent.com/codexstar69/pi-listen/main/scripts/setup-macos.sh | bash
+
+# With API key
+curl -fsSL https://raw.githubusercontent.com/codexstar69/pi-listen/main/scripts/setup-macos.sh | bash -s -- --deepgram-key YOUR_KEY --persist-deepgram-key
 ```
 
-Once dependencies are installed, open pi and the onboarding wizard will walk you through backend selection:
-
-```
-? Set up pi-voice now?
-  ❯ Start voice setup
-    Remind me later
-
-? How do you want to use speech-to-text?
-  ❯ Recommended for me
-    Cloud API (fastest setup)
-    Local download (offline / private)
+```powershell
+# Windows — installs SoX via winget
+irm https://raw.githubusercontent.com/codexstar69/pi-listen/main/scripts/setup-windows.ps1 | iex
 ```
 
-### Manual Install (if needed)
-
-```bash
-# Local backend (recommended)
-pip install faster-whisper
-brew install sox          # microphone recording
-
-# Cloud backend (alternative)
-export DEEPGRAM_API_KEY="your-key-here"
-brew install sox
-```
+You should not need to run `/voice setup` on the happy path — the bootstrap scripts handle everything.
 
 ---
 
@@ -78,9 +70,24 @@ brew install sox
 
 | Action | Keybinding | Description |
 |--------|-----------|-------------|
-| Record → Editor | Hold `SPACE` | Hold spacebar with empty editor to record, release to transcribe |
-| Record → Editor (toggle) | `Ctrl+Shift+V` | Toggle recording on/off (non-Kitty terminals) |
-| Record → BTW | Hold `Ctrl+Shift+B` | Hold to record, release to send as BTW side question |
+| Record → Editor | Hold `SPACE` | Hold spacebar to record, release to transcribe |
+| Record (toggle) | `Ctrl+Shift+V` | Toggle recording on/off |
+| Cancel | `Escape` | Cancel recording, restore editor text |
+
+Quick SPACE tap types a space normally — voice only activates after 800ms hold.
+
+### Voice Commands
+
+Say these during recording for auto-execution:
+
+| Command | Action |
+|---------|--------|
+| "run tests" / "run lint" / "run typecheck" | Executes in editor |
+| "hey pi, explain this code" | Sends as agent message |
+| "hey pi, search for auth" | Sets up search |
+| "commit" / "commit this" | `git add -A && git commit` |
+| "undo" / "clear" / "submit" | Editor actions |
+| "new line" / "period" / "comma" | Inline text shortcuts |
 
 ### Commands
 
@@ -88,25 +95,12 @@ brew install sox
 /voice              # Toggle voice on/off
 /voice on           # Enable voice
 /voice off          # Disable voice
-/voice setup        # Run onboarding wizard
-/voice reconfigure  # Re-run setup
-/voice test         # Test microphone + STT pipeline
-/voice info         # Show current config & daemon status
-/voice doctor       # Diagnose issues with repair suggestions
-/voice backends     # List all available STT backends
-/voice daemon       # Start the STT daemon
-/voice daemon stop  # Stop the daemon
-/voice daemon status # Show daemon status
-```
-
-### BTW Side Conversations
-
-```bash
-/btw <message>      # Ask a side question
-/btw:new [message]  # Start a fresh thread (optionally with a message)
-/btw:clear          # Dismiss the BTW widget
-/btw:inject         # Push BTW thread into main agent context
-/btw:summarize      # Summarize thread then inject into main agent
+/voice setup        # Run setup wizard (API key + scope)
+/voice dictate      # Continuous dictation mode
+/voice stop         # Stop dictation or recording
+/voice test         # Test microphone + Deepgram connection
+/voice info         # Show current config
+/voice history      # Recent transcriptions
 ```
 
 ---
@@ -125,38 +119,33 @@ brew install sox
 │         │  SoX → Deepgram WebSocket (streaming)                 │
 │         │  Live interim + final transcripts                     │
 │         ▼                                                       │
-│  ┌──────────────────────────────────────────┐                  │
-│  │  Deepgram Nova-3 (cloud STT)             │                  │
-│  │  wss://api.deepgram.com/v1/listen        │                  │
-│  └──────────────────────────────────────────┘                  │
+│  ┌──────────────────────────────────────────────────────────────┐│
+│  │  Deepgram Nova-3 (cloud STT)                                ││
+│  │  wss://api.deepgram.com/v1/listen                           ││
+│  └──────────────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ### Components
 
-| Component | Language | Purpose |
-|-----------|----------|---------|
-| `extensions/voice.ts` | TypeScript | Main extension: streaming, hold-to-talk, UI widgets |
-| `extensions/voice/config.ts` | TypeScript | Config loading, saving, migration |
-| `extensions/voice/onboarding.ts` | TypeScript | Interactive setup wizard (Deepgram key + scope) |
-
-### Prerequisites
-
-| Dependency | Install | Purpose |
-|-----------|---------|---------|
-| SoX | `brew install sox` | Audio capture (`rec` command) |
-| Deepgram API key | [Free $200 credits](https://dpgr.am/pi-voice) | Cloud STT via WebSocket |
+| Component | Purpose |
+|-----------|---------|
+| `extensions/voice.ts` | Main extension: streaming, hold-to-talk, UI widgets, commands |
+| `extensions/voice/config.ts` | Config loading, saving, migration |
+| `extensions/voice/onboarding.ts` | Interactive setup wizard |
+| `extensions/voice/text-processing.ts` | Voice command detection, text shortcuts |
+| `extensions/voice/deepgram.ts` | Deepgram URL builder, API key resolution |
 
 ---
 
 ## Configuration
 
-pi-listen stores settings in Pi's settings files:
+Settings stored in Pi's settings files:
 
-| Scope | Path | When to use |
-|-------|------|-------------|
+| Scope | Path | Use case |
+|-------|------|----------|
 | Global | `~/.pi/agent/settings.json` | Same setup across all projects |
-| Project | `<project>/.pi/settings.json` | Project-specific backend/model |
+| Project | `<project>/.pi/settings.json` | Project-specific settings |
 
 ### Settings Structure
 
@@ -166,16 +155,13 @@ pi-listen stores settings in Pi's settings files:
     "version": 2,
     "enabled": true,
     "language": "en",
-    "mode": "auto",
-    "backend": "faster-whisper",
-    "model": "small",
     "scope": "global",
-    "btwEnabled": true,
+    "deepgramApiKey": "...",
     "onboarding": {
       "completed": true,
       "schemaVersion": 2,
-      "completedAt": "2026-03-12T00:00:00.000Z",
-      "source": "first-run"
+      "completedAt": "2026-03-13T00:00:00.000Z",
+      "source": "setup-command"
     }
   }
 }
@@ -183,85 +169,32 @@ pi-listen stores settings in Pi's settings files:
 
 ---
 
-## Bootstrap Scripts
-
-For zero-touch setup on a fresh machine:
-
-### macOS
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/codexstar69/pi-listen/main/scripts/setup-macos.sh | bash
-```
-
-### Windows (PowerShell)
-
-```powershell
-irm https://raw.githubusercontent.com/codexstar69/pi-listen/main/scripts/setup-windows.ps1 | iex
-```
-
-These scripts install all dependencies (Python, SoX, faster-whisper), create a virtualenv, download models, and configure microphone permissions. You should not need to run `/voice setup` on the happy path — the bootstrap scripts handle everything.
-
----
-
 ## Testing
 
 ```bash
-bun run test        # Run all tests (37 tests)
+bun run test        # Run all tests (40 tests)
 bun run typecheck   # TypeScript type checking
-bun run check       # Full check: typecheck + test + Python compile
+bun run check       # Full check: typecheck + tests
 ```
 
-Test coverage:
+### Test Coverage
 
 | Suite | Tests | Covers |
 |-------|-------|--------|
-| config.test.ts | 8 | Config loading, migration, socket paths |
-| diagnostics.test.ts | 6 | Backend detection, recommendations |
-| onboarding.test.ts | 7 | Onboarding flow, model options |
-| install.test.ts | 4 | Provisioning plan generation |
-| auto-resolution.test.ts | 4 | Backend/model auto-detection |
-| model-selection.test.ts | 3 | Model-aware recommendations |
-| setup-scripts.test.ts | 3 | Bootstrap script validation |
-| transcribe-metadata.test.ts | 2 | Backend registry metadata |
-
----
-
-## Troubleshooting
-
-See [docs/troubleshooting.md](docs/troubleshooting.md) for common issues and solutions.
-
-Quick diagnostics:
-
-```bash
-/voice test     # Test full pipeline
-/voice doctor   # Diagnose with repair suggestions
-/voice backends # Check backend availability
-```
+| `config.test.ts` | 8 | Config loading, migration, persistence, onboarding |
+| `onboarding.test.ts` | 2 | Onboarding finalization |
+| `text-processing.test.ts` | 18 | Voice commands, text shortcuts |
+| `deepgram.test.ts` | 8 | URL building, API key resolution |
+| `setup-scripts.test.ts` | 4 | Bootstrap script validation |
 
 ---
 
 ## Security
 
-See [SECURITY.md](SECURITY.md) for our security policy and how to report vulnerabilities.
-
-### Security Considerations
-
-- **Local-first:** Audio is processed locally by default (no cloud unless you opt in)
 - **No telemetry:** pi-listen does not collect or transmit any usage data
-- **Unix socket:** Daemon communication is local-only via Unix domain sockets
-- **No secrets in responses:** Error responses do not expose internal paths or stack traces
-
----
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and contribution guidelines.
-
----
-
-## Changelog
-
-See [CHANGELOG.md](CHANGELOG.md) for release history.
+- **Audio streaming:** Audio is sent to Deepgram's API for transcription (cloud STT)
+- **API key storage:** Deepgram key can be stored in config or env var
+- **No secrets in errors:** Error responses do not expose API keys or internal paths
 
 ---
 
@@ -275,5 +208,5 @@ See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 - **npm:** [npmjs.com/package/@codexstar/pi-listen](https://www.npmjs.com/package/@codexstar/pi-listen)
 - **GitHub:** [github.com/codexstar69/pi-listen](https://github.com/codexstar69/pi-listen)
-- **Issues:** [github.com/codexstar69/pi-listen/issues](https://github.com/codexstar69/pi-listen/issues)
+- **Deepgram:** [Free $200 credits](https://dpgr.am/pi-voice) (no credit card)
 - **Pi CLI:** [github.com/mariozechner/pi-coding-agent](https://github.com/mariozechner/pi-coding-agent)

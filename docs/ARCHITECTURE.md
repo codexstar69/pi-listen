@@ -1,114 +1,68 @@
-# pi-listen Architecture
+# Architecture
 
-## System Overview
+> Updated for v2.x (Deepgram streaming only).
 
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                           Pi CLI (Node.js)                               │
-│                                                                          │
-│  ┌─────────────────────────────────────────────────────────────────────┐ │
-│  │                      extensions/voice.ts                            │ │
-│  │                                                                     │ │
-│  │  ┌───────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐  │ │
-│  │  │ Recording  │  │ Daemon   │  │   BTW    │  │   Hold-to-Talk   │  │ │
-│  │  │ (SoX rec)  │  │   IPC    │  │ Threads  │  │  (Kitty proto)   │  │ │
-│  │  └─────┬─────┘  └────┬─────┘  └────┬─────┘  └────────┬─────────┘  │ │
-│  │        │              │             │                  │            │ │
-│  └────────┼──────────────┼─────────────┼──────────────────┼────────────┘ │
-│           │              │             │                  │              │
-│  ┌────────┼──────────────┼─────────────┼──────────────────┼────────────┐ │
-│  │        │     voice/config.ts   voice/diagnostics.ts                 │ │
-│  │        │     voice/onboarding.ts  voice/install.ts                  │ │
-│  └────────┼──────────────┼─────────────────────────────────────────────┘ │
-│           │              │                                               │
-└───────────┼──────────────┼───────────────────────────────────────────────┘
-            │              │ Unix Domain Socket
-            │              │ (newline-delimited JSON)
-            │              ▼
-┌───────────┼──────────────────────────────────────────────────────────────┐
-│           │          daemon.py (Python, persistent)                       │
-│           │                                                              │
-│  ┌────────▼────────┐  ┌─────────────────┐  ┌──────────────────────────┐ │
-│  │   Audio Files    │  │   ModelCache    │  │    DaemonServer          │ │
-│  │   (WAV, /tmp)    │  │  (thread-safe)  │  │  (socket, idle timeout)  │ │
-│  └─────────────────┘  └────────┬────────┘  └──────────────────────────┘ │
-│                                │                                         │
-│                       ┌────────▼────────┐                                │
-│                       │  transcribe.py  │                                │
-│                       │   (5 backends)  │                                │
-│                       └────────┬────────┘                                │
-│                                │                                         │
-│              ┌─────────────────┼─────────────────────┐                   │
-│              ▼                 ▼                     ▼                   │
-│  ┌──────────────────┐ ┌──────────────┐ ┌──────────────────┐             │
-│  │  faster-whisper   │ │  whisper-cpp │ │    Deepgram      │             │
-│  │  moonshine        │ │              │ │  (cloud API)     │             │
-│  │  parakeet         │ │              │ │                  │             │
-│  └──────────────────┘ └──────────────┘ └──────────────────┘             │
-└──────────────────────────────────────────────────────────────────────────┘
-```
+## Overview
 
-## Data Flow
+pi-listen is a Pi extension that adds voice input via Deepgram's WebSocket
+streaming API. Audio is captured with SoX (`rec`), streamed to Deepgram
+Nova-3, and interim/final transcripts are shown live in the editor.
 
-### Voice Input Flow
+## Modules
 
 ```
-1. User holds SPACE (or Ctrl+Shift+V)
-2. voice.ts spawns `rec` (SoX) → writes WAV to /tmp
-3. User releases key
-4. voice.ts kills `rec`
-5. voice.ts sends {"cmd": "transcribe", "audio": "/tmp/pi-voice-XXX.wav"} to daemon
-6. daemon.py runs transcription via loaded model
-7. daemon.py returns {"text": "...", "duration": 1.23}
-8. voice.ts injects text into Pi editor
-9. voice.ts deletes temp WAV file
+extensions/
+├── voice.ts                  # Main extension (state machine, UI, key handling)
+└── voice/
+    ├── config.ts             # Config loading, saving, migration
+    ├── onboarding.ts         # Setup wizard (API key + scope)
+    ├── text-processing.ts    # Voice command detection, text shortcuts
+    └── deepgram.ts           # Deepgram URL builder, API key resolution
 ```
 
-### BTW Flow
+## State Machine
 
 ```
-1. User types /btw <message> (or holds Ctrl+Shift+B for voice)
-2. voice.ts builds context from system prompt + prior BTW thread
-3. voice.ts streams LLM response via pi-ai streamSimple()
-4. Response displayed in BTW widget above editor
-5. User can /btw:inject to push thread into main agent context
+idle → warmup → recording → finalizing → idle
+         ↑         │
+         └─────────┘  (rapid re-press recovery)
 ```
 
-### Daemon Lifecycle
+- **idle:** Waiting for SPACE hold or Ctrl+Shift+V
+- **warmup:** User is holding SPACE, countdown shown (800ms threshold)
+- **recording:** SoX captures audio → Deepgram WebSocket streaming
+- **finalizing:** CloseStream sent, waiting for final transcript
+
+## Hold-to-Talk Detection
+
+Two terminal modes:
+
+### A) Kitty Protocol (Ghostty on Linux, Kitty, WezTerm)
+True key-down/repeat/release events. On first SPACE press, enter warmup
+immediately. True release event cancels or stops recording.
+
+### B) Non-Kitty (macOS Terminal, Ghostty on macOS)
+No key-release events. Holding sends rapid press events (~30-90ms apart).
+Tap = one press. Hold = 3+ rapid presses → enter warmup. Release detected
+by gap in presses (250ms during recording, 500ms during warmup).
+
+## Audio Pipeline
 
 ```
-1. Extension starts → ensureDaemon() checks if daemon is running
-2. If not running → spawns python3 daemon.py start --socket <path>
-3. Daemon pre-loads configured backend + model
-4. Daemon serves requests on Unix socket
-5. After 5 minutes of inactivity → auto-shutdown
-6. On session_shutdown → extension does NOT kill daemon (persists for reuse)
+SoX rec (native rate) → rate effect (16kHz) → WebSocket → Deepgram
+                                             ↓
+                              interim/final transcript → editor
 ```
 
-## Thread Safety
+SoX captures at native CoreAudio rate and applies the `rate` effect to
+downsample to 16kHz. Buffer size is 4096 bytes for low latency.
 
-- **ModelCache**: Protected by `threading.Lock()` — only one transcription runs at a time
-- **DaemonServer**: Each client connection handled in a separate daemon thread
-- **voice.ts state**: Single-threaded Node.js event loop — no mutex needed, but async races are possible (documented in bug-hunter audit)
+## Safety Features
 
-## Configuration Resolution
-
-```
-1. Check project settings: <cwd>/.pi/settings.json → voice key
-2. Check global settings: ~/.pi/agent/settings.json → voice key
-3. Fall back to DEFAULT_CONFIG (auto backend, small model, enabled)
-```
-
-Project settings override global settings completely (no merging).
-
-## Security Boundaries
-
-| Boundary | Protection |
-|----------|------------|
-| Unix socket | Local-only (no TCP), file permissions |
-| Message size | MAX_MSG_SIZE = 1 MB |
-| Audio files | Validated with os.path.exists() |
-| Backend names | Validated against BACKENDS registry |
-| Error responses | No stack traces (logged to stderr only) |
-| Idle timeout | Daemon auto-shuts down after 5 minutes |
-| Temp files | Deleted immediately after transcription |
+- **Re-entrancy guard:** Prevents overlapping `startVoiceRecording` calls
+- **Session corruption guard:** Auto-aborts stale sessions before new ones
+- **Connection timeout:** 10s WebSocket connection timeout
+- **Error cooldown:** 3-5s block on re-activation after errors
+- **Keepalive:** 8s keepalive pings to Deepgram
+- **Max recording:** 120s automatic stop
+- **Escape cancel:** Restores editor text to pre-recording state
