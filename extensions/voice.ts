@@ -1100,58 +1100,77 @@ export default function (pi: ExtensionAPI) {
 	function getPetSprite(evolution: number, mood: string, _level: number): string[] {
 		const t = Date.now() / 1000;
 
+		// ─── Pixel art using half-block characters ──────────────────
+		// ▀ = top half  ▄ = bottom half  █ = full block  ░▒▓ = shading
+		// Each character = 2 vertical pixels. This gives real pixel art.
+
 		if (evolution === 0) {
-			// Egg — 3 lines, wobbles
-			const wobble = mood === "excited" ? (Math.sin(t * 5) > 0 ? " " : "") : "";
+			// Egg — pixel art egg with crack animation
+			const crack = mood === "excited" ? (Math.sin(t * 4) > 0 ? "╱" : "╲") : "│";
 			return [
-				`${wobble}  ╭──╮`,
-				`${wobble}  │🥚│`,
-				`${wobble}  ╰──╯`,
+				"    ▄████▄    ",
+				`   █▓░░░▓█   `,
+				`   █░${crack}░${crack}░█   `,
+				"   ▀██████▀   ",
 			];
 		}
 		if (evolution === 1) {
-			// Baby — tiny round blob, 3 lines
-			const eyes = mood === "sleeping" ? "– –" : mood === "ecstatic" ? "★ ★" : mood === "excited" ? "◕ ◕" : "• •";
-			const cheek = mood === "ecstatic" ? "˚" : " ";
+			// Baby — small round pixel creature, big eyes
+			const blink = Math.sin(t * 0.8) > 0.92;
+			const eyeL = blink ? "▄" : mood === "ecstatic" ? "✦" : mood === "excited" ? "◕" : "●";
+			const eyeR = blink ? "▄" : mood === "ecstatic" ? "✦" : mood === "excited" ? "◕" : "●";
 			return [
-				"  ∧  ∧ ",
-				` (${cheek}${eyes}${cheek})`,
-				"  ╰──╯ ",
+				"    ▄██▄     ",
+				`   █${eyeL}██${eyeR}█    `,
+				"    ▀██▀     ",
 			];
 		}
 		if (evolution === 2) {
-			// Teen — ears, more detail, 3 lines
-			const eyes = mood === "sleeping" ? "－ －" : mood === "ecstatic" ? "✦ ✦" : mood === "excited" ? "◕ ◕" : "● ●";
-			const mouth = mood === "ecstatic" ? "▿" : mood === "excited" ? "ᴗ" : "·";
-			const blush = mood === "ecstatic" || mood === "excited" ? "˚" : " ";
+			// Teen — ears, body, whiskers
+			const blink = Math.sin(t * 0.7) > 0.93;
+			const eyeL = blink ? "▄" : mood === "ecstatic" ? "✦" : mood === "excited" ? "◕" : "●";
+			const eyeR = blink ? "▄" : mood === "ecstatic" ? "✦" : mood === "excited" ? "◕" : "●";
+			const mouth = mood === "ecstatic" ? "▿" : "·";
+			const blush = mood === "ecstatic" || mood === "excited" ? "░" : " ";
 			return [
-				"  ᘏ    ᘏ  ",
-				` (${blush} ${eyes} ${blush})`,
-				`   ( ${mouth} )  `,
+				"  ▄▀▄  ▄▀▄   ",
+				` █${blush}${eyeL}████${eyeR}${blush}█  `,
+				`  █ (${mouth}) █   `,
+				"   ▀████▀    ",
 			];
 		}
 		if (evolution === 3) {
-			// Adult — full creature, 4 lines
-			const eyes = mood === "sleeping" ? "－  －" : mood === "ecstatic" ? "★  ★" : mood === "excited" ? "◕  ◕" : "●  ●";
-			const mouth = mood === "ecstatic" ? "▿" : mood === "excited" ? "ω" : "·";
-			const blush = mood === "ecstatic" ? "˚" : mood === "excited" ? "·" : " ";
-			const tail = Math.sin(t * 2) > 0 ? "~" : "⁓";
+			// Adult — full pixel cat with crown hints, body, arms, tail
+			const blink = Math.sin(t * 0.6) > 0.94;
+			const eyeL = blink ? "▄" : mood === "ecstatic" ? "★" : mood === "excited" ? "◕" : "●";
+			const eyeR = blink ? "▄" : mood === "ecstatic" ? "★" : mood === "excited" ? "◕" : "●";
+			const mouth = mood === "ecstatic" ? "ω" : mood === "excited" ? "▿" : "·";
+			const blush = mood === "ecstatic" ? "░" : mood === "excited" ? "░" : " ";
+			const tail = Math.sin(t * 2.5) > 0 ? "▄" : " ";
+			const wave = mood === "ecstatic" ? "╱" : " ";
 			return [
-				"   ⟋    ⟍  ",
-				`  (${blush} ${eyes} ${blush})`,
-				`   ( ${mouth} )  ${tail}`,
-				"   ╰┈┈╯   ",
+				"  ▄█▀▀▀▀█▄   ",
+				`  █▄▀▄▄▀▄█   `,
+				` █${blush}${eyeL} ██ ${eyeR}${blush}█  `,
+				`  █ (${mouth}) █ ${tail} `,
+				` ${wave}▀██████▀   `,
+				"   ██  ██     ",
 			];
 		}
-		// Legendary — crown, sparkles, 4 lines
-		const eyes = mood === "sleeping" ? "－  －" : mood === "ecstatic" ? "✦  ✦" : "★  ★";
-		const sparkle = Math.sin(t * 3) > 0 ? "✧" : "·";
-		const tail = Math.sin(t * 2) > 0 ? "~" : "⁓";
+		// Legendary — crowned, sparkled, full pixel art
+		const blink = Math.sin(t * 0.5) > 0.95;
+		const eyeL = blink ? "▄" : mood === "ecstatic" ? "✦" : "★";
+		const eyeR = blink ? "▄" : mood === "ecstatic" ? "✦" : "★";
+		const sparkleL = Math.sin(t * 3) > 0.3 ? "✧" : " ";
+		const sparkleR = Math.sin(t * 3 + 1) > 0.3 ? "✧" : " ";
+		const tail = Math.sin(t * 2) > 0 ? "█▀" : "▀█";
 		return [
-			`  ${sparkle} ♛    ♛ ${sparkle}`,
-			`  ( ✧ ${eyes} ✧ )`,
-			`    ( ω )   ${tail}`,
-			"    ╰┈┈╯    ",
+			`${sparkleL}  ▄█♛█▄  ${sparkleR}`,
+			"  █▄▀▀▄█   ",
+			` █✧${eyeL} ██ ${eyeR}✧█  `,
+			"  █ (ω) █   ",
+			` ▀██████▀${tail} `,
+			"   ██  ██   ",
 		];
 	}
 
