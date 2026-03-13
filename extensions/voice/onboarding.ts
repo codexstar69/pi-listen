@@ -7,7 +7,7 @@ import {
 	type DiagnosticsPreference,
 	type EnvironmentDiagnostics,
 } from "./diagnostics";
-import { buildProvisioningPlan } from "./install";
+import { buildProvisioningPlan, executeProvisioningPlan } from "./install";
 
 type VoiceUiContext = ExtensionContext | ExtensionCommandContext;
 
@@ -309,6 +309,37 @@ export async function runVoiceOnboarding(
 
 	const confirm = await ctx.ui.confirm("Confirm voice setup", summaryLines.join("\n"));
 	if (!confirm) return undefined;
+
+	// ── Auto-install missing dependencies ──
+	if (provisioningPlan.commands.length > 0) {
+		const installChoice = await ctx.ui.select(
+			`Install missing dependencies automatically? (${provisioningPlan.commands.length} command${provisioningPlan.commands.length > 1 ? "s" : ""})`,
+			[
+				`Yes — run: ${provisioningPlan.commands.join(" && ")}`,
+				"No — I'll install manually later",
+			],
+		);
+
+		if (installChoice?.startsWith("Yes")) {
+			ctx.ui.notify("Installing dependencies… this may take a minute.", "info");
+			const result = await executeProvisioningPlan(provisioningPlan, (msg) => {
+				ctx.ui.notify(msg, "info");
+			});
+
+			if (result.failed.length > 0) {
+				const failLines = result.failed.map((f) => `  ✗ ${f.command}\n    ${f.error.slice(0, 150)}`);
+				ctx.ui.notify(
+					["Some installs failed:", ...failLines, "", "You can retry manually or run /voice doctor."].join("\n"),
+					"warning",
+				);
+			} else {
+				ctx.ui.notify(
+					`✓ All dependencies installed: ${result.ran.join(", ")}`,
+					"info",
+				);
+			}
+		}
+	}
 
 	return {
 		selectedScope,

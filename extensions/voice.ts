@@ -2083,7 +2083,7 @@ export default function (pi: ExtensionAPI) {
 	// ─── /voice command ──────────────────────────────────────────────────────
 
 	pi.registerCommand("voice", {
-		description: "Voice: /voice [on|off|stop|dictate|history|test|info|setup|doctor|backends|daemon]",
+		description: "Voice: /voice [on|off|stop|dictate|history|test|info|setup|install|doctor|backends|daemon]",
 		handler: async (args, cmdCtx) => {
 			ctx = cmdCtx;
 			const sub = (args || "").trim().toLowerCase();
@@ -2321,6 +2321,30 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 				await finalizeAndSaveSetup(cmdCtx, result.config, result.selectedScope, result.summaryLines, "setup-command");
+				return;
+			}
+
+			if (sub === "install") {
+				const diagnostics = scanEnvironment(TRANSCRIBE_SCRIPT);
+				const plan = buildProvisioningPlan(config, diagnostics);
+				if (plan.ready) {
+					cmdCtx.ui.notify("All dependencies already installed. Nothing to do.", "info");
+					return;
+				}
+				if (plan.commands.length === 0) {
+					const lines = ["No auto-installable commands, but manual steps remain:", ...plan.manualSteps.map(s => `  - ${s}`)];
+					cmdCtx.ui.notify(lines.join("\n"), "warning");
+					return;
+				}
+				cmdCtx.ui.notify(`Installing: ${plan.commands.join(" && ")}`, "info");
+				const { executeProvisioningPlan: execPlan } = await import("./voice/install");
+				const result = await execPlan(plan, (msg) => cmdCtx.ui.notify(msg, "info"));
+				if (result.failed.length > 0) {
+					const failLines = result.failed.map(f => `  ✗ ${f.command}: ${f.error.slice(0, 150)}`);
+					cmdCtx.ui.notify(["Install failed:", ...failLines].join("\n"), "error");
+				} else {
+					cmdCtx.ui.notify(`✓ Installed: ${result.ran.join(", ")}`, "info");
+				}
 				return;
 			}
 
