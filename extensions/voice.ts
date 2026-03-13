@@ -697,6 +697,37 @@ export default function (pi: ExtensionAPI) {
 	function addToHistory(text: string, duration: number, target: "editor" | "btw", mode: "hold" | "toggle" | "dictate" = "hold") {
 		recordingHistory.unshift({ text, timestamp: Date.now(), duration, target, mode });
 		if (recordingHistory.length > MAX_HISTORY) recordingHistory.pop();
+
+		// ─── Game: Award XP + handle battle ──────────
+		const words = text.split(/\s+/).filter(w => w.length > 0).length;
+		// Streak: if last session was within 10 minutes
+		if (Date.now() - pet.lastSessionTime < 600_000 && pet.lastSessionTime > 0) {
+			pet.streak++;
+		} else {
+			pet.streak = 1;
+		}
+
+		// Deal damage in active battle
+		if (battle.active && !battle.defeated) {
+			dealDamage(words, audioLevelSmoothed);
+			if (battle.defeated) {
+				// Add battle XP reward
+				pet.xp += battle.xpReward;
+			}
+		}
+
+		const result = addXP(words, duration);
+		if (result.evolved && ctx?.hasUI) {
+			const evoNames = ["Egg", "Baby", "Teen", "Adult", "Legendary"];
+			ctx.ui.notify(`✨ ${pet.name} evolved into ${evoNames[result.newEvolution]}! (Lv.${result.newLevel})`, "info");
+		} else if (result.leveledUp && ctx?.hasUI) {
+			ctx.ui.notify(`⬆ ${pet.name} reached Lv.${result.newLevel}!`, "info");
+		}
+
+		// Reset battle after recording ends
+		if (battle.active && battle.defeated) {
+			setTimeout(() => { battle.active = false; }, 3000);
+		}
 	}
 
 	// ─── Continuous Dictation Mode ───────────────────────────────────────────
@@ -1030,9 +1061,169 @@ export default function (pi: ExtensionAPI) {
 		return text.replace(/\[[^m]*m/g, "");
 	}
 
-	// ─── Premium Wave: Braille-dot fluid visualization ──────────────────────
-	// Ultra-fine grain perlin noise waveform. Each braille char = 2x vertical res.
+	// ═══════════════════════════════════════════════════════════════════════
+	// ─── TAMAGOTCHI PET + POKEMON BATTLE SYSTEM ─────────────────────────
+	// Your voice is alive. Every recording feeds your pet, earns XP, and
+	// triggers wild encounters. The terminal becomes a living game world.
+	// ═══════════════════════════════════════════════════════════════════════
 
+	// ─── Pet State (persists in memory per session) ─────────────────────
+	interface PetState {
+		name: string;
+		level: number;
+		xp: number;
+		xpToNext: number;
+		mood: "sleeping" | "happy" | "excited" | "ecstatic";
+		totalWords: number;
+		totalSessions: number;
+		streak: number;
+		lastSessionTime: number;
+		evolution: number; // 0=egg, 1=baby, 2=teen, 3=adult, 4=legendary
+		encounters: number;
+	}
+
+	const pet: PetState = {
+		name: "Pip",
+		level: 1,
+		xp: 0,
+		xpToNext: 50,
+		mood: "sleeping",
+		totalWords: 0,
+		totalSessions: 0,
+		streak: 0,
+		lastSessionTime: 0,
+		evolution: 0,
+		encounters: 0,
+	};
+
+	// ─── Evolution Sprites (pixel art via Unicode blocks) ───────────────
+	function getPetSprite(evolution: number, mood: string, level: number): string[] {
+		const t = Date.now() / 1000;
+		const bounce = Math.sin(t * 2.5) > 0.6 ? 0 : 0; // subtle bounce (for future multi-line)
+
+		if (evolution === 0) {
+			// Egg — wobbles when mood is excited
+			const wobble = mood === "excited" ? (Math.sin(t * 6) > 0 ? "⟨" : "⟩") : " ";
+			return [`${wobble}🥚${wobble}`];
+		}
+		if (evolution === 1) {
+			// Baby blob — tiny, round, one line
+			const eyes = mood === "sleeping" ? "– –" : mood === "ecstatic" ? "★ ★" : mood === "excited" ? "◕ ◕" : "• •";
+			return [`(${eyes})`];
+		}
+		if (evolution === 2) {
+			// Teen — ears appear, more expression
+			const eyes = mood === "sleeping" ? "– –" : mood === "ecstatic" ? "✦ ✦" : mood === "excited" ? "◕ ◕" : "● ●";
+			const mouth = mood === "ecstatic" ? "▿" : mood === "excited" ? "ᴗ" : "·";
+			return [`ᘏ(${eyes})ᘏ`];
+		}
+		if (evolution === 3) {
+			// Adult — full creature with details
+			const eyes = mood === "sleeping" ? "－ －" : mood === "ecstatic" ? "★  ★" : mood === "excited" ? "◕  ◕" : "●  ●";
+			const blush = mood === "ecstatic" || mood === "excited" ? "˚" : " ";
+			return [`⟋(${blush}${eyes}${blush})⟍`];
+		}
+		// Legendary — sparkles, crown
+		const eyes = mood === "sleeping" ? "－ －" : mood === "ecstatic" ? "✦  ✦" : "★  ★";
+		const sparkle = Math.sin(t * 3) > 0 ? "✧" : "·";
+		return [`${sparkle}♛(${eyes})♛${sparkle}`];
+	}
+
+	// ─── XP & Level System ──────────────────────────────────────────────
+	interface LevelUpResult {
+		leveledUp: boolean;
+		evolved: boolean;
+		newLevel: number;
+		newEvolution: number;
+	}
+
+	function addXP(words: number, duration: number): LevelUpResult {
+		const wordXP = words * 2;
+		const durationXP = Math.floor(duration / 5) * 3;
+		const streakBonus = Math.min(pet.streak, 5) * 5;
+		const totalXP = wordXP + durationXP + streakBonus;
+
+		pet.xp += totalXP;
+		pet.totalWords += words;
+		pet.totalSessions++;
+		pet.lastSessionTime = Date.now();
+
+		let leveledUp = false;
+		let evolved = false;
+
+		while (pet.xp >= pet.xpToNext) {
+			pet.xp -= pet.xpToNext;
+			pet.level++;
+			pet.xpToNext = Math.floor(50 * Math.pow(1.3, pet.level - 1));
+			leveledUp = true;
+
+			// Evolution thresholds
+			const newEvo = pet.level >= 20 ? 4 : pet.level >= 12 ? 3 : pet.level >= 6 ? 2 : pet.level >= 2 ? 1 : 0;
+			if (newEvo > pet.evolution) {
+				pet.evolution = newEvo;
+				evolved = true;
+			}
+		}
+
+		return { leveledUp, evolved, newLevel: pet.level, newEvolution: pet.evolution };
+	}
+
+	// ─── Pokemon Battle Encounter ───────────────────────────────────────
+	interface BattleState {
+		active: boolean;
+		enemyName: string;
+		enemyHP: number;
+		enemyMaxHP: number;
+		playerDamage: number;
+		combo: number;
+		crit: boolean;
+		defeated: boolean;
+		xpReward: number;
+	}
+
+	const wildCreatures = [
+		"Wild BUG", "Wild TYPO", "Wild SEGFAULT", "Wild NULL",
+		"Wild DEADLOCK", "Wild RACE_COND", "Wild MEM_LEAK", "Wild INF_LOOP",
+		"Wild OFF_BY_1", "Wild STACK_OVF", "Wild PANIC", "Wild SYNTAX_ERR",
+		"Wild TIMEOUT", "Wild 404", "Wild CORS", "Wild FLAKY_TEST",
+	];
+
+	let battle: BattleState = {
+		active: false, enemyName: "", enemyHP: 0, enemyMaxHP: 0,
+		playerDamage: 0, combo: 0, crit: false, defeated: false, xpReward: 0,
+	};
+
+	function triggerEncounter(): void {
+		const idx = Math.floor(Math.random() * wildCreatures.length);
+		const baseHP = 20 + pet.level * 8 + Math.floor(Math.random() * 20);
+		battle = {
+			active: true,
+			enemyName: wildCreatures[idx],
+			enemyHP: baseHP,
+			enemyMaxHP: baseHP,
+			playerDamage: 0,
+			combo: 0,
+			crit: false,
+			defeated: false,
+			xpReward: 10 + pet.level * 3,
+		};
+		pet.encounters++;
+	}
+
+	function dealDamage(wordCount: number, audioLevel: number): void {
+		if (!battle.active || battle.defeated) return;
+		const baseDmg = wordCount * 2 + Math.floor(audioLevel * 15);
+		battle.crit = Math.random() < 0.15;
+		const dmg = battle.crit ? baseDmg * 3 : baseDmg;
+		battle.playerDamage = dmg;
+		battle.combo++;
+		battle.enemyHP = Math.max(0, battle.enemyHP - dmg);
+		if (battle.enemyHP <= 0) {
+			battle.defeated = true;
+		}
+	}
+
+	// ─── Braille Waveform ───────────────────────────────────────────────
 	const _noiseTable: number[] = [];
 	for (let i = 0; i < 256; i++) _noiseTable.push(Math.random());
 	function smoothNoise(x: number): number {
@@ -1056,19 +1247,17 @@ export default function (pi: ExtensionAPI) {
 		const bars = "⠁⠃⠇⡇⣇⣧⣷⣿";
 		const len = Math.max(8, Math.min(width, 16));
 		let out = "";
-
 		const energy = Math.pow(level, 0.7);
 		const speed = 1.8 + energy * 4.5;
 		const octaves = energy > 0.3 ? 4 : 3;
-		const baseAmplitude = 0.10 + energy * 0.90;
-
+		const baseAmp = 0.10 + energy * 0.90;
 		for (let i = 0; i < len; i++) {
 			const pos = i / len;
 			const n1 = fbmNoise(pos * 3.0 + t * speed * 0.4, octaves);
 			const n2 = fbmNoise(pos * 5.5 + t * speed * 0.9 + 100, 2) * 0.3;
 			const center = 1.0 - Math.abs(pos - 0.5) * 1.4;
 			const breath = Math.sin(t * 1.2) * 0.1 * center;
-			const raw = (n1 + n2 + breath) * baseAmplitude;
+			const raw = (n1 + n2 + breath) * baseAmp;
 			const value = Math.max(0, Math.min(1, raw));
 			const idx = Math.min(bars.length - 1, Math.round(value * (bars.length - 1)));
 			out += bars[idx];
@@ -1076,70 +1265,7 @@ export default function (pi: ExtensionAPI) {
 		return out;
 	}
 
-	// ─── Mochi: A tiny spirit creature ──────────────────────────────────────
-	// Forest-spirit companion. Breathes, blinks naturally, reacts to your voice.
-	// Not a cat. Not a toy. A little presence that makes you feel less alone.
-
-	let _nextBlinkAt = Date.now() + 3000 + Math.random() * 2000;
-	let _blinkUntil = 0;
-	let _doubleBlink = false;
-
-	function getCreature(level: number): string {
-		const now = Date.now();
-		const t = now / 1000;
-
-		// ── Natural blink with occasional double-blink ──
-		if (now >= _nextBlinkAt && now > _blinkUntil) {
-			_blinkUntil = now + 130;
-			if (Math.random() < 0.18) {
-				_doubleBlink = true;
-				_nextBlinkAt = now + 280;
-			} else {
-				_doubleBlink = false;
-				_nextBlinkAt = now + 2500 + Math.random() * 3500;
-			}
-		}
-		if (_doubleBlink && now >= _nextBlinkAt && now > _blinkUntil) {
-			_blinkUntil = now + 100;
-			_doubleBlink = false;
-			_nextBlinkAt = now + 2500 + Math.random() * 3500;
-		}
-		const blinking = now < _blinkUntil;
-
-		const loud = level > 0.42;
-		const mid = level > 0.15;
-
-		// ── Ears tilt with energy ──
-		const earL = loud ? "⟋" : "ᘏ";
-		const earR = loud ? "⟍" : "ᘏ";
-
-		// ── Eyes dilate with sound, spaced for warmth ──
-		let eyes: string;
-		if (blinking) {
-			eyes = "–   –";
-		} else if (loud) {
-			eyes = "◕   ◕";
-		} else if (mid) {
-			eyes = "●   ●";
-		} else {
-			// Gentle idle: slow look-around
-			const drift = Math.sin(t * 0.3);
-			eyes = drift > 0.7 ? " •  •" : drift < -0.7 ? "•  • " : "•   •";
-		}
-
-		// ── Cheeks flush when speaking ──
-		const cheekL = loud ? "˚" : mid ? "·" : " ";
-		const cheekR = loud ? "˚" : mid ? "·" : " ";
-
-		// ── Breathing body pulse ──
-		const breathPhase = Math.sin(t * 0.8);
-		const bodyL = breathPhase > 0.3 ? "(" : "(";
-		const bodyR = breathPhase > 0.3 ? ")" : ")";
-
-		return ` ${earL}    ${earR}  ${bodyL}${cheekL} ${eyes} ${cheekR}${bodyR}`;
-	}
-
-	// ─── Breathing Record Indicator ─────────────────────────────────────────
+	// ─── Record Dot ─────────────────────────────────────────────────────
 	function getRecordDot(): string {
 		const phase = (Math.sin(Date.now() / 600) + 1) / 2;
 		if (phase > 0.65) return "●";
@@ -1147,11 +1273,27 @@ export default function (pi: ExtensionAPI) {
 		return "○";
 	}
 
+	// ─── XP Bar Builder ─────────────────────────────────────────────────
+	function buildXPBar(current: number, max: number, width: number): string {
+		const filled = Math.round((current / max) * width);
+		return "█".repeat(Math.min(filled, width)) + "░".repeat(Math.max(0, width - filled));
+	}
 
+	// ─── HP Bar Builder ─────────────────────────────────────────────────
+	function buildHPBar(current: number, max: number, width: number): string {
+		const ratio = current / max;
+		const filled = Math.round(ratio * width);
+		const bar = "█".repeat(Math.min(filled, width)) + "░".repeat(Math.max(0, width - filled));
+		return bar;
+	}
+
+	// ─── Warmup Widget ──────────────────────────────────────────────────
 	function showWarmupWidget() {
 		if (!ctx?.hasUI) return;
 
 		const startTime = Date.now();
+		// Wake up the pet
+		pet.mood = "happy";
 
 		const renderWarmup = () => {
 			if (!ctx?.hasUI) return;
@@ -1162,14 +1304,14 @@ export default function (pi: ExtensionAPI) {
 				return {
 					invalidate() {},
 					render(width: number): string[] {
-						const maxW = Math.max(0, Math.min(width - 4, 62));
-						const meterLen = Math.max(5, Math.min(10, maxW - 38));
+						const maxW = Math.max(0, Math.min(width - 4, 72));
+						const sprite = getPetSprite(pet.evolution, pet.mood, pet.level)[0];
+						const meterLen = Math.max(4, Math.min(8, maxW - 50));
 						const filled = Math.round(progress * meterLen);
 						const meter = theme.fg("accent", "⣿".repeat(filled)) + theme.fg("muted", "⠁".repeat(meterLen - filled));
-						const hint = theme.fg("dim", progress < 1 ? "hold…" : "ready");
-
-						const creature = getCreature(0);
-						const content = ` ${theme.fg("muted", "○")} ${theme.fg("accent", creature)} ${theme.fg("accent", meter)} ${hint}`;
+						const hint = theme.fg("dim", progress < 1 ? "hold…" : "ready!");
+						const lvl = theme.fg("warning", `Lv.${pet.level}`);
+						const content = ` ${theme.fg("muted", "○")} ${theme.fg("accent", sprite)} ${lvl} ${meter} ${hint}`;
 						const stripped = stripAnsi(content).length;
 						return [content + " ".repeat(Math.max(0, maxW - stripped))];
 					},
@@ -1181,19 +1323,23 @@ export default function (pi: ExtensionAPI) {
 		warmupWidgetTimer = setInterval(renderWarmup, 90);
 	}
 
-	// ─── Recording Widget ───────────────────────────────────────────────────
-	// Premium minimal cat mode, with a clean waveform and subtle motion.
-
+	// ─── Recording Widget ───────────────────────────────────────────────
 	function showRecordingWidget(target: "editor" | "btw") {
 		if (!ctx?.hasUI) return;
 
 		(showRecordingWidget as any)._frame = 0;
 		(showRecordingWidget as any)._liveText = "";
+		pet.mood = "excited";
+
+		// 30% chance to trigger a wild encounter
+		if (Math.random() < 0.30 && !battle.active) {
+			triggerEncounter();
+		}
 
 		const animTimer = setInterval(() => {
 			(showRecordingWidget as any)._frame = ((showRecordingWidget as any)._frame || 0) + 1;
 			showRecordingWidgetFrame(target, (showRecordingWidget as any)._frame);
-		}, 120);
+		}, 100); // faster tick for game feel
 
 		(showRecordingWidget as any)._animTimer = animTimer;
 		showRecordingWidgetFrame(target, 0);
@@ -1201,30 +1347,61 @@ export default function (pi: ExtensionAPI) {
 
 	function showRecordingWidgetFrame(target: "editor" | "btw", frame: number) {
 		if (!ctx?.hasUI) return;
-		const useCat = config.catAnimation !== false;
 
 		ctx.ui.setWidget("voice-recording", (tui, theme) => {
 			return {
 				invalidate() {},
 				render(width: number): string[] {
-					const maxW = Math.max(0, Math.min(width - 4, 62));
+					const maxW = Math.max(0, Math.min(width - 4, 72));
 					const elapsed = Math.round((Date.now() - recordingStart) / 1000);
 					const mins = Math.floor(elapsed / 60);
 					const secs = elapsed % 60;
 					const timeStr = mins > 0 ? `${mins}:${String(secs).padStart(2, "0")}` : `${secs}s`;
-					const wave = buildPremiumWave(frame, Math.max(8, Math.min(16, maxW - 38)), audioLevelSmoothed);
+					const wave = buildPremiumWave(frame, Math.max(6, Math.min(12, maxW - 52)), audioLevelSmoothed);
 					const hint = target === "btw"
-						? theme.fg("dim", "Ctrl+Shift+B stop")
-						: theme.fg("dim", "Release SPACE");
+						? theme.fg("dim", "Ctrl+Shift+B")
+						: theme.fg("dim", "⌴ release");
 
-					const creature = getCreature(audioLevelSmoothed);
-					const content = ` ${theme.fg("error", getRecordDot())} ${theme.fg("accent", creature)} ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`;
+					// Pet mood from audio
+					pet.mood = audioLevelSmoothed > 0.4 ? "ecstatic" : audioLevelSmoothed > 0.12 ? "excited" : "happy";
+					const sprite = getPetSprite(pet.evolution, pet.mood, pet.level)[0];
+					const lvl = theme.fg("warning", `Lv.${pet.level}`);
+					const xpBar = buildXPBar(pet.xp, pet.xpToNext, 6);
+					const xpDisplay = theme.fg("success", xpBar);
+
+					if (battle.active && !battle.defeated) {
+						// ─── POKEMON BATTLE MODE ────────────────
+						const hpBar = buildHPBar(battle.enemyHP, battle.enemyMaxHP, 8);
+						const hpColor = (battle.enemyHP / battle.enemyMaxHP) > 0.5 ? "success" : (battle.enemyHP / battle.enemyMaxHP) > 0.2 ? "warning" : "error";
+						const enemyHPDisplay = theme.fg(hpColor as any, hpBar);
+						const comboStr = battle.combo > 1 ? theme.fg("warning", ` x${battle.combo}`) : "";
+						const critStr = battle.crit ? theme.fg("error", " ⚡CRIT!") : "";
+						const dmgStr = battle.playerDamage > 0 ? theme.fg("error", ` -${battle.playerDamage}`) : "";
+
+						const line = ` ${theme.fg("error", getRecordDot())} ${theme.fg("accent", sprite)} ${theme.fg("error", "⚔")} ${theme.fg("dim", battle.enemyName)} ${enemyHPDisplay}${dmgStr}${comboStr}${critStr} ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)}`;
+						const stripped = stripAnsi(line).length;
+						return [line + " ".repeat(Math.max(0, maxW - stripped))];
+					}
+
+					if (battle.active && battle.defeated) {
+						// Victory!
+						const sparkle = Math.sin(Date.now() / 200) > 0 ? "✦" : "✧";
+						const line = ` ${theme.fg("success", sparkle)} ${theme.fg("accent", sprite)} ${theme.fg("success", "VICTORY!")} ${theme.fg("warning", `+${battle.xpReward}XP`)} ${lvl} ${xpDisplay} ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)}`;
+						const stripped = stripAnsi(line).length;
+						return [line + " ".repeat(Math.max(0, maxW - stripped))];
+					}
+
+					// Normal recording — Tamagotchi mode
+					const hearts = audioLevelSmoothed > 0.3 ? "♥" : audioLevelSmoothed > 0.1 ? "♡" : "";
+					const heartsDisplay = hearts ? theme.fg("error", hearts) + " " : "";
+					const content = ` ${theme.fg("error", getRecordDot())} ${theme.fg("accent", sprite)} ${heartsDisplay}${lvl} ${xpDisplay} ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`;
 					const stripped = stripAnsi(content).length;
 					return [content + " ".repeat(Math.max(0, maxW - stripped))];
 				},
 			};
 		}, { placement: "aboveEditor" });
 	}
+
 
 	// ─── Live Transcript ────────────────────────────────────────────────────
 	// Instead of showing transcript in a widget, put it directly in the editor
