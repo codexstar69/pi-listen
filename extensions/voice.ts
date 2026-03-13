@@ -1097,36 +1097,62 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	// ─── Evolution Sprites (pixel art via Unicode blocks) ───────────────
-	function getPetSprite(evolution: number, mood: string, level: number): string[] {
+	function getPetSprite(evolution: number, mood: string, _level: number): string[] {
 		const t = Date.now() / 1000;
-		const bounce = Math.sin(t * 2.5) > 0.6 ? 0 : 0; // subtle bounce (for future multi-line)
 
 		if (evolution === 0) {
-			// Egg — wobbles when mood is excited
-			const wobble = mood === "excited" ? (Math.sin(t * 6) > 0 ? "⟨" : "⟩") : " ";
-			return [`${wobble}🥚${wobble}`];
+			// Egg — 3 lines, wobbles
+			const wobble = mood === "excited" ? (Math.sin(t * 5) > 0 ? " " : "") : "";
+			return [
+				`${wobble}  ╭──╮`,
+				`${wobble}  │🥚│`,
+				`${wobble}  ╰──╯`,
+			];
 		}
 		if (evolution === 1) {
-			// Baby blob — tiny, round, one line
+			// Baby — tiny round blob, 3 lines
 			const eyes = mood === "sleeping" ? "– –" : mood === "ecstatic" ? "★ ★" : mood === "excited" ? "◕ ◕" : "• •";
-			return [`(${eyes})`];
+			const cheek = mood === "ecstatic" ? "˚" : " ";
+			return [
+				"  ∧  ∧ ",
+				` (${cheek}${eyes}${cheek})`,
+				"  ╰──╯ ",
+			];
 		}
 		if (evolution === 2) {
-			// Teen — ears appear, more expression
-			const eyes = mood === "sleeping" ? "– –" : mood === "ecstatic" ? "✦ ✦" : mood === "excited" ? "◕ ◕" : "● ●";
+			// Teen — ears, more detail, 3 lines
+			const eyes = mood === "sleeping" ? "－ －" : mood === "ecstatic" ? "✦ ✦" : mood === "excited" ? "◕ ◕" : "● ●";
 			const mouth = mood === "ecstatic" ? "▿" : mood === "excited" ? "ᴗ" : "·";
-			return [`ᘏ(${eyes})ᘏ`];
+			const blush = mood === "ecstatic" || mood === "excited" ? "˚" : " ";
+			return [
+				"  ᘏ    ᘏ  ",
+				` (${blush} ${eyes} ${blush})`,
+				`   ( ${mouth} )  `,
+			];
 		}
 		if (evolution === 3) {
-			// Adult — full creature with details
-			const eyes = mood === "sleeping" ? "－ －" : mood === "ecstatic" ? "★  ★" : mood === "excited" ? "◕  ◕" : "●  ●";
-			const blush = mood === "ecstatic" || mood === "excited" ? "˚" : " ";
-			return [`⟋(${blush}${eyes}${blush})⟍`];
+			// Adult — full creature, 4 lines
+			const eyes = mood === "sleeping" ? "－  －" : mood === "ecstatic" ? "★  ★" : mood === "excited" ? "◕  ◕" : "●  ●";
+			const mouth = mood === "ecstatic" ? "▿" : mood === "excited" ? "ω" : "·";
+			const blush = mood === "ecstatic" ? "˚" : mood === "excited" ? "·" : " ";
+			const tail = Math.sin(t * 2) > 0 ? "~" : "⁓";
+			return [
+				"   ⟋    ⟍  ",
+				`  (${blush} ${eyes} ${blush})`,
+				`   ( ${mouth} )  ${tail}`,
+				"   ╰┈┈╯   ",
+			];
 		}
-		// Legendary — sparkles, crown
-		const eyes = mood === "sleeping" ? "－ －" : mood === "ecstatic" ? "✦  ✦" : "★  ★";
+		// Legendary — crown, sparkles, 4 lines
+		const eyes = mood === "sleeping" ? "－  －" : mood === "ecstatic" ? "✦  ✦" : "★  ★";
 		const sparkle = Math.sin(t * 3) > 0 ? "✧" : "·";
-		return [`${sparkle}♛(${eyes})♛${sparkle}`];
+		const tail = Math.sin(t * 2) > 0 ? "~" : "⁓";
+		return [
+			`  ${sparkle} ♛    ♛ ${sparkle}`,
+			`  ( ✧ ${eyes} ✧ )`,
+			`    ( ω )   ${tail}`,
+			"    ╰┈┈╯    ",
+		];
 	}
 
 	// ─── XP & Level System ──────────────────────────────────────────────
@@ -1305,15 +1331,16 @@ export default function (pi: ExtensionAPI) {
 					invalidate() {},
 					render(width: number): string[] {
 						const maxW = Math.max(0, Math.min(width - 4, 72));
-						const sprite = getPetSprite(pet.evolution, pet.mood, pet.level)[0];
-						const meterLen = Math.max(4, Math.min(8, maxW - 50));
+						const spriteLines = getPetSprite(pet.evolution, pet.mood, pet.level);
+						const meterLen = Math.max(4, Math.min(10, maxW - 40));
 						const filled = Math.round(progress * meterLen);
 						const meter = theme.fg("accent", "⣿".repeat(filled)) + theme.fg("muted", "⠁".repeat(meterLen - filled));
 						const hint = theme.fg("dim", progress < 1 ? "hold…" : "ready!");
 						const lvl = theme.fg("warning", `Lv.${pet.level}`);
-						const content = ` ${theme.fg("muted", "○")} ${theme.fg("accent", sprite)} ${lvl} ${meter} ${hint}`;
-						const stripped = stripAnsi(content).length;
-						return [content + " ".repeat(Math.max(0, maxW - stripped))];
+						const out: string[] = [];
+						for (const sl of spriteLines) out.push(` ${theme.fg("accent", sl)}`);
+						out.push(` ${theme.fg("muted", "○")} ${lvl} ${meter} ${hint}`);
+						return out;
 					},
 				};
 			}, { placement: "aboveEditor" });
@@ -1364,39 +1391,48 @@ export default function (pi: ExtensionAPI) {
 
 					// Pet mood from audio
 					pet.mood = audioLevelSmoothed > 0.4 ? "ecstatic" : audioLevelSmoothed > 0.12 ? "excited" : "happy";
-					const sprite = getPetSprite(pet.evolution, pet.mood, pet.level)[0];
+					const spriteLines = getPetSprite(pet.evolution, pet.mood, pet.level);
 					const lvl = theme.fg("warning", `Lv.${pet.level}`);
-					const xpBar = buildXPBar(pet.xp, pet.xpToNext, 6);
+					const xpBar = buildXPBar(pet.xp, pet.xpToNext, 10);
 					const xpDisplay = theme.fg("success", xpBar);
+
+					const out: string[] = [];
 
 					if (battle.active && !battle.defeated) {
 						// ─── POKEMON BATTLE MODE ────────────────
-						const hpBar = buildHPBar(battle.enemyHP, battle.enemyMaxHP, 8);
+						const hpBar = buildHPBar(battle.enemyHP, battle.enemyMaxHP, 10);
 						const hpColor = (battle.enemyHP / battle.enemyMaxHP) > 0.5 ? "success" : (battle.enemyHP / battle.enemyMaxHP) > 0.2 ? "warning" : "error";
 						const enemyHPDisplay = theme.fg(hpColor as any, hpBar);
 						const comboStr = battle.combo > 1 ? theme.fg("warning", ` x${battle.combo}`) : "";
 						const critStr = battle.crit ? theme.fg("error", " ⚡CRIT!") : "";
 						const dmgStr = battle.playerDamage > 0 ? theme.fg("error", ` -${battle.playerDamage}`) : "";
 
-						const line = ` ${theme.fg("error", getRecordDot())} ${theme.fg("accent", sprite)} ${theme.fg("error", "⚔")} ${theme.fg("dim", battle.enemyName)} ${enemyHPDisplay}${dmgStr}${comboStr}${critStr} ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)}`;
-						const stripped = stripAnsi(line).length;
-						return [line + " ".repeat(Math.max(0, maxW - stripped))];
+						// Enemy info line
+						out.push(` ${theme.fg("error", "⚔")} ${theme.fg("dim", battle.enemyName)} ${enemyHPDisplay}${dmgStr}${comboStr}${critStr}`);
+						// Pet sprite lines
+						for (const sl of spriteLines) out.push(` ${theme.fg("accent", sl)}`);
+						// Status line
+						out.push(` ${theme.fg("error", getRecordDot())} ${lvl} ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)}`);
+						return out;
 					}
 
 					if (battle.active && battle.defeated) {
-						// Victory!
 						const sparkle = Math.sin(Date.now() / 200) > 0 ? "✦" : "✧";
-						const line = ` ${theme.fg("success", sparkle)} ${theme.fg("accent", sprite)} ${theme.fg("success", "VICTORY!")} ${theme.fg("warning", `+${battle.xpReward}XP`)} ${lvl} ${xpDisplay} ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)}`;
-						const stripped = stripAnsi(line).length;
-						return [line + " ".repeat(Math.max(0, maxW - stripped))];
+						out.push(` ${theme.fg("success", sparkle)} ${theme.fg("success", "VICTORY!")} ${theme.fg("warning", `+${battle.xpReward}XP`)}`);
+						for (const sl of spriteLines) out.push(` ${theme.fg("accent", sl)}`);
+						out.push(` ${lvl} ${xpDisplay} ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)}`);
+						return out;
 					}
 
 					// Normal recording — Tamagotchi mode
-					const hearts = audioLevelSmoothed > 0.3 ? "♥" : audioLevelSmoothed > 0.1 ? "♡" : "";
-					const heartsDisplay = hearts ? theme.fg("error", hearts) + " " : "";
-					const content = ` ${theme.fg("error", getRecordDot())} ${theme.fg("accent", sprite)} ${heartsDisplay}${lvl} ${xpDisplay} ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`;
-					const stripped = stripAnsi(content).length;
-					return [content + " ".repeat(Math.max(0, maxW - stripped))];
+					const hearts = audioLevelSmoothed > 0.3 ? "♥ " : audioLevelSmoothed > 0.1 ? "♡ " : "";
+					const heartsDisplay = hearts ? theme.fg("error", hearts) : "";
+
+					// Pet sprite (multi-line)
+					for (const sl of spriteLines) out.push(` ${theme.fg("accent", sl)}  ${heartsDisplay}`);
+					// Status bar: dot + level + xp + wave + time + hint
+					out.push(` ${theme.fg("error", getRecordDot())} ${lvl} XP${xpDisplay} ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`);
+					return out;
 				},
 			};
 		}, { placement: "aboveEditor" });
