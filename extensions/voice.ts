@@ -119,6 +119,9 @@ const RELEASE_DETECT_RECORDING_MS = 250; // During active recording, gap before 
                                           // key repeat fires every ~30-50ms. 250ms gap = released.
 const TYPING_COOLDOWN_MS = 400;   // If ANY non-space key was pressed within this window,
                                    // ignore space holds (user is typing, not activating voice)
+const TAIL_RECORDING_MS = 1500;   // Keep recording for 1.5s after space release to catch
+                                   // trailing words. If user re-presses space within this
+                                   // window, cancel the delayed stop and keep recording.
 const CORRUPTION_GUARD_MS = 200;  // Min gap between stop and restart
 
 // Debug logging — set PI_VOICE_DEBUG=1 to enable
@@ -486,6 +489,7 @@ export default function (pi: ExtensionAPI) {
 	let holdConfirmed = false;        // True once we've confirmed user is holding (not tapping)
 	let errorCooldownUntil = 0;       // After an error, block re-activation until this timestamp
 	let lastNonSpaceKeyTime = 0;      // Timestamp of last non-space keypress (typing cooldown)
+	let tailRecordingTimer: ReturnType<typeof setTimeout> | null = null; // Delayed stop after release
 
 	// ─── Recording History ───────────────────────────────────────────────────
 
@@ -685,6 +689,7 @@ export default function (pi: ExtensionAPI) {
 
 	function voiceCleanup() {
 		if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
+		cancelDelayedStop();
 		clearWarmupWidget();
 		clearRecordingAnimTimer();
 		// Reset audio levels
@@ -1128,7 +1133,27 @@ export default function (pi: ExtensionAPI) {
 		return true;
 	}
 
+	// ── Tail recording: keep capturing for 1.5s after space release ──
+	function scheduleDelayedStop() {
+		cancelDelayedStop(); // Clear any existing timer
+		voiceDebug("scheduleDelayedStop → will stop in", TAIL_RECORDING_MS, "ms");
+		tailRecordingTimer = setTimeout(() => {
+			tailRecordingTimer = null;
+			voiceDebug("tailRecordingTimer fired → stopping recording");
+			stopVoiceRecording();
+		}, TAIL_RECORDING_MS);
+	}
+
+	function cancelDelayedStop() {
+		if (tailRecordingTimer) {
+			clearTimeout(tailRecordingTimer);
+			tailRecordingTimer = null;
+			voiceDebug("cancelDelayedStop → tail recording timer cleared");
+		}
+	}
+
 	async function stopVoiceRecording() {
+		cancelDelayedStop(); // Safety: clear any pending delayed stop
 		voiceDebug("stopVoiceRecording called", { voiceState, hasActiveSession: !!activeSession });
 		if (voiceState !== "recording" || !ctx) return;
 		if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
@@ -1223,9 +1248,9 @@ export default function (pi: ExtensionAPI) {
 				resetReleaseDetect();
 				return;
 			}
-			voiceDebug("  → stopping recording");
+			voiceDebug("  → scheduling delayed stop (tail recording)");
 			resetHoldState();
-			stopVoiceRecording();
+			scheduleDelayedStop();
 		}
 	}
 
@@ -1329,10 +1354,10 @@ export default function (pi: ExtensionAPI) {
 						return { consume: true };
 					}
 
-					// Released during recording → stop
+					// Released during recording → schedule delayed stop (tail recording)
 					if (spaceConsumed && voiceState === "recording") {
 						resetHoldState();
-						stopVoiceRecording();
+						scheduleDelayedStop();
 						return { consume: true };
 					}
 
@@ -1438,11 +1463,17 @@ export default function (pi: ExtensionAPI) {
 					return { consume: true };
 				}
 
-				// If already recording → just consume
+				// If already recording → cancel any pending delayed stop and keep going
 				if (voiceState === "recording") {
+					cancelDelayedStop(); // User re-pressed — they want to keep recording
+					spaceConsumed = true; // Re-arm hold state for the continued recording
+					spaceDownTime = Date.now();
+					holdConfirmed = true;
 					if (!kittyReleaseDetected) {
-						voiceDebug("SPACE during recording → re-arm release detect");
+						voiceDebug("SPACE during recording → cancel delayed stop, re-arm release detect");
 						resetReleaseDetect();
+					} else {
+						voiceDebug("SPACE during recording → cancel delayed stop (Kitty)");
 					}
 					return { consume: true };
 				}
