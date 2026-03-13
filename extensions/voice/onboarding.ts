@@ -73,7 +73,8 @@ export async function runVoiceOnboarding(
 			);
 			const apiKey = await ctx.ui.input("DEEPGRAM_API_KEY");
 			if (apiKey && apiKey.trim().length > 10) {
-				const trimmedKey = apiKey.trim();
+				// Sanitize: Deepgram keys are alphanumeric — strip anything unexpected
+				const trimmedKey = apiKey.trim().replace(/[^a-zA-Z0-9_-]/g, "");
 				const fs = await import("node:fs");
 				const os = await import("node:os");
 				const home = os.homedir();
@@ -97,7 +98,9 @@ export async function runVoiceOnboarding(
 					`API key saved to ${targetFile}\nActive in this session. New terminals will pick it up automatically.`,
 					"info",
 				);
-			} else if (apiKey !== undefined && apiKey !== null) {
+			} else if (apiKey === undefined || apiKey === null) {
+				// User cancelled input — no feedback needed
+			} else {
 				ctx.ui.notify(
 					"Key looks too short — skipped. You can set it later:\n  export DEEPGRAM_API_KEY=\"your-key\"",
 					"warning",
