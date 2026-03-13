@@ -1031,14 +1031,26 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function buildPremiumWave(frame: number, width: number, level: number): string {
-		const patternsQuiet = ["▁▂▃▂▁", "▁▁▂▃▂", "▂▃▂▁▁", "▁▂▁▂▃"];
-		const patternsMid = ["▂▄▅▄▂", "▃▅▄▂▃", "▄▅▄▃▂", "▂▃▅▄▃"];
-		const patternsLoud = ["▄▆▇▆▄", "▅▇▆▄▅", "▆▇▆▅▄", "▄▅▇▆▅"];
-		const source = level > 0.38 ? patternsLoud : level > 0.14 ? patternsMid : patternsQuiet;
-		const base = source[frame % source.length];
+		// Fluid sine-wave visualization — each bar is a continuous function of time
+		const t = Date.now() / 1000;
+		const bars = "▁▂▃▄▅▆▇█";
 		const len = Math.max(5, Math.min(width, 8));
-		if (len <= base.length) return base.slice(0, len);
-		return (base + "▁".repeat(len)).slice(0, len);
+		let out = "";
+		for (let i = 0; i < len; i++) {
+			// Layer multiple sine waves for organic movement
+			const phase = (i / len) * Math.PI * 2;
+			const wave1 = Math.sin(t * 3.2 + phase) * 0.3;
+			const wave2 = Math.sin(t * 5.7 + phase * 1.4) * 0.2;
+			const wave3 = Math.sin(t * 1.8 + phase * 0.6) * 0.15;
+			const base = wave1 + wave2 + wave3; // -0.65 to 0.65
+			const normalized = (base + 0.65) / 1.3; // 0 to 1
+			// Scale by audio level — quiet = subtle ripple, loud = full range
+			const amplitude = 0.15 + level * 0.85;
+			const value = Math.max(0, Math.min(1, normalized * amplitude));
+			const idx = Math.min(bars.length - 1, Math.floor(value * bars.length));
+			out += bars[idx];
+		}
+		return out;
 	}
 
 	function showWarmupWidget() {
@@ -1047,7 +1059,7 @@ export default function (pi: ExtensionAPI) {
 		const startTime = Date.now();
 		const useCat = config.catAnimation !== false;
 		const catFrames = [
-			"╭(ー ー)╮",
+			"╭(－ －)╮",
 			"╭(◕ ◕)╮",
 			"╭(● ●)╮",
 			"╭(◉ ◉)╮",
@@ -1135,12 +1147,13 @@ export default function (pi: ExtensionAPI) {
 						return [border, content + " ".repeat(Math.max(0, maxW - stripped)), border];
 					}
 
-					const blinkPhase = Math.floor(Date.now() / 180) % 28;
-					const blink = blinkPhase === 0 || blinkPhase === 1;
+					const blinkCycle = Date.now() % 4000; // 4-second cycle
+					// Natural blink: quick close-open (~200ms) every ~4 seconds
+					const blink = blinkCycle < 120 || (blinkCycle > 140 && blinkCycle < 200);
 					const loud = audioLevelSmoothed > 0.42;
 					const mid = audioLevelSmoothed > 0.14;
 					const cat = blink
-						? "╭(ー ー)╮"
+						? "╭(－ －)╮"
 						: loud
 							? "╭(◉ ◉)╮"
 							: mid
