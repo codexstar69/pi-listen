@@ -4,7 +4,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	DEFAULT_CONFIG,
-	getSocketPath,
 	loadConfigWithSource,
 	needsOnboarding,
 	saveConfig,
@@ -40,14 +39,14 @@ describe("loadConfigWithSource", () => {
 
 		expect(result.source).toBe("default");
 		expect(result.config.enabled).toBe(true);
-		expect(result.config.backend).toBe(DEFAULT_CONFIG.backend);
 		expect(result.config.onboarding.completed).toBe(false);
 		expect(result.config.scope).toBe("global");
 	});
 
-	test("migrates legacy global config and marks onboarding complete when backend and model are explicit", () => {
+	test("migrates legacy global config and marks onboarding complete when backend and model were explicit", () => {
 		const cwd = makeTempDir();
 		const agentDir = path.join(cwd, "agent-home");
+		// Legacy config had backend + model fields — migration still recognizes them
 		writeSettings(agentDir, "settings.json", {
 			enabled: true,
 			language: "en",
@@ -58,7 +57,6 @@ describe("loadConfigWithSource", () => {
 		const result = loadConfigWithSource(cwd, { agentDir });
 
 		expect(result.source).toBe("global");
-		expect(result.config.mode).toBe("api");
 		expect(result.config.scope).toBe("global");
 		expect(result.config.onboarding.completed).toBe(true);
 		expect(result.config.onboarding.schemaVersion).toBe(result.config.version);
@@ -75,7 +73,6 @@ describe("loadConfigWithSource", () => {
 
 		expect(result.source).toBe("global");
 		expect(result.config.onboarding.completed).toBe(false);
-		expect(result.config.backend).toBe(DEFAULT_CONFIG.backend);
 	});
 
 	test("prefers project config over global config and preserves project scope", () => {
@@ -91,11 +88,7 @@ describe("loadConfigWithSource", () => {
 			version: 2,
 			enabled: true,
 			language: "en",
-			mode: "local",
-			backend: "faster-whisper",
-			model: "small",
 			scope: "project",
-			btwEnabled: true,
 			onboarding: {
 				completed: true,
 				schemaVersion: 2,
@@ -105,8 +98,6 @@ describe("loadConfigWithSource", () => {
 		const result = loadConfigWithSource(cwd, { agentDir });
 
 		expect(result.source).toBe("project");
-		expect(result.config.backend).toBe("faster-whisper");
-		expect(result.config.mode).toBe("local");
 		expect(result.config.scope).toBe("project");
 	});
 });
@@ -143,9 +134,6 @@ describe("saveConfig", () => {
 		const agentDir = path.join(cwd, "agent-home");
 		const config: VoiceConfig = {
 			...DEFAULT_CONFIG,
-			mode: "api",
-			backend: "deepgram",
-			model: "nova-3",
 			scope: "global",
 			onboarding: {
 				completed: true,
@@ -157,7 +145,6 @@ describe("saveConfig", () => {
 		const saved = JSON.parse(fs.readFileSync(savedPath, "utf8"));
 
 		expect(savedPath).toBe(path.join(agentDir, "settings.json"));
-		expect(saved.voice.backend).toBe("deepgram");
 		expect(saved.voice.scope).toBe("global");
 	});
 
@@ -166,9 +153,6 @@ describe("saveConfig", () => {
 		const agentDir = path.join(cwd, "agent-home");
 		const config: VoiceConfig = {
 			...DEFAULT_CONFIG,
-			mode: "local",
-			backend: "faster-whisper",
-			model: "small",
 			scope: "project",
 			onboarding: {
 				completed: true,
@@ -180,22 +164,6 @@ describe("saveConfig", () => {
 		const saved = JSON.parse(fs.readFileSync(savedPath, "utf8"));
 
 		expect(savedPath).toBe(path.join(cwd, ".pi", "settings.json"));
-		expect(saved.voice.backend).toBe("faster-whisper");
 		expect(saved.voice.scope).toBe("project");
-	});
-});
-
-describe("getSocketPath", () => {
-	test("generates distinct socket paths for different scopes and working directories", () => {
-		const cwdA = makeTempDir();
-		const cwdB = makeTempDir();
-
-		const globalSocket = getSocketPath({ scope: "global", cwd: cwdA, backend: "deepgram", model: "nova-3" });
-		const projectSocketA = getSocketPath({ scope: "project", cwd: cwdA, backend: "faster-whisper", model: "small" });
-		const projectSocketB = getSocketPath({ scope: "project", cwd: cwdB, backend: "faster-whisper", model: "small" });
-
-		expect(globalSocket).not.toBe(projectSocketA);
-		expect(projectSocketA).not.toBe(projectSocketB);
-		expect(path.basename(globalSocket)).toStartWith("pi-voice-");
 	});
 });

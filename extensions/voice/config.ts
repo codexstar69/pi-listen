@@ -1,14 +1,10 @@
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
-import * as crypto from "node:crypto";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 
 export const SETTINGS_KEY = "voice";
 export const VOICE_CONFIG_VERSION = 2;
 
-export type VoiceBackend = "faster-whisper" | "moonshine" | "whisper-cpp" | "deepgram" | "parakeet" | "parakeet-mlx" | "auto";
-export type VoiceMode = "auto" | "local" | "api";
 export type VoiceSettingsScope = "global" | "project";
 export type VoiceConfigSource = VoiceSettingsScope | "default";
 
@@ -25,14 +21,10 @@ export interface VoiceConfig {
 	version: number;
 	enabled: boolean;
 	language: string;
-	mode: VoiceMode;
-	backend: VoiceBackend;
-	model: string;
 	scope: VoiceSettingsScope;
 	onboarding: VoiceOnboardingState;
 	/** Deepgram API key — stored in config so it's available even when env var isn't set */
 	deepgramApiKey?: string;
-
 }
 
 export interface LoadedVoiceConfig {
@@ -46,20 +38,10 @@ export interface ConfigPathOptions {
 	agentDir?: string;
 }
 
-export interface SocketPathOptions {
-	scope: VoiceSettingsScope;
-	cwd: string;
-	backend: VoiceBackend;
-	model: string;
-}
-
 export const DEFAULT_CONFIG: VoiceConfig = {
 	version: VOICE_CONFIG_VERSION,
 	enabled: true,
 	language: "en",
-	mode: "auto",
-	backend: "auto",
-	model: "small",
 	scope: "global",
 	deepgramApiKey: undefined,
 	onboarding: {
@@ -85,12 +67,6 @@ export function getProjectSettingsPath(cwd: string): string {
 	return path.join(cwd, ".pi", "settings.json");
 }
 
-function inferMode(backend: VoiceBackend): VoiceMode {
-	if (backend === "deepgram") return "api";
-	if (backend === "auto") return "auto";
-	return "local";
-}
-
 function normalizeOnboarding(input: any, fallbackCompleted: boolean): VoiceOnboardingState {
 	const completed = typeof input?.completed === "boolean" ? input.completed : fallbackCompleted;
 	return {
@@ -108,7 +84,7 @@ function migrateConfig(rawVoice: any, source: VoiceConfigSource): VoiceConfig {
 		return structuredClone(DEFAULT_CONFIG);
 	}
 
-	const backend = (rawVoice.backend ?? DEFAULT_CONFIG.backend) as VoiceBackend;
+	// Legacy configs may have backend+model — treat that as completed onboarding
 	const hasMeaningfulLegacySetup =
 		(typeof rawVoice.backend === "string" && typeof rawVoice.model === "string") ||
 		rawVoice.onboarding?.completed === true;
@@ -118,9 +94,6 @@ function migrateConfig(rawVoice: any, source: VoiceConfigSource): VoiceConfig {
 		version: VOICE_CONFIG_VERSION,
 		enabled: typeof rawVoice.enabled === "boolean" ? rawVoice.enabled : DEFAULT_CONFIG.enabled,
 		language: typeof rawVoice.language === "string" ? rawVoice.language : DEFAULT_CONFIG.language,
-		mode: (rawVoice.mode as VoiceMode | undefined) ?? inferMode(backend),
-		backend,
-		model: typeof rawVoice.model === "string" ? rawVoice.model : DEFAULT_CONFIG.model,
 		scope: (rawVoice.scope as VoiceSettingsScope | undefined) ?? (source === "project" ? "project" : "global"),
 		deepgramApiKey: typeof rawVoice.deepgramApiKey === "string" ? rawVoice.deepgramApiKey : undefined,
 		onboarding: normalizeOnboarding(rawVoice.onboarding, fallbackCompleted),
@@ -191,18 +164,4 @@ export function needsOnboarding(config: VoiceConfig, source: VoiceConfigSource):
 	if (recentlyDeferred) return false;
 	if (source === "default") return true;
 	return !config.onboarding.completed;
-}
-
-export function getSocketPath(options: SocketPathOptions): string {
-	const fingerprint = crypto
-		.createHash("sha1")
-		.update(JSON.stringify({
-			scope: options.scope,
-			cwd: options.scope === "project" ? path.resolve(options.cwd) : "global",
-			backend: options.backend,
-			model: options.model,
-		}))
-		.digest("hex")
-		.slice(0, 12);
-	return path.join(os.tmpdir(), `pi-voice-${fingerprint}.sock`);
 }

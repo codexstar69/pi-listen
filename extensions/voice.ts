@@ -66,24 +66,19 @@ import type {
 	ExtensionCommandContext,
 } from "@mariozechner/pi-coding-agent";
 import { isKeyRelease, isKeyRepeat, matchesKey } from "@mariozechner/pi-tui";
-import type { Component } from "@mariozechner/pi-tui";
+
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
-import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
 	DEFAULT_CONFIG,
-	getSocketPath,
 	loadConfigWithSource,
-	needsOnboarding,
 	saveConfig,
 	type VoiceConfig,
 	type VoiceSettingsScope,
 } from "./voice/config";
-import { getModelReadiness, recommendVoiceSetup, scanEnvironment } from "./voice/diagnostics";
 import { finalizeOnboardingConfig, promptFirstRunOnboarding, runVoiceOnboarding } from "./voice/onboarding";
-import { buildProvisioningPlan } from "./voice/install";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -151,198 +146,9 @@ function voiceDebug(...args: unknown[]) {
 	process.stderr.write(line);
 }
 
-const EXT_DIR = path.dirname(new URL(import.meta.url).pathname);
-const PROJECT_ROOT = path.join(EXT_DIR, "..");
-const DAEMON_SCRIPT = path.join(PROJECT_ROOT, "daemon.py");
-const TRANSCRIBE_SCRIPT = path.join(PROJECT_ROOT, "transcribe.py");
-
-// ── Guard: only use python scripts if they actually exist ──
-const HAS_TRANSCRIBE_SCRIPT = fs.existsSync(TRANSCRIBE_SCRIPT);
-const HAS_DAEMON_SCRIPT = fs.existsSync(DAEMON_SCRIPT);
-
 function commandExists(cmd: string): boolean {
 	const which = process.platform === "win32" ? "where" : "which";
 	return spawnSync(which, [cmd], { stdio: "pipe", timeout: 3000 }).status === 0;
-}
-
-// ─── Daemon Communication (kept for non-deepgram local backends) ─────────────
-
-let activeSocketPath = getSocketPath({
-	scope: DEFAULT_CONFIG.scope,
-	cwd: process.cwd(),
-	backend: DEFAULT_CONFIG.backend,
-	model: DEFAULT_CONFIG.model,
-});
-
-function updateSocketPath(config: VoiceConfig, cwd: string) {
-	activeSocketPath = getSocketPath({
-		scope: config.scope,
-		cwd,
-		backend: config.backend,
-		model: config.model,
-	});
-}
-
-function daemonSend(
-	cmd: Record<string, unknown>,
-	timeout = 30000,
-	socketPath = activeSocketPath,
-): Promise<Record<string, unknown>> {
-	return new Promise((resolve) => {
-		const sock = net.createConnection(socketPath);
-		let buf = "";
-		const timer = setTimeout(() => {
-			sock.destroy();
-			resolve({ error: "Daemon timeout" });
-		}, timeout);
-
-		sock.on("connect", () => {
-			sock.write(JSON.stringify(cmd) + "\n");
-		});
-		sock.on("data", (chunk) => {
-			buf += chunk.toString();
-			if (buf.includes("\n")) {
-				clearTimeout(timer);
-				sock.destroy();
-				try {
-					resolve(JSON.parse(buf.trim()));
-				} catch {
-					resolve({ error: "Invalid daemon response" });
-				}
-			}
-		});
-		sock.on("error", () => {
-			clearTimeout(timer);
-			resolve({ error: "Daemon not running" });
-		});
-	});
-}
-
-async function isDaemonRunning(socketPath = activeSocketPath): Promise<boolean> {
-	const resp = await daemonSend({ cmd: "ping" }, 2000, socketPath);
-	return resp.status === "ok";
-}
-
-async function ensureDaemon(config: VoiceConfig): Promise<boolean> {
-	if (!HAS_DAEMON_SCRIPT) return false;
-	if (await isDaemonRunning(activeSocketPath)) {
-		const status = await daemonSend({ cmd: "status" }, 3000, activeSocketPath);
-		if (config.backend === "auto" || (status.backend === config.backend && status.model === config.model)) return true;
-		const reloaded = await daemonSend({
-			cmd: "load",
-			backend: config.backend,
-			model: config.model,
-		}, 15000, activeSocketPath);
-		return !reloaded.error;
-	}
-
-	return new Promise((resolve) => {
-		const args = [DAEMON_SCRIPT, "start", "--socket", activeSocketPath];
-		if (config.backend !== "auto") {
-			args.push("--backend", config.backend);
-		}
-		if (config.model) {
-			args.push("--model", config.model);
-		}
-
-		const proc = spawn("python3", args, {
-			stdio: ["pipe", "pipe", "pipe"],
-			detached: true,
-		});
-
-		let started = false;
-		proc.stdout?.on("data", (d) => {
-			const line = d.toString().trim();
-			try {
-				const msg = JSON.parse(line);
-				if (msg.status === "started") {
-					started = true;
-					proc.unref();
-					resolve(true);
-				}
-			} catch {}
-		});
-
-		proc.on("error", () => resolve(false));
-
-		setTimeout(() => {
-			if (!started) {
-				try { proc.kill(); } catch {}
-				resolve(false);
-			}
-		}, 10000);
-	});
-}
-
-// ─── Legacy file-based transcription (for non-deepgram backends) ─────────────
-
-let legacyRecProcess: ChildProcess | null = null;
-
-function startLegacyRecordingToFile(outPath: string): boolean {
-	if (legacyRecProcess) {
-		try { legacyRecProcess.kill("SIGTERM"); } catch {}
-		legacyRecProcess = null;
-	}
-	if (!commandExists("rec")) return false;
-	legacyRecProcess = spawn("rec", [
-		"-q", "-c", "1", "-b", "16", "-r", String(SAMPLE_RATE), outPath,
-		"rate", String(SAMPLE_RATE),
-	], { stdio: ["pipe", "pipe", "pipe"] });
-	legacyRecProcess.stderr?.on("data", () => {});
-	legacyRecProcess.on("error", () => { legacyRecProcess = null; });
-	return true;
-}
-
-function stopLegacyRecording(): Promise<void> {
-	return new Promise((resolve) => {
-		if (!legacyRecProcess) { resolve(); return; }
-		legacyRecProcess.on("close", () => { legacyRecProcess = null; resolve(); });
-		try { legacyRecProcess.kill("SIGTERM"); } catch {}
-		setTimeout(() => {
-			if (legacyRecProcess) {
-				try { legacyRecProcess.kill("SIGKILL"); } catch {}
-				legacyRecProcess = null;
-			}
-			resolve();
-		}, 2000);
-	});
-}
-
-async function transcribeAudioFile(
-	audioPath: string,
-	config: VoiceConfig,
-): Promise<{ text: string; duration: number; error?: string }> {
-	if (!HAS_TRANSCRIBE_SCRIPT) {
-		return { text: "", duration: 0, error: "transcribe.py not found — use Deepgram streaming instead" };
-	}
-	if (await isDaemonRunning()) {
-		const resp = await daemonSend({
-			cmd: "transcribe",
-			audio: audioPath,
-			backend: config.backend,
-			model: config.model,
-			language: config.language,
-			vad: true,
-		});
-		if (!resp.error) {
-			return resp as { text: string; duration: number };
-		}
-	}
-	return new Promise((resolve) => {
-		const args = [TRANSCRIBE_SCRIPT, "--language", config.language, audioPath];
-		if (config.backend !== "auto") args.splice(1, 0, "--backend", config.backend);
-		if (config.model) args.splice(1, 0, "--model", config.model);
-		const proc = spawn("python3", args, { stdio: ["pipe", "pipe", "pipe"] });
-		let stdout = "";
-		let stderr = "";
-		proc.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
-		proc.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
-		proc.on("close", (code) => {
-			try { resolve(JSON.parse(stdout.trim())); }
-			catch { resolve({ text: "", duration: 0, error: stderr || `Exit ${code}` }); }
-		});
-		proc.on("error", (err) => resolve({ text: "", duration: 0, error: err.message }));
-	});
 }
 
 // ─── Deepgram WebSocket Streaming ────────────────────────────────────────────
@@ -361,16 +167,6 @@ interface StreamingSession {
 	onError: (err: string) => void;
 }
 
-function resolveDeepgramApiKey(config: VoiceConfig): string | null {
-	return process.env.DEEPGRAM_API_KEY || config.deepgramApiKey || null;
-}
-
-function isDeepgramStreaming(config: VoiceConfig): boolean {
-	const key = resolveDeepgramApiKey(config);
-	if (!key) return false;
-	return config.backend === "deepgram" || (config.backend === "auto" && !!key);
-}
-
 function buildDeepgramWsUrl(config: VoiceConfig): string {
 	const params = new URLSearchParams({
 		encoding: ENCODING,
@@ -379,7 +175,7 @@ function buildDeepgramWsUrl(config: VoiceConfig): string {
 		endpointing: "200",
 		utterance_end_ms: "1000",
 		language: config.language || "en",
-		model: config.model || "nova-3",
+		model: "nova-3",
 		smart_format: "true",
 		interim_results: "true",
 	});
@@ -394,8 +190,8 @@ function startStreamingSession(
 		onError: (err: string) => void;
 	},
 ): StreamingSession | null {
-	const apiKey = resolveDeepgramApiKey(config);
-	voiceDebug("startStreamingSession", { hasApiKey: !!apiKey, backend: config.backend });
+	const apiKey = process.env.DEEPGRAM_API_KEY || config.deepgramApiKey || null;
+	voiceDebug("startStreamingSession", { hasApiKey: !!apiKey });
 	if (!apiKey) {
 		voiceDebug("startStreamingSession → no API key, calling onError");
 		callbacks.onError("DEEPGRAM_API_KEY not set");
@@ -606,7 +402,6 @@ export default function (pi: ExtensionAPI) {
 	let currentCwd = process.cwd();
 	let voiceState: VoiceState = "idle";
 	let ctx: ExtensionContext | null = null;
-	let tempFile: string | null = null;
 	let recordingStart = 0;
 	let statusTimer: ReturnType<typeof setInterval> | null = null;
 	let terminalInputUnsub: (() => void) | null = null;
@@ -830,15 +625,7 @@ export default function (pi: ExtensionAPI) {
 					ctx.ui.setStatus("voice", undefined);
 					break;
 				}
-				const modeTag = !config.onboarding.completed
-					? "SETUP"
-					: isDeepgramStreaming(config)
-						? "STREAM"
-						: config.mode === "api"
-							? "API"
-							: config.mode === "local"
-								? "LOCAL"
-								: "AUTO";
+				const modeTag = !config.onboarding.completed ? "SETUP" : "STREAM";
 				ctx.ui.setStatus("voice", `MIC ${modeTag}`);
 				break;
 			}
@@ -899,11 +686,6 @@ export default function (pi: ExtensionAPI) {
 			clearInterval(timer);
 			(showRecordingWidget as any)._animTimer = null;
 		}
-		const finTimer = (showFinalizingWidget as any)?._timer;
-		if (finTimer) {
-			clearInterval(finTimer);
-			(showFinalizingWidget as any)._timer = null;
-		}
 	}
 
 	function hideWidget() {
@@ -923,11 +705,7 @@ export default function (pi: ExtensionAPI) {
 			abortSession(activeSession);
 			activeSession = null;
 		}
-		if (legacyRecProcess) {
-			try { legacyRecProcess.kill("SIGTERM"); } catch {}
-			legacyRecProcess = null;
-		}
-		if (tempFile) { try { fs.unlinkSync(tempFile); } catch {} tempFile = null; }
+
 		spaceConsumed = false;
 		spaceDownTime = null;
 		spacePressCount = 0;
@@ -948,25 +726,17 @@ export default function (pi: ExtensionAPI) {
 		summaryLines: string[],
 		source: "first-run" | "setup-command",
 	) {
-		updateSocketPath(nextConfig, currentCwd);
-		const diagnostics = scanEnvironment(TRANSCRIBE_SCRIPT);
-		const provisioningPlan = buildProvisioningPlan(nextConfig, diagnostics);
-		let validated = provisioningPlan.ready;
-		if (validated && nextConfig.enabled && !isDeepgramStreaming(nextConfig)) {
-			validated = await ensureDaemon(nextConfig);
-		}
-
-		config = finalizeOnboardingConfig(nextConfig, { validated, source });
+		const hasKey = !!(process.env.DEEPGRAM_API_KEY || nextConfig.deepgramApiKey);
+		config = finalizeOnboardingConfig(nextConfig, { validated: hasKey, source });
 		configSource = selectedScope;
-		updateSocketPath(config, currentCwd);
 		const savedPath = saveConfig(config, selectedScope, currentCwd);
-		const statusHeader = validated ? "Voice setup complete." : "Voice setup saved, but action is still required.";
+		const statusHeader = hasKey ? "Voice setup complete." : "Voice setup saved, but DEEPGRAM_API_KEY is still required.";
 		uiCtx.ui.notify([
 			statusHeader,
 			...summaryLines,
 			"",
 			`Saved to ${savedPath}`,
-		].join("\n"), validated ? "info" : "warning");
+		].join("\n"), hasKey ? "info" : "warning");
 	}
 
 	// ─── Warmup Widget ──────────────────────────────────────────────────────
@@ -1156,35 +926,10 @@ export default function (pi: ExtensionAPI) {
 		(showRecordingWidget as any)._liveText = displayText;
 	}
 
-	// ─── Finalizing Widget ──────────────────────────────────────────────────
-
-	function showFinalizingWidget() {
-		if (!ctx?.hasUI) return;
-
-		let finalizingAnimTimer: ReturnType<typeof setInterval> | null = null;
-
-		const render = () => {
-			if (!ctx?.hasUI) return;
-			ctx.ui.setWidget("voice-recording", (tui, theme) => {
-				return {
-					invalidate() {},
-					render(): string[] {
-						const dots = ".".repeat(1 + (Math.floor(Date.now() / 400) % 3));
-						return [` ${theme.fg("accent", ">")} ${theme.fg("dim", `Processing${dots}`)}`];
-					},
-				};
-			}, { placement: "aboveEditor" });
-		};
-
-		render();
-		finalizingAnimTimer = setInterval(render, 400);
-		(showFinalizingWidget as any)._timer = finalizingAnimTimer;
-	}
-
-	// ─── Voice: Start / Stop (Streaming or Legacy) ───────────────────────────
+	// ─── Voice: Start / Stop ─────────────────────────────────────────────────
 
 	async function startVoiceRecording(): Promise<boolean> {
-		voiceDebug("startVoiceRecording called", { voiceState, isDeepgram: isDeepgramStreaming(config), hasUI: !!ctx?.hasUI });
+		voiceDebug("startVoiceRecording called", { voiceState, hasUI: !!ctx?.hasUI });
 		if (!ctx?.hasUI) return false;
 
 		// ── SESSION CORRUPTION GUARD ──
@@ -1210,15 +955,11 @@ export default function (pi: ExtensionAPI) {
 		// Snapshot editor text before voice overwrites it with live transcript
 		editorTextBeforeVoice = ctx?.hasUI ? (ctx.ui.getEditorText() || "") : "";
 
-		if (isDeepgramStreaming(config)) {
-			return startStreamingRecording();
-		} else {
-			return startLegacyRecording();
-		}
+		return startStreamingRecording();
 	}
 
 	async function startStreamingRecording(): Promise<boolean> {
-		voiceDebug("startStreamingRecording called", { configBackend: config.backend, hasKey: !!resolveDeepgramApiKey(config) });
+		voiceDebug("startStreamingRecording called", { hasKey: !!(process.env.DEEPGRAM_API_KEY || config.deepgramApiKey) });
 		setVoiceState("recording");
 
 		const session = startStreamingSession(config, {
@@ -1348,30 +1089,6 @@ export default function (pi: ExtensionAPI) {
 		return true;
 	}
 
-	async function startLegacyRecording(): Promise<boolean> {
-		if (!ctx) return false;
-		tempFile = path.join(os.tmpdir(), `pi-voice-${Date.now()}.wav`);
-		if (!startLegacyRecordingToFile(tempFile)) {
-			ctx.ui.notify("Voice requires SoX. Install: brew install sox", "error");
-			return false;
-		}
-
-		setVoiceState("recording");
-		statusTimer = setInterval(() => {
-			if (voiceState === "recording") {
-				updateVoiceStatus();
-				const elapsed = (Date.now() - recordingStart) / 1000;
-				if (elapsed >= MAX_RECORDING_SECS) {
-					stopVoiceRecording();
-				}
-			}
-		}, 1000);
-
-		showRecordingWidget();
-		playSound("start");
-		return true;
-	}
-
 	async function stopVoiceRecording() {
 		voiceDebug("stopVoiceRecording called", { voiceState, hasActiveSession: !!activeSession });
 		if (voiceState !== "recording" || !ctx) return;
@@ -1380,70 +1097,9 @@ export default function (pi: ExtensionAPI) {
 		if (activeSession) {
 			setVoiceState("finalizing");
 			clearRecordingAnimTimer();
-			// Don't show "Processing..." widget — live transcript is already in the editor.
-			// Just stop the recording widget and finalize silently.
 			hideWidget();
 			stopStreamingSession(activeSession);
-			return;
 		}
-
-		// Legacy path
-		const elapsed = ((Date.now() - recordingStart) / 1000).toFixed(1);
-		const audioFile = tempFile;
-		setVoiceState("finalizing");
-		clearRecordingAnimTimer();
-		showFinalizingWidget();
-
-		await stopLegacyRecording();
-
-		if (!audioFile || !fs.existsSync(audioFile)) {
-			ctx.ui.notify("No audio recorded.", "warning");
-			hideWidget();
-			setVoiceState("idle");
-			return;
-		}
-
-		const stats = fs.statSync(audioFile);
-		if (stats.size < 1000) {
-			ctx.ui.notify("Recording too short — mic captured silence.", "warning");
-			try { fs.unlinkSync(audioFile); } catch {}
-			tempFile = null;
-			hideWidget();
-			setVoiceState("idle");
-			return;
-		}
-
-		await ensureDaemon(config).catch(() => {});
-
-		const result = await transcribeAudioFile(audioFile, config);
-		try { fs.unlinkSync(audioFile); } catch {}
-		if (tempFile === audioFile) tempFile = null;
-
-		hideWidget();
-
-		if (result.error) {
-			ctx.ui.notify(`STT error: ${result.error}`, "error");
-			setVoiceState("idle");
-			return;
-		}
-
-		const transcript = (result.text || "").trim();
-		if (!transcript) {
-			ctx.ui.notify("No speech detected.", "warning");
-			setVoiceState("idle");
-			return;
-		}
-
-		if (ctx.hasUI) {
-			const prefix = editorTextBeforeVoice ? editorTextBeforeVoice + " " : "";
-			ctx.ui.setEditorText(prefix + transcript);
-			ctx.ui.notify(
-				`STT (${elapsed}s): ${transcript.slice(0, 80)}${transcript.length > 80 ? "…" : ""}`,
-				"info",
-			);
-		}
-
-		setVoiceState("idle");
 	}
 
 	// ─── Hold-to-Talk State Machine ─────────────────────────────────────────
@@ -2024,7 +1680,6 @@ export default function (pi: ExtensionAPI) {
 		const loaded = loadConfigWithSource(startCtx.cwd);
 		config = loaded.config;
 		configSource = loaded.source;
-		updateSocketPath(config, currentCwd);
 
 		// Auto-capture DEEPGRAM_API_KEY from env into config
 		if (process.env.DEEPGRAM_API_KEY && !config.deepgramApiKey) {
@@ -2034,31 +1689,9 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 
-		// Try to load DEEPGRAM_API_KEY from shell if not available
-		if (!resolveDeepgramApiKey(config) && config.backend === "deepgram") {
-			try {
-				const result = spawnSync("zsh", ["-ic", "echo $DEEPGRAM_API_KEY"], {
-					stdio: ["pipe", "pipe", "pipe"],
-					timeout: 3000,
-					env: { ...process.env, HOME: os.homedir() },
-				});
-				const shellKey = result.stdout?.toString().trim();
-				if (shellKey && shellKey.length > 5) {
-					config.deepgramApiKey = shellKey;
-					process.env.DEEPGRAM_API_KEY = shellKey;
-					if (configSource !== "default") {
-						saveConfig(config, config.scope, currentCwd);
-					}
-				}
-			} catch {}
-		}
-
 		if (config.enabled && config.onboarding.completed) {
 			updateVoiceStatus();
 			setupHoldToTalk();
-			if (!isDeepgramStreaming(config)) {
-				ensureDaemon(config).catch(() => {});
-			}
 		}
 	});
 
@@ -2075,7 +1708,6 @@ export default function (pi: ExtensionAPI) {
 		const loaded = loadConfigWithSource(switchCtx.cwd);
 		config = loaded.config;
 		configSource = loaded.source;
-		updateSocketPath(config, currentCwd);
 		setupHoldToTalk();
 		updateVoiceStatus();
 	});
@@ -2083,7 +1715,7 @@ export default function (pi: ExtensionAPI) {
 	// ─── /voice command ──────────────────────────────────────────────────────
 
 	pi.registerCommand("voice", {
-		description: "Voice: /voice [on|off|stop|dictate|history|test|info|setup|install|doctor|backends|daemon]",
+		description: "Voice: /voice [on|off|stop|dictate|history|test|info|setup]",
 		handler: async (args, cmdCtx) => {
 			ctx = cmdCtx;
 			const sub = (args || "").trim().toLowerCase();
@@ -2092,12 +1724,8 @@ export default function (pi: ExtensionAPI) {
 				config.enabled = true;
 				updateVoiceStatus();
 				setupHoldToTalk();
-				if (!isDeepgramStreaming(config)) {
-					ensureDaemon(config).catch(() => {});
-				}
-				const mode = isDeepgramStreaming(config) ? "Deepgram streaming" : config.backend;
 				cmdCtx.ui.notify([
-					`Voice enabled (${mode}).`,
+					"Voice enabled (Deepgram streaming).",
 					"",
 					"  Hold SPACE → release to transcribe",
 					"  Ctrl+Shift+V → toggle recording on/off",
@@ -2196,34 +1824,21 @@ export default function (pi: ExtensionAPI) {
 
 			if (sub === "test") {
 				cmdCtx.ui.notify("Testing voice setup…", "info");
-				const diagnostics = scanEnvironment(TRANSCRIBE_SCRIPT);
-				const dgKey = resolveDeepgramApiKey(config);
-				const streaming = isDeepgramStreaming(config);
-				const daemonUp = await isDaemonRunning();
-				const provisioningPlan = buildProvisioningPlan(config, diagnostics);
-				const selectedBackend = diagnostics.backends.find((backend) => backend.name === config.backend);
-				const modelReadiness = getModelReadiness(selectedBackend, config.model);
+				const dgKey = process.env.DEEPGRAM_API_KEY || config.deepgramApiKey || null;
+				const hasSox = commandExists("rec");
 
 				const lines = [
 					"Voice test:",
-					`  mode: ${config.mode}`,
-					`  backend: ${config.backend}`,
-					`  model: ${config.model}`,
-					`  model status: ${modelReadiness}`,
 					`  language: ${config.language}`,
-					`  streaming: ${streaming ? "YES (Deepgram WS)" : "NO (batch)"}`,
 					`  DEEPGRAM_API_KEY: ${dgKey ? "set (" + dgKey.slice(0, 8) + "…)" : "NOT SET"}`,
 					`  onboarding: ${config.onboarding.completed ? "complete" : "incomplete"}`,
-					`  python3: ${diagnostics.hasPython ? "OK" : "missing"}`,
-					`  sox/rec: ${diagnostics.hasSox ? "OK" : "missing"}`,
-					`  daemon: ${daemonUp ? "running" : "not running"}`,
+					`  sox/rec: ${hasSox ? "OK" : "missing"}`,
 					`  state: ${voiceState}`,
 					`  hold threshold: ${HOLD_THRESHOLD_MS}ms`,
-					`  release detect: ${RELEASE_DETECT_MS}ms`,
 					`  kitty protocol: ${kittyReleaseDetected ? "detected" : "not detected"}`,
 				];
 
-				if (diagnostics.hasSox) {
+				if (hasSox) {
 					const testFile = path.join(os.tmpdir(), "pi-voice-test.wav");
 					const testProc = spawn("rec", ["-q", "-r", "16000", "-c", "1", "-b", "16", "-d", "1", testFile], { stdio: "pipe" });
 					testProc.on("error", () => {}); // Prevent unhandled error crash
@@ -2240,82 +1855,36 @@ export default function (pi: ExtensionAPI) {
 					}
 				}
 
-				if (!dgKey && config.backend === "deepgram") {
+				if (!dgKey) {
 					lines.push("");
 					lines.push("⚠️  DEEPGRAM_API_KEY not set! Add to ~/.zshrc or ~/.env.secrets");
 					lines.push("   export DEEPGRAM_API_KEY=your_key_here");
 				}
 
-				cmdCtx.ui.notify(lines.join("\n"), provisioningPlan.ready ? "info" : "warning");
+				const ready = !!dgKey && hasSox;
+				cmdCtx.ui.notify(lines.join("\n"), ready ? "info" : "warning");
 				return;
 			}
 
 			if (sub === "info") {
-				const daemonUp = await isDaemonRunning();
-				let daemonInfo = "";
-				if (daemonUp) {
-					const status = await daemonSend({ cmd: "status" });
-					daemonInfo = `\n  daemon:   running (pid ${status.pid}, ${status.requests} requests, ${status.uptime}s uptime)`;
-				}
-				const diagnostics = scanEnvironment(TRANSCRIBE_SCRIPT);
-				const selectedBackend = diagnostics.backends.find((backend) => backend.name === config.backend);
-				const modelReadiness = getModelReadiness(selectedBackend, config.model);
-				const streaming = isDeepgramStreaming(config);
-
+				const dgKey = process.env.DEEPGRAM_API_KEY || config.deepgramApiKey || null;
 				cmdCtx.ui.notify([
 					`Voice config:`,
 					`  enabled:    ${config.enabled}`,
-					`  mode:       ${config.mode}`,
 					`  scope:      ${config.scope}`,
-					`  backend:    ${config.backend}`,
-					`  model:      ${config.model}`,
-					`  model stat: ${modelReadiness}`,
 					`  language:   ${config.language}`,
-					`  streaming:  ${streaming ? "YES (Deepgram WebSocket)" : "NO (batch)"}`,
+					`  streaming:  YES (Deepgram WebSocket)`,
+					`  api key:    ${dgKey ? "set (" + dgKey.slice(0, 8) + "…)" : "NOT SET"}`,
 					`  state:      ${voiceState}`,
 					`  setup:      ${config.onboarding.completed ? `complete (${config.onboarding.source ?? "unknown"})` : "incomplete"}`,
-					`  socket:     ${activeSocketPath}`,
-					`  daemon:     ${daemonUp ? "running" : "stopped"}${daemonInfo}`,
 					`  hold-key:   SPACE (hold ≥${HOLD_THRESHOLD_MS}ms) or Ctrl+Shift+V (toggle)`,
 					`  kitty:      ${kittyReleaseDetected ? "yes" : "no"}`,
 				].join("\n"), "info");
 				return;
 			}
 
-			if (sub === "daemon" || sub === "daemon start") {
-				cmdCtx.ui.notify("Starting STT daemon…", "info");
-				const ok = await ensureDaemon(config);
-				cmdCtx.ui.notify(ok ? "Daemon started." : "Failed to start daemon.", ok ? "info" : "error");
-				return;
-			}
-
-			if (sub === "daemon stop") {
-				const resp = await daemonSend({ cmd: "shutdown" });
-				cmdCtx.ui.notify(resp.error ? "Daemon not running." : "Daemon stopped.", "info");
-				return;
-			}
-
-			if (sub === "daemon status") {
-				const resp = await daemonSend({ cmd: "status" });
-				if (resp.error) {
-					cmdCtx.ui.notify("Daemon not running.", "info");
-				} else {
-					cmdCtx.ui.notify([
-						`Daemon status:`,
-						`  pid: ${resp.pid}`,
-						`  uptime: ${resp.uptime}s`,
-						`  requests: ${resp.requests}`,
-						`  backend: ${resp.backend}`,
-						`  model: ${resp.model}`,
-						`  model loaded: ${resp.model_loaded}`,
-					].join("\n"), "info");
-				}
-				return;
-			}
-
 			if (sub === "setup" || sub === "reconfigure") {
-				const diagnostics = scanEnvironment(TRANSCRIBE_SCRIPT);
-				const result = await runVoiceOnboarding(cmdCtx, config, diagnostics);
+				const result = await runVoiceOnboarding(cmdCtx, config);
 				if (!result) {
 					cmdCtx.ui.notify("Voice setup cancelled.", "warning");
 					return;
@@ -2324,103 +1893,6 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			if (sub === "install") {
-				const diagnostics = scanEnvironment(TRANSCRIBE_SCRIPT);
-				const plan = buildProvisioningPlan(config, diagnostics);
-				if (plan.ready) {
-					cmdCtx.ui.notify("All dependencies already installed. Nothing to do.", "info");
-					return;
-				}
-				if (plan.commands.length === 0) {
-					const lines = ["No auto-installable commands, but manual steps remain:", ...plan.manualSteps.map(s => `  - ${s}`)];
-					cmdCtx.ui.notify(lines.join("\n"), "warning");
-					return;
-				}
-				cmdCtx.ui.notify(`Installing: ${plan.commands.join(" && ")}`, "info");
-				const { executeProvisioningPlan: execPlan } = await import("./voice/install");
-				const result = await execPlan(plan, (msg) => cmdCtx.ui.notify(msg, "info"));
-				if (result.failed.length > 0) {
-					const failLines = result.failed.map(f => `  ✗ ${f.command}: ${f.error.slice(0, 150)}`);
-					cmdCtx.ui.notify(["Install failed:", ...failLines].join("\n"), "error");
-				} else {
-					cmdCtx.ui.notify(`✓ Installed: ${result.ran.join(", ")}`, "info");
-				}
-				return;
-			}
-
-			if (sub === "backends") {
-				if (!HAS_TRANSCRIBE_SCRIPT) {
-					cmdCtx.ui.notify("Using Deepgram streaming (no local backends needed).", "info");
-					return;
-				}
-				const backendsJson = spawnSync("python3", [TRANSCRIBE_SCRIPT, "--list-backends"], {
-					stdio: ["pipe", "pipe", "pipe"], timeout: 10000,
-				});
-				try {
-					const backends = JSON.parse(backendsJson.stdout?.toString() || "[]");
-					const lines = backends.flatMap((b: any) => {
-						const installedModels = Array.isArray(b.installed_models) ? b.installed_models : [];
-						const readiness = b.type === "cloud"
-							? (b.available ? "api ready" : `needs setup: ${b.install}`)
-							: installedModels.length > 0
-								? `installed: ${installedModels.join(", ")}`
-								: b.available
-									? "no confirmed installed models"
-									: `install: ${b.install}`;
-						const summary = `${b.available ? "+" : "-"} ${String(b.name).padEnd(16)} ${String(b.type).padEnd(6)} ${readiness}`;
-						const detection = b.install_detection ? `    detection: ${b.install_detection}` : undefined;
-						return detection ? [summary, detection] : [summary];
-					});
-					cmdCtx.ui.notify("Backends:\n" + lines.join("\n"), "info");
-				} catch {
-					cmdCtx.ui.notify("Failed to scan backends.", "error");
-				}
-				return;
-			}
-
-			if (sub === "doctor") {
-				const diagnostics = scanEnvironment(TRANSCRIBE_SCRIPT);
-				const recommendation = recommendVoiceSetup(diagnostics, "balanced");
-				const currentPlan = buildProvisioningPlan(config, diagnostics);
-				const currentBackend = diagnostics.backends.find((backend) => backend.name === config.backend);
-				const currentModelReadiness = getModelReadiness(currentBackend, config.model);
-				const recommendedConfig: VoiceConfig = {
-					...config,
-					mode: recommendation.mode,
-					backend: recommendation.backend,
-					model: recommendation.model,
-				};
-				const recommendedPlan = buildProvisioningPlan(recommendedConfig, diagnostics);
-				const recommendedBackend = diagnostics.backends.find((backend) => backend.name === recommendation.backend);
-				const recommendedModelReadiness = getModelReadiness(recommendedBackend, recommendation.model);
-				const availableBackends = diagnostics.backends
-					.filter((backend) => backend.available)
-					.map((backend) => `${backend.name} (${backend.type})`);
-				const lines = [
-					"Voice doctor:",
-					`  python3: ${diagnostics.hasPython ? "OK" : "missing"}`,
-					`  sox/rec: ${diagnostics.hasSox ? "OK" : "missing"}`,
-					`  brew: ${diagnostics.hasHomebrew ? "OK" : "missing"}`,
-					`  deepgram key: ${diagnostics.hasDeepgramKey ? "configured" : "missing"}`,
-					`  available backends: ${availableBackends.length > 0 ? availableBackends.join(", ") : "none"}`,
-					"",
-					`Current config: ${config.mode}/${config.backend}/${config.model}`,
-					`Current model status: ${currentModelReadiness}`,
-					"Repair current setup:",
-					...(currentPlan.commands.length > 0 ? currentPlan.commands.map((command) => `  - ${command}`) : ["  - no install commands required"]),
-					...(currentPlan.manualSteps.length > 0 ? currentPlan.manualSteps.map((step) => `  - ${step}`) : []),
-					"",
-					`Recommended alternative: ${recommendation.mode}/${recommendation.backend}/${recommendation.model}`,
-					`Recommended model status: ${recommendedModelReadiness}`,
-					`Why: ${recommendation.reason}`,
-					...(recommendation.fixableIssues.length > 0 ? ["Fixable issues:", ...recommendation.fixableIssues.map((issue) => `  - ${issue}`)] : ["Fixable issues:", "  - none"]),
-					"Suggested commands for the recommendation:",
-					...(recommendedPlan.commands.length > 0 ? recommendedPlan.commands.map((command) => `  - ${command}`) : ["  - none"]),
-					...(recommendedPlan.manualSteps.length > 0 ? recommendedPlan.manualSteps.map((step) => `  - ${step}`) : []),
-				];
-				cmdCtx.ui.notify(lines.join("\n"), !currentPlan.ready || recommendation.fixableIssues.length > 0 ? "warning" : "info");
-				return;
-			}
 
 			// Default: toggle
 			config.enabled = !config.enabled;
@@ -2434,11 +1906,10 @@ export default function (pi: ExtensionAPI) {
 	// ─── Dedicated setup command ─────────────────────────────────────────────
 
 	pi.registerCommand("voice-setup", {
-		description: "Configure voice input — select backend, model, and language",
+		description: "Configure voice input — set Deepgram API key and language",
 		handler: async (_args, cmdCtx) => {
 			ctx = cmdCtx;
-			const diagnostics = scanEnvironment(TRANSCRIBE_SCRIPT);
-			const result = await runVoiceOnboarding(cmdCtx, config, diagnostics);
+			const result = await runVoiceOnboarding(cmdCtx, config);
 			if (!result) {
 				cmdCtx.ui.notify("Voice setup cancelled.", "warning");
 				return;
