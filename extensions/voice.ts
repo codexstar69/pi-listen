@@ -80,6 +80,7 @@ import {
 } from "./voice/config";
 import { finalizeOnboardingConfig, runVoiceOnboarding } from "./voice/onboarding";
 import { detectVoiceCommand, processVoiceShortcuts } from "./voice/text-processing";
+import { buildDeepgramWsUrl, resolveDeepgramApiKey, SAMPLE_RATE, CHANNELS, ENCODING, DEEPGRAM_WS_URL } from "./voice/deepgram";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -94,10 +95,6 @@ type VoiceState = "idle" | "warmup" | "recording" | "finalizing";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const SAMPLE_RATE = 16000;        // Target sample rate for Deepgram
-const CHANNELS = 1;
-const ENCODING = "linear16";
-const DEEPGRAM_WS_URL = "wss://api.deepgram.com/v1/listen";
 const KEEPALIVE_INTERVAL_MS = 8000;
 const MAX_RECORDING_SECS = 120;
 
@@ -174,21 +171,6 @@ interface StreamingSession {
 	onError: (err: string) => void;
 }
 
-function buildDeepgramWsUrl(config: VoiceConfig): string {
-	const params = new URLSearchParams({
-		encoding: ENCODING,
-		sample_rate: String(SAMPLE_RATE),
-		channels: String(CHANNELS),
-		endpointing: "200",
-		utterance_end_ms: "1000",
-		language: config.language || "en",
-		model: "nova-3",
-		smart_format: "true",
-		interim_results: "true",
-	});
-	return `${DEEPGRAM_WS_URL}?${params.toString()}`;
-}
-
 function startStreamingSession(
 	config: VoiceConfig,
 	callbacks: {
@@ -197,7 +179,7 @@ function startStreamingSession(
 		onError: (err: string) => void;
 	},
 ): StreamingSession | null {
-	const apiKey = process.env.DEEPGRAM_API_KEY || config.deepgramApiKey || null;
+	const apiKey = resolveDeepgramApiKey(config);
 	voiceDebug("startStreamingSession", { hasApiKey: !!apiKey });
 	if (!apiKey) {
 		voiceDebug("startStreamingSession → no API key, calling onError");
@@ -673,7 +655,7 @@ export default function (pi: ExtensionAPI) {
 		summaryLines: string[],
 		source: "first-run" | "setup-command",
 	) {
-		const hasKey = !!(process.env.DEEPGRAM_API_KEY || nextConfig.deepgramApiKey);
+		const hasKey = !!resolveDeepgramApiKey(nextConfig);
 		config = finalizeOnboardingConfig(nextConfig, { validated: hasKey, source });
 		configSource = selectedScope;
 		const savedPath = saveConfig(config, selectedScope, currentCwd);
@@ -913,7 +895,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function startStreamingRecording(): Promise<boolean> {
-		voiceDebug("startStreamingRecording called", { hasKey: !!(process.env.DEEPGRAM_API_KEY || config.deepgramApiKey) });
+		voiceDebug("startStreamingRecording called", { hasKey: !!resolveDeepgramApiKey(config) });
 		setVoiceState("recording");
 
 		const session = startStreamingSession(config, {
@@ -1733,7 +1715,7 @@ export default function (pi: ExtensionAPI) {
 
 			if (sub === "test") {
 				cmdCtx.ui.notify("Testing voice setup…", "info");
-				const dgKey = process.env.DEEPGRAM_API_KEY || config.deepgramApiKey || null;
+				const dgKey = resolveDeepgramApiKey(config);
 				const hasSox = commandExists("rec");
 
 				const lines = [
@@ -1776,7 +1758,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (sub === "info") {
-				const dgKey = process.env.DEEPGRAM_API_KEY || config.deepgramApiKey || null;
+				const dgKey = resolveDeepgramApiKey(config);
 				cmdCtx.ui.notify([
 					`Voice config:`,
 					`  enabled:    ${config.enabled}`,
