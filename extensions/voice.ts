@@ -103,8 +103,6 @@ const CHANNELS = 1;
 const ENCODING = "linear16";
 const DEEPGRAM_WS_URL = "wss://api.deepgram.com/v1/listen";
 const KEEPALIVE_INTERVAL_MS = 8000;
-const FINALIZE_SAFETY_TIMEOUT_MS = 1200;  // Max wait for remaining transcripts after CloseStream
-const FINALIZE_NO_DATA_TIMEOUT_MS = 300;  // If no data for 300ms after CloseStream, assume done
 const MAX_RECORDING_SECS = 120;
 
 // Hold-to-talk timing
@@ -563,33 +561,13 @@ function stopStreamingSession(session: StreamingSession): void {
 		try { session.ws.send(JSON.stringify({ type: "CloseStream" })); } catch {}
 	}
 
-	// Safety timeout
-	setTimeout(() => {
-		if (!session.closed) {
-			finalizeSession(session);
-		}
-	}, FINALIZE_SAFETY_TIMEOUT_MS);
-
-	// Quick finalize if no new data
-	let lastDataTime = Date.now();
-	const origOnMessage = session.ws.onmessage;
-	session.ws.onmessage = (event: MessageEvent) => {
-		lastDataTime = Date.now();
-		if (origOnMessage) origOnMessage.call(session.ws, event);
-	};
-
-	const noDataCheck = setInterval(() => {
-		if (session.closed) {
-			clearInterval(noDataCheck);
-			return;
-		}
-		if (Date.now() - lastDataTime > FINALIZE_NO_DATA_TIMEOUT_MS) {
-			clearInterval(noDataCheck);
-			if (!session.closed) {
-				finalizeSession(session);
-			}
-		}
-	}, 150);
+	// Finalize immediately — the live stream already captured all finals.
+	// Include any trailing interim text that Deepgram hasn't promoted yet.
+	if (session.interimText.trim()) {
+		session.finalizedParts.push(session.interimText.trim());
+		session.interimText = "";
+	}
+	finalizeSession(session);
 }
 
 function finalizeSession(session: StreamingSession): void {
