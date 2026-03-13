@@ -743,6 +743,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		resetHoldState(); // includes clearHoldTimer + clearReleaseTimer
+		_startingRecording = false;
 		lastSpacePressTime = 0;
 		errorCooldownUntil = 0;
 		editorTextBeforeVoice = "";
@@ -960,10 +961,15 @@ export default function (pi: ExtensionAPI) {
 
 	// ─── Voice: Start / Stop ─────────────────────────────────────────────────
 
-	async function startVoiceRecording(): Promise<boolean> {
-		voiceDebug("startVoiceRecording called", { voiceState, hasUI: !!ctx?.hasUI });
-		if (!ctx?.hasUI) return false;
+	let _startingRecording = false; // Re-entrancy guard for startVoiceRecording
 
+	async function startVoiceRecording(): Promise<boolean> {
+		voiceDebug("startVoiceRecording called", { voiceState, hasUI: !!ctx?.hasUI, starting: _startingRecording });
+		if (!ctx?.hasUI) return false;
+		if (_startingRecording) return false; // Prevent overlapping starts during corruption guard sleep
+		_startingRecording = true;
+
+		try {
 		// ── SESSION CORRUPTION GUARD ──
 		// If we're still finalizing from a previous recording, abort it first.
 		// This prevents the "slow connection overlaps new recording" bug.
@@ -988,6 +994,9 @@ export default function (pi: ExtensionAPI) {
 		editorTextBeforeVoice = ctx?.hasUI ? (ctx.ui.getEditorText() || "") : "";
 
 		return startStreamingRecording();
+		} finally {
+			_startingRecording = false;
+		}
 	}
 
 	async function startStreamingRecording(): Promise<boolean> {
@@ -1004,6 +1013,7 @@ export default function (pi: ExtensionAPI) {
 				voiceDebug("onDone callback", { fullText: fullText.slice(0, 100), meta, voiceState, spaceConsumed });
 				activeSession = null;
 				clearRecordingAnimTimer();
+				if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
 				lastStopTime = Date.now();
 
 				if (!fullText.trim()) {
@@ -1060,14 +1070,14 @@ export default function (pi: ExtensionAPI) {
 			onError: (err) => {
 				activeSession = null;
 				clearRecordingAnimTimer();
+				if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
 				hideWidget();
 
 				// ── STOP THE LOOP ──
 				// On error, fully reset ALL hold state AND set a cooldown
 				// so incoming key-repeat events can't re-trigger activation.
-				resetHoldState();
+				resetHoldState({ cooldown: 5000 });
 				clearWarmupWidget();
-				errorCooldownUntil = Date.now() + 5000; // Block re-activation for 5 seconds
 
 				ctx?.ui.notify(`Voice error: ${err}`, "error");
 				playSound("error");
@@ -1110,6 +1120,12 @@ export default function (pi: ExtensionAPI) {
 			clearRecordingAnimTimer();
 			hideWidget();
 			stopStreamingSession(activeSession);
+		} else {
+			// No active session — shouldn't happen, but recover gracefully
+			voiceDebug("stopVoiceRecording: no active session, resetting to idle");
+			clearRecordingAnimTimer();
+			hideWidget();
+			setVoiceState("idle");
 		}
 	}
 
