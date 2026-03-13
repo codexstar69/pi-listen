@@ -171,9 +171,11 @@ interface StreamingSession {
 	interimText: string;
 	finalizedParts: string[];
 	keepAliveTimer: ReturnType<typeof setInterval> | null;
+	staleSessionTimer: ReturnType<typeof setTimeout> | null;
 	closed: boolean;
 	hadAudioData: boolean;       // Track if we received any audio data
 	hadSpeech: boolean;          // Track if Deepgram detected any speech
+	receivedMessage: boolean;    // Track if we got ANY message from Deepgram
 	onTranscript: (interim: string, finals: string[]) => void;
 	onDone: (fullText: string, meta: { hadAudio: boolean; hadSpeech: boolean }) => void;
 	onError: (err: string) => void;
@@ -246,9 +248,11 @@ function startStreamingSession(
 		interimText: "",
 		finalizedParts: [],
 		keepAliveTimer: null,
+		staleSessionTimer: null,
 		closed: false,
 		hadAudioData: false,
 		hadSpeech: false,
+		receivedMessage: false,
 		onTranscript: callbacks.onTranscript,
 		onDone: callbacks.onDone,
 		onError: callbacks.onError,
@@ -288,6 +292,15 @@ function startStreamingSession(
 				try { ws.send(chunk); } catch {}
 				// Feed audio data to level meter for reactive waveform
 				updateAudioLevel(chunk);
+				// Start stale-session watchdog on first audio chunk
+				if (!session.staleSessionTimer && !session.receivedMessage) {
+					session.staleSessionTimer = setTimeout(() => {
+						if (!session.closed && !session.receivedMessage) {
+							voiceDebug("Stale session: no Deepgram response after 15s of audio");
+							session.onError("No response from Deepgram (15s). Check your API key and network.");
+						}
+					}, 15_000);
+				}
 			}
 		});
 	};
@@ -296,6 +309,15 @@ function startStreamingSession(
 		try {
 			const msg = typeof event.data === "string" ? JSON.parse(event.data) : null;
 			if (!msg) return;
+
+			// Cancel stale-session watchdog on first response
+			if (!session.receivedMessage) {
+				session.receivedMessage = true;
+				if (session.staleSessionTimer) {
+					clearTimeout(session.staleSessionTimer);
+					session.staleSessionTimer = null;
+				}
+			}
 
 			if (msg.type === "Results") {
 				const alt = msg.channel?.alternatives?.[0];
@@ -334,9 +356,18 @@ function startStreamingSession(
 
 	ws.onclose = (ev) => {
 		clearTimeout(wsConnectTimeout);
-		voiceDebug("WebSocket onclose", { code: (ev as any)?.code, reason: (ev as any)?.reason, closed: session.closed });
+		const code = (ev as any)?.code;
+		const reason = (ev as any)?.reason;
+		voiceDebug("WebSocket onclose", { code, reason, closed: session.closed });
 		if (!session.closed) {
-			finalizeSession(session);
+			// Unexpected close — distinguish normal completion from network drops
+			if (code === 1000 || code === 1001 || session.finalizedParts.length > 0) {
+				// Normal close or we have usable transcript data — finalize
+				finalizeSession(session);
+			} else {
+				// Abnormal close with no transcript — treat as error
+				session.onError(`Connection lost (code ${code ?? "unknown"}${reason ? `: ${reason}` : ""})`);
+			}
 		}
 	};
 
@@ -380,6 +411,10 @@ function finalizeSession(session: StreamingSession): void {
 	session.closed = true;
 	voiceDebug("finalizeSession", { hadAudio: session.hadAudioData, hadSpeech: session.hadSpeech, parts: session.finalizedParts.length });
 
+	if (session.staleSessionTimer) {
+		clearTimeout(session.staleSessionTimer);
+		session.staleSessionTimer = null;
+	}
 	if (session.keepAliveTimer) {
 		clearInterval(session.keepAliveTimer);
 		session.keepAliveTimer = null;
@@ -400,6 +435,10 @@ function finalizeSession(session: StreamingSession): void {
 function abortSession(session: StreamingSession | null): void {
 	if (!session || session.closed) return;
 	session.closed = true;
+	if (session.staleSessionTimer) {
+		clearTimeout(session.staleSessionTimer);
+		session.staleSessionTimer = null;
+	}
 	if (session.keepAliveTimer) {
 		clearInterval(session.keepAliveTimer);
 		session.keepAliveTimer = null;
