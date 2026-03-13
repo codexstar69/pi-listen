@@ -1,20 +1,22 @@
 {
   "name": "@codexstar/pi-listen",
-  "version": "2.0.0",
-  "description": "Voice input, first-run onboarding, and side-channel BTW conversations for Pi",
+  "version": "2.1.0",
+  "description": "Voice input for Pi — hold SPACE to talk, Deepgram streaming STT",
   "type": "module",
   "keywords": [
     "pi-package",
     "pi",
     "pi-extension",
     "voice",
-    "stt"
+    "stt",
+    "deepgram",
+    "speech-to-text"
   ],
   "license": "MIT",
   "scripts": {
     "typecheck": "bunx tsc -p tsconfig.json",
     "test": "bun test",
-    "check": "bun run typecheck && bun run test && python3 -m py_compile daemon.py transcribe.py",
+    "check": "bun run typecheck && bun run test",
     "release:dry": "bun run check && bun publish --dry-run",
     "release": "bun run check && bun publish --access public"
   },
@@ -31,6 +33,9 @@
     "@mariozechner/pi-coding-agent": "*",
     "@mariozechner/pi-tui": "*"
   },
+  "engines": {
+    "node": ">=18"
+  },
   "pi": {
     "extensions": [
       "./extensions/voice.ts"
@@ -41,8 +46,6 @@
     "docs",
     "scripts",
     "README.md",
-    "transcribe.py",
-    "daemon.py",
     "package.json"
   ]
 }
