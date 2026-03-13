@@ -8,13 +8,14 @@
  */
 
 // --- Configuration ---
-const SW = 30;   // Widget pixel width (characters) — compact for right-side placement
+// All coordinates are in native widget space (no scaling from 80×72).
+const SW = 30;   // Widget pixel width (characters)
 const SH = 8;    // Widget pixel height (character rows, each = 2 logical pixels)
 const LOGICAL_H = SH * 2; // 16 logical pixels tall
 
-// Scale factor from original 80×72 coordinate space
-const SCALE_X = SW / 80;
-const SCALE_Y = LOGICAL_H / 72;
+// Center of the widget
+const CX = SW / 2;   // 15
+const CY = LOGICAL_H / 2; // 8
 
 // --- Slime State ---
 let time = 0;
@@ -26,12 +27,12 @@ let talkTimer = 0;
 // Flavor (Catppuccin Mocha - Mauve)
 const flavor = { r: 203, g: 166, b: 247, blushR: 245, blushG: 130, blushB: 186, mouthR: 180, mouthG: 120, mouthB: 200 };
 
-// Metablobs: 0: Body, 1: Left Ear, 2: Right Ear
+// Metablobs in native widget coords: 0: Body, 1: Left Ear, 2: Right Ear
 interface Blob { x: number; y: number; rx: number; ry: number; rot: number; }
 const blobs: Blob[] = [
-	{ x: 40, y: 40, rx: 20, ry: 16, rot: 0 },
-	{ x: 26, y: 22, rx: 5, ry: 12, rot: -0.4 },
-	{ x: 54, y: 22, rx: 5, ry: 12, rot: 0.4 },
+	{ x: CX, y: CY + 1, rx: 8, ry: 5, rot: 0 },         // Body — centered, slightly below mid
+	{ x: CX - 5, y: CY - 4, rx: 2, ry: 4, rot: -0.4 },  // Left ear
+	{ x: CX + 5, y: CY - 4, rx: 2, ry: 4, rot: 0.4 },   // Right ear
 ];
 
 const vels: Blob[] = Array.from({ length: 3 }, () => ({ x: 0, y: 0, rx: 0, ry: 0, rot: 0 }));
@@ -85,27 +86,28 @@ function updatePhysics(dt: number, audioLevel: number) {
 	if (blinkFade > 0) blinkFade = Math.max(0, blinkFade - dt * 8.0);
 
 	const breath = Math.sin(time * 4.0);
+	const bSmall = breath * 0.3; // Scaled breathing for widget-space
 
-	// Default targets
+	// Default targets in native widget coordinates
 	const targets: Blob[] = [
-		{ x: 40, y: 40 + breath * 1.5, rx: 20 + breath * 0.5, ry: 16 - breath * 0.5, rot: 0 },
-		{ x: 26, y: 22 + breath * 1.5, rx: 5, ry: 12, rot: -0.4 - breath * 0.05 },
-		{ x: 54, y: 22 + breath * 1.5, rx: 5, ry: 12, rot: 0.4 + breath * 0.05 },
+		{ x: CX, y: CY + 1 + bSmall, rx: 8 + bSmall * 0.2, ry: 5 - bSmall * 0.2, rot: 0 },
+		{ x: CX - 5, y: CY - 4 + bSmall, rx: 2, ry: 4, rot: -0.4 - bSmall * 0.05 },
+		{ x: CX + 5, y: CY - 4 + bSmall, rx: 2, ry: 4, rot: 0.4 + bSmall * 0.05 },
 	];
 
 	if (mood === "talking") {
-		const bounce = Math.sin(time * 14.0) * 0.3;
-		targets[0].y += bounce * 2;
-		targets[0].ry -= bounce;
+		const bounce = Math.sin(time * 14.0) * 0.15;
+		targets[0].y += bounce;
+		targets[0].ry -= bounce * 0.3;
 	} else if (mood === "excited") {
-		const bounce = Math.sin(time * 20.0) * 0.5;
-		targets[0].y = 42 + bounce * 3;
-		targets[0].ry = 15 - bounce * 1.5;
-		targets[0].rx = 22 + bounce * 1.5;
+		const bounce = Math.sin(time * 20.0) * 0.25;
+		targets[0].y = CY + 1.5 + bounce;
+		targets[0].ry = 4.5 - bounce * 0.5;
+		targets[0].rx = 9 + bounce * 0.5;
 		targets[1].rot = -0.8;
-		targets[1].y += 4;
+		targets[1].y += 1.5;
 		targets[2].rot = 0.8;
-		targets[2].y += 4;
+		targets[2].y += 1.5;
 	}
 
 	// Spring physics
@@ -132,18 +134,15 @@ function renderFrame(audioLevel: number) {
 
 	for (let y = 0; y < LOGICAL_H; y++) {
 		for (let x = 0; x < SW; x++) {
-			// Map widget coords back to 80×72 space
-			const ox = x / SCALE_X;
-			const oy = y / SCALE_Y;
-
-			const d = getDensity(ox, oy);
+			// Native widget coordinates — no mapping needed
+			const d = getDensity(x, y);
 			const idx = (y * SW + x) * 3;
 
 			if (d > 1.0) {
 				// Normal + lighting
-				const eps = 0.5;
-				const dx = getDensity(ox + eps, oy) - getDensity(ox - eps, oy);
-				const dy = getDensity(ox, oy + eps) - getDensity(ox, oy - eps);
+				const eps = 0.3;
+				const dx = getDensity(x + eps, y) - getDensity(x - eps, y);
+				const dy = getDensity(x, y + eps) - getDensity(x, y - eps);
 				let nx = -dx * 18.0;
 				let ny = -dy * 18.0;
 				let nz = 1.0;
@@ -164,53 +163,50 @@ function renderFrame(audioLevel: number) {
 
 				let isFace = false;
 
-				// Eyes
-				const ex1 = ox - (bx - 8), ey1 = oy - (by - 2);
-				const ex2 = ox - (bx + 8), ey2 = oy - (by - 2);
+				// Eyes — ±3 from body center, 1 above center
+				const ex1 = x - (bx - 3), ey1 = y - (by - 1);
+				const ex2 = x - (bx + 3), ey2 = y - (by - 1);
 
-				if (ex1 * ex1 + (ey1 * ey1) / (eyeScaleY * eyeScaleY) < 14) {
-					if (ex1 * ex1 + (ey1 + 1.5) * (ey1 + 1.5) < 3.5 && eyeOpen > 0.5) {
-						r = 255; g = 255; b = 255;
-					} else if ((ex1 + 1.5) * (ex1 + 1.5) + (ey1 - 1.5) * (ey1 - 1.5) < 1.0 && eyeOpen > 0.5) {
-						r = 255; g = 255; b = 255;
-					} else { r = 40; g = 30; b = 40; }
+				if (ex1 * ex1 + (ey1 * ey1) / (eyeScaleY * eyeScaleY) < 2.5) {
+					if (ex1 * ex1 + (ey1 + 0.5) * (ey1 + 0.5) < 0.8 && eyeOpen > 0.5) {
+						r = 255; g = 255; b = 255; // catchlight
+					} else { r = 40; g = 30; b = 40; } // pupil
 					isFace = true;
 				}
-				if (ex2 * ex2 + (ey2 * ey2) / (eyeScaleY * eyeScaleY) < 14) {
-					if (ex2 * ex2 + (ey2 + 1.5) * (ey2 + 1.5) < 3.5 && eyeOpen > 0.5) {
-						r = 255; g = 255; b = 255;
-					} else if ((ex2 + 1.5) * (ex2 + 1.5) + (ey2 - 1.5) * (ey2 - 1.5) < 1.0 && eyeOpen > 0.5) {
+				if (ex2 * ex2 + (ey2 * ey2) / (eyeScaleY * eyeScaleY) < 2.5) {
+					if (ex2 * ex2 + (ey2 + 0.5) * (ey2 + 0.5) < 0.8 && eyeOpen > 0.5) {
 						r = 255; g = 255; b = 255;
 					} else { r = 40; g = 30; b = 40; }
 					isFace = true;
 				}
 
-				// Blush
+				// Blush — ±4.5 from center, 1 below center
 				if (!isFace) {
-					const blx1 = ox - (bx - 12), bly1 = oy - (by + 2);
-					const blx2 = ox - (bx + 12), bly2 = oy - (by + 2);
-					if (blx1 * blx1 + bly1 * bly1 < 6 || blx2 * blx2 + bly2 * bly2 < 6) {
+					const blx1 = x - (bx - 4.5), bly1 = y - (by + 1);
+					const blx2 = x - (bx + 4.5), bly2 = y - (by + 1);
+					if (blx1 * blx1 + bly1 * bly1 < 1.2 || blx2 * blx2 + bly2 * bly2 < 1.2) {
 						r = f.blushR; g = f.blushG; b = f.blushB;
 						isFace = true;
 					}
 				}
 
-				// Mouth
+				// Mouth — 1.5 below body center
 				if (!isFace) {
-					const mx = ox - bx, my = oy - (by + 4);
+					const mx = x - bx, my = y - (by + 1.5);
 					if (talkTimer > 0) {
 						const talkPhase = Math.floor(time * 12) % 3;
-						if (talkPhase === 0 && (((mx + 1.5) * (mx + 1.5) + (my - 1) * (my - 1) < 3.0 && my > 1) || ((mx - 1.5) * (mx - 1.5) + (my - 1) * (my - 1) < 3.0 && my > 1))) {
-							r = f.mouthR; g = f.mouthG; b = f.mouthB;
-						} else if (talkPhase === 1 && mx * mx + (my - 1) * (my - 1) < 2) {
-							r = f.mouthR; g = f.mouthG; b = f.mouthB;
-						} else if (talkPhase === 2 && mx * mx * 0.6 + (my - 1) * (my - 1) < 5) {
-							r = f.mouthR; g = f.mouthG; b = f.mouthB;
+						if (talkPhase === 0 && (((mx + 0.6) * (mx + 0.6) + my * my < 0.6 && my > 0) || ((mx - 0.6) * (mx - 0.6) + my * my < 0.6 && my > 0))) {
+							r = f.mouthR; g = f.mouthG; b = f.mouthB; // :3
+						} else if (talkPhase === 1 && mx * mx + my * my < 0.4) {
+							r = f.mouthR; g = f.mouthG; b = f.mouthB; // small o
+						} else if (talkPhase === 2 && mx * mx * 0.6 + my * my < 0.9) {
+							r = f.mouthR; g = f.mouthG; b = f.mouthB; // big O
 						}
 					} else {
-						const dx1 = mx + 1.5, dy1 = my - 1.0;
-						const dx2 = mx - 1.5, dy2 = my - 1.0;
-						if ((dx1 * dx1 + dy1 * dy1 < 3.0 && dy1 > 0) || (dx2 * dx2 + dy2 * dy2 < 3.0 && dy2 > 0)) {
+						// Cute ':3' mouth
+						const dx1 = mx + 0.6, dy1 = my;
+						const dx2 = mx - 0.6, dy2 = my;
+						if ((dx1 * dx1 + dy1 * dy1 < 0.6 && dy1 > 0) || (dx2 * dx2 + dy2 * dy2 < 0.6 && dy2 > 0)) {
 							r = f.mouthR; g = f.mouthG; b = f.mouthB;
 						}
 					}
@@ -287,9 +283,14 @@ export function resetSlime() {
 	mood = "idle";
 	blinkFade = 0;
 	talkTimer = 0;
-	// Reset blobs to defaults
-	blobs[0] = { x: 40, y: 40, rx: 20, ry: 16, rot: 0 };
-	blobs[1] = { x: 26, y: 22, rx: 5, ry: 12, rot: -0.4 };
-	blobs[2] = { x: 54, y: 22, rx: 5, ry: 12, rot: 0.4 };
+	// Reset blobs to native widget-space defaults
+	blobs[0] = { x: CX, y: CY + 1, rx: 8, ry: 5, rot: 0 };
+	blobs[1] = { x: CX - 5, y: CY - 4, rx: 2, ry: 4, rot: -0.4 };
+	blobs[2] = { x: CX + 5, y: CY - 4, rx: 2, ry: 4, rot: 0.4 };
 	for (const v of vels) { v.x = 0; v.y = 0; v.rx = 0; v.ry = 0; v.rot = 0; }
 }
+
+/** Width of the slime in characters (for layout) */
+export const SLIME_WIDTH = SW;
+/** Height of the slime in character rows (for layout) */
+export const SLIME_HEIGHT = SH;

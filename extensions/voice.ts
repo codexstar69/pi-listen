@@ -81,7 +81,7 @@ import {
 import { finalizeOnboardingConfig, runVoiceOnboarding } from "./voice/onboarding";
 import { detectVoiceCommand, processVoiceShortcuts } from "./voice/text-processing";
 import { buildDeepgramWsUrl, resolveDeepgramApiKey, SAMPLE_RATE, CHANNELS } from "./voice/deepgram";
-import { renderSlime, resetSlime } from "./voice/slime";
+import { renderSlime, resetSlime, SLIME_WIDTH } from "./voice/slime";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -639,6 +639,10 @@ export default function (pi: ExtensionAPI) {
 		voiceState = newState;
 		if (prev !== newState) {
 			voiceDebug(`STATE: ${prev} → ${newState}`);
+			// Restore slime companion when returning to idle after recording
+			if (newState === "idle" && config.enabled && (prev === "recording" || prev === "finalizing")) {
+				showSlimeCompanion();
+			}
 		}
 		updateVoiceStatus();
 	}
@@ -692,6 +696,7 @@ export default function (pi: ExtensionAPI) {
 	function voiceCleanup() {
 		if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
 		cancelDelayedStop();
+		hideSlimeCompanion();
 		clearWarmupWidget();
 		clearRecordingAnimTimer();
 		resetSlime();
@@ -711,6 +716,50 @@ export default function (pi: ExtensionAPI) {
 		dictationMode = false;
 		hideWidget();
 		setVoiceState("idle");
+	}
+
+	// ─── Persistent Slime Companion ─────────────────────────────────────────
+	// Shows the slime on the right side when voice is enabled but not recording.
+	// During recording, the recording widget takes over.
+	let _slimeCompanionTimer: ReturnType<typeof setInterval> | null = null;
+	let _slimeCompanionLastRender = Date.now();
+
+	function showSlimeCompanion() {
+		if (_slimeCompanionTimer) return; // Already running
+		if (!ctx?.hasUI) return;
+
+		_slimeCompanionLastRender = Date.now();
+		_slimeCompanionTimer = setInterval(() => {
+			if (!ctx?.hasUI) return;
+			// Don't show companion during recording/warmup — the recording widget handles it
+			if (voiceState !== "idle") return;
+
+			const now = Date.now();
+			const dt = Math.min(0.1, (now - _slimeCompanionLastRender) / 1000);
+			_slimeCompanionLastRender = now;
+
+			ctx.ui.setWidget("slime-companion", (_tui, _theme) => ({
+				invalidate() {},
+				render(width: number): string[] {
+					const slimeLines = renderSlime(0, dt); // audioLevel=0 → idle breathing
+					const pad = Math.max(0, width - SLIME_WIDTH - 2);
+					return slimeLines.map(line => " ".repeat(pad) + line);
+				},
+			}), { placement: "aboveEditor" });
+		}, 200); // 5fps for idle — low CPU cost
+	}
+
+	function hideSlimeCompanion() {
+		if (_slimeCompanionTimer) {
+			clearInterval(_slimeCompanionTimer);
+			_slimeCompanionTimer = null;
+		}
+		if (ctx?.hasUI) {
+			ctx.ui.setWidget("slime-companion", (_tui, _theme) => ({
+				invalidate() {},
+				render(): string[] { return []; },
+			}), { placement: "aboveEditor" });
+		}
 	}
 
 	async function finalizeAndSaveSetup(
@@ -870,6 +919,7 @@ export default function (pi: ExtensionAPI) {
 
 	function showRecordingWidget() {
 		if (!ctx?.hasUI) return;
+		hideSlimeCompanion(); // Recording widget takes over
 
 		_recWidgetFrame = 0;
 
@@ -1810,6 +1860,7 @@ export default function (pi: ExtensionAPI) {
 		if (config.enabled && config.onboarding.completed) {
 			updateVoiceStatus();
 			setupHoldToTalk();
+			showSlimeCompanion();
 		}
 	});
 
@@ -1827,6 +1878,7 @@ export default function (pi: ExtensionAPI) {
 		config = loaded.config;
 		configSource = loaded.source;
 		setupHoldToTalk();
+		if (config.enabled) showSlimeCompanion();
 		updateVoiceStatus();
 	});
 
@@ -1842,6 +1894,7 @@ export default function (pi: ExtensionAPI) {
 				config.enabled = true;
 				updateVoiceStatus();
 				setupHoldToTalk();
+				showSlimeCompanion();
 				cmdCtx.ui.notify([
 					"Voice enabled (Deepgram streaming).",
 					"",
@@ -1862,6 +1915,7 @@ export default function (pi: ExtensionAPI) {
 			if (sub === "off") {
 				config.enabled = false;
 				voiceCleanup();
+				hideSlimeCompanion();
 				if (terminalInputUnsub) { terminalInputUnsub(); terminalInputUnsub = null; }
 				ctx.ui.setStatus("voice", undefined);
 				cmdCtx.ui.notify("Voice disabled.", "info");
@@ -2015,8 +2069,8 @@ export default function (pi: ExtensionAPI) {
 
 			// Default: toggle
 			config.enabled = !config.enabled;
-			if (!config.enabled) voiceCleanup();
-			else setupHoldToTalk();
+			if (!config.enabled) { voiceCleanup(); hideSlimeCompanion(); }
+			else { setupHoldToTalk(); showSlimeCompanion(); }
 			updateVoiceStatus();
 			cmdCtx.ui.notify(`Voice ${config.enabled ? "enabled" : "disabled"}.`, "info");
 		},
