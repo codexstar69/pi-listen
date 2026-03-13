@@ -746,8 +746,6 @@ export default function (pi: ExtensionAPI) {
 
 		// ── Eyes dilate with audio level ──
 		let eyes: string;
-		let mouth: string;
-
 		if (blinking) {
 			eyes = "–";
 		} else if (audioLevel > 0.42) {
@@ -758,13 +756,16 @@ export default function (pi: ExtensionAPI) {
 			eyes = "◕";
 		}
 
-		// ── Mouth opens with audio — makes face feel alive ──
-		if (audioLevel > 0.45)      mouth = "▽";   // wide open — loud speech
-		else if (audioLevel > 0.25) mouth = "○";   // open — normal speech
-		else if (audioLevel > 0.12) mouth = "◡";   // slightly open — quiet
-		else                        mouth = "‿";   // closed — silence/idle
+		// ── Mouth animates with audio (even soft speech) ──
+		// Thresholds are intentionally low so normal conversation triggers animation.
+		// audioLevelSmoothed typically ranges 0.01–0.5 for speech.
+		let mouth: string;
+		if (audioLevel > 0.30)      mouth = "◎";   // wide open — loud
+		else if (audioLevel > 0.15) mouth = "○";   // open — normal talking
+		else if (audioLevel > 0.06) mouth = "◦";   // slightly open — soft speech
+		else                        mouth = " ";   // closed — silence
 
-		return `(${eyes}${mouth}${eyes})`;
+		return `(${eyes}▽${eyes})${mouth}`;
 	}
 
 
