@@ -1262,8 +1262,9 @@ export default function (pi: ExtensionAPI) {
 					// count these repeats to confirm the hold. Update state so
 					// onSpaceReleaseDetected won't fire a false tap.
 					if (spaceDownTime && !holdConfirmed) {
-						kittyReleaseDetected = true; // Now we know it's Kitty
-						clearReleaseTimer(); // Cancel non-Kitty release timer
+						// NOTE: Do NOT set kittyReleaseDetected here!
+						// Ghostty on macOS sends repeat events but NO release events.
+						// Only a true isKeyRelease() should flip the Kitty flag.
 
 						const now = Date.now();
 						spacePressCount++;
@@ -1284,8 +1285,8 @@ export default function (pi: ExtensionAPI) {
 									clearWarmupWidget();
 									spaceConsumed = true;
 									recordingStartedAt = Date.now();
-									// Kitty repeat handler: clear release timer during
-									// async recording startup to prevent false stop
+									// Clear release timer during async recording startup
+									// to prevent false stop. Next repeat re-arms it.
 									clearReleaseTimer();
 									voiceDebug("holdActivationTimer fired → starting recording (Kitty repeat path)");
 									startVoiceRecording().then((ok) => {
@@ -1306,6 +1307,11 @@ export default function (pi: ExtensionAPI) {
 								}
 							}, remaining);
 						}
+
+						// Re-arm gap-based release detection — this is how
+						// Ghostty-on-macOS (repeats but no release) detects
+						// the key being released.
+						resetReleaseDetect();
 						return { consume: true };
 					}
 
