@@ -468,6 +468,7 @@ export default function (pi: ExtensionAPI) {
 
 	// Streaming session state
 	let activeSession: StreamingSession | null = null;
+	let preRecordingSession: StreamingSession | null = null;  // Started during warmup, promoted on confirm
 
 	let lastStopTime = 0;    // For corruption guard
 	let recordingStartedAt = 0; // When recording actually started (for grace period)
@@ -678,6 +679,7 @@ export default function (pi: ExtensionAPI) {
 		holdConfirmed = false;
 		clearHoldTimer();
 		clearReleaseTimer();
+		abortPreRecording();
 		if (opts?.cooldown) errorCooldownUntil = Date.now() + opts.cooldown;
 	}
 
@@ -957,17 +959,57 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	async function startStreamingRecording(): Promise<boolean> {
-		voiceDebug("startStreamingRecording called", { hasKey: !!resolveDeepgramApiKey(config) });
-		setVoiceState("recording");
+	// ── Pre-recording: start capturing audio during warmup so we don't miss words ──
+	function startPreRecording() {
+		if (preRecordingSession) return; // Already started
+		if (!resolveDeepgramApiKey(config)) return; // No key — skip silently
+		if (!commandExists("rec")) return;           // No SoX — skip silently
+
+		voiceDebug("startPreRecording → capturing audio during warmup");
+		editorTextBeforeVoice = ctx?.hasUI ? (ctx.ui.getEditorText() || "") : "";
 
 		const session = startStreamingSession(config, {
 			onTranscript: (interim, finals) => {
+				// During warmup, silently accumulate transcript
+				// (don't update UI — user hasn't committed to voice yet)
+				voiceDebug("preRecording transcript", { interim: interim.slice(0, 50), finals: finals.length });
+			},
+			onDone: (fullText, meta) => {
+				// Pre-recording ended (user released during warmup) — discard
+				voiceDebug("preRecording onDone (discarded)", { fullText: fullText.slice(0, 50) });
+				if (preRecordingSession === session) preRecordingSession = null;
+			},
+			onError: (err: string) => {
+				voiceDebug("preRecording onError (ignored)", { err });
+				if (preRecordingSession === session) preRecordingSession = null;
+			},
+		});
+
+		if (session) {
+			preRecordingSession = session;
+		}
+	}
+
+	function abortPreRecording() {
+		if (preRecordingSession) {
+			voiceDebug("abortPreRecording → discarding warmup audio");
+			abortSession(preRecordingSession);
+			preRecordingSession = null;
+		}
+	}
+
+	async function startStreamingRecording(): Promise<boolean> {
+		voiceDebug("startStreamingRecording called", { hasKey: !!resolveDeepgramApiKey(config), hasPreRecording: !!preRecordingSession });
+		setVoiceState("recording");
+
+		// ── Callbacks for the active recording session ──
+		const recordingCallbacks = {
+			onTranscript: (interim: string, finals: string[]) => {
 				// Live transcript update — this is the key UX feature
 				updateLiveTranscriptWidget(interim, finals);
 				updateVoiceStatus();
 			},
-			onDone: (fullText, meta) => {
+			onDone: (fullText: string, meta: { hadAudio: boolean; hadSpeech: boolean }) => {
 				voiceDebug("onDone callback", { fullText: fullText.slice(0, 100), meta, voiceState, spaceConsumed });
 				activeSession = null;
 				clearRecordingAnimTimer();
@@ -1025,7 +1067,7 @@ export default function (pi: ExtensionAPI) {
 				resetHoldState();
 				setVoiceState("idle");
 			},
-			onError: (err) => {
+			onError: (err: string) => {
 				activeSession = null;
 				clearRecordingAnimTimer();
 				if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
@@ -1041,7 +1083,25 @@ export default function (pi: ExtensionAPI) {
 				playSound("error");
 				setVoiceState("idle");
 			},
-		});
+		};
+
+		// ── Promote pre-recording or start fresh ──
+		let session: StreamingSession | null;
+		if (preRecordingSession) {
+			// Promote: swap callbacks so pre-recorded audio feeds into real UI
+			voiceDebug("Promoting pre-recording session to active");
+			session = preRecordingSession;
+			preRecordingSession = null;
+			session.onTranscript = recordingCallbacks.onTranscript;
+			session.onDone = recordingCallbacks.onDone;
+			session.onError = recordingCallbacks.onError;
+			// Flush any transcript already accumulated during warmup
+			if (session.finalizedParts.length > 0 || session.interimText) {
+				updateLiveTranscriptWidget(session.interimText, session.finalizedParts);
+			}
+		} else {
+			session = startStreamingSession(config, recordingCallbacks);
+		}
 
 		if (!session) {
 			// startStreamingSession returned null — reset ALL state
@@ -1137,6 +1197,7 @@ export default function (pi: ExtensionAPI) {
 		// Released during warmup — cancel (user held but not long enough)
 		if (voiceState === "warmup") {
 			clearHoldTimer();
+			abortPreRecording();
 			clearWarmupWidget();
 			hideWidget();
 			setVoiceState("idle");
@@ -1239,6 +1300,7 @@ export default function (pi: ExtensionAPI) {
 					if (voiceState === "warmup") {
 						const holdDuration = spaceDownTime ? Date.now() - spaceDownTime : 0;
 						clearHoldTimer();
+						abortPreRecording();
 						clearWarmupWidget();
 						hideWidget();
 						setVoiceState("idle");
@@ -1310,6 +1372,7 @@ export default function (pi: ExtensionAPI) {
 							holdConfirmed = true;
 							setVoiceState("warmup");
 							showWarmupWidget();
+							startPreRecording();
 
 							const alreadyElapsed = now - (spaceDownTime || now);
 							const remaining = Math.max(0, HOLD_THRESHOLD_MS - alreadyElapsed);
@@ -1419,6 +1482,7 @@ export default function (pi: ExtensionAPI) {
 
 						setVoiceState("warmup");
 						showWarmupWidget();
+						startPreRecording();
 
 						holdActivationTimer = setTimeout(() => {
 							holdActivationTimer = null;
@@ -1468,6 +1532,7 @@ export default function (pi: ExtensionAPI) {
 							holdConfirmed = true;
 							setVoiceState("warmup");
 							showWarmupWidget();
+							startPreRecording();
 
 							const alreadyElapsed = now - spaceDownTime;
 							const remaining = Math.max(0, HOLD_THRESHOLD_MS - alreadyElapsed);
@@ -1513,6 +1578,7 @@ export default function (pi: ExtensionAPI) {
 						// Gap too large → previous hold abandoned, new tap
 						clearHoldTimer();
 						clearReleaseTimer();
+						abortPreRecording();
 						clearWarmupWidget();
 						hideWidget();
 						const wasInWarmup = (voiceState as VoiceState) === "warmup";
@@ -1581,6 +1647,7 @@ export default function (pi: ExtensionAPI) {
 				// During recording: cancel recording and clear transcript
 				if (voiceState === "recording" || voiceState === "warmup" || voiceState === "finalizing") {
 					voiceDebug("Escape pressed → canceling voice");
+					abortPreRecording();
 					if (activeSession) {
 						abortSession(activeSession);
 						activeSession = null;
@@ -1651,6 +1718,7 @@ export default function (pi: ExtensionAPI) {
 			} else if (voiceState === "warmup") {
 				// Cancel warmup
 				clearHoldTimer();
+				abortPreRecording();
 				clearWarmupWidget();
 				hideWidget();
 				resetHoldState();
