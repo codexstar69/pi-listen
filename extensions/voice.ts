@@ -1343,6 +1343,16 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 
+			// ── Lumo companion keys ──
+			// Forward p/f/b/m/c/d/s/w to Lumo when editor is empty and not recording
+			if (voiceState === "idle" && data.length === 1 && "pfbmcdsw".includes(data)) {
+				const editorText = ctx?.hasUI ? (ctx.ui.getEditorText() || "") : "";
+				if (!editorText.trim()) {
+					lumoKeypress(data);
+					return { consume: true };
+				}
+			}
+
 			// ── SPACE handling ──
 			if (matchesKey(data, "space")) {
 				// ── ERROR COOLDOWN: block all voice activation for 5s after an error ──
