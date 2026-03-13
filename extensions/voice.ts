@@ -1607,7 +1607,15 @@ export default function (pi: ExtensionAPI) {
 				spaceDownTime = null;
 				clearHoldTimer();
 				await stopVoiceRecording();
+			} else if (voiceState === "warmup") {
+				// Cancel warmup
+				clearHoldTimer();
+				clearWarmupWidget();
+				hideWidget();
+				resetHoldState();
+				setVoiceState("idle");
 			}
+			// voiceState === "finalizing" → ignore (wait for transcript)
 		},
 	});
 
@@ -1781,8 +1789,10 @@ export default function (pi: ExtensionAPI) {
 					const testProc = spawn("rec", ["-q", "-r", "16000", "-c", "1", "-b", "16", "-d", "1", testFile], { stdio: "pipe" });
 					testProc.on("error", () => {}); // Prevent unhandled error crash
 					await new Promise<void>((resolve) => {
-						testProc.on("close", () => resolve());
-						setTimeout(() => { try { testProc.kill(); } catch {} resolve(); }, 2000);
+						let resolved = false;
+						const done = () => { if (!resolved) { resolved = true; resolve(); } };
+						testProc.on("close", done);
+						setTimeout(() => { try { testProc.kill(); } catch {} done(); }, 2000);
 					});
 					if (fs.existsSync(testFile)) {
 						const size = fs.statSync(testFile).size;
