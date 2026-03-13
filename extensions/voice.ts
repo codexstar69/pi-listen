@@ -125,13 +125,21 @@ let audioLevelSmoothed = 0;
 function updateAudioLevel(chunk: Buffer) {
 	const len = chunk.length;
 	if (len < 2) return;
-	// Use Int16Array view — avoids per-sample readInt16LE call overhead
-	const view = new Int16Array(chunk.buffer, chunk.byteOffset, len >> 1);
+	const samples = len >> 1;
 	let sum = 0;
-	for (let i = 0; i < view.length; i++) {
-		sum += view[i] * view[i];
+	// Use Int16Array view when alignment permits (2-byte aligned), else fall back
+	if ((chunk.byteOffset & 1) === 0) {
+		const view = new Int16Array(chunk.buffer, chunk.byteOffset, samples);
+		for (let i = 0; i < view.length; i++) {
+			sum += view[i] * view[i];
+		}
+	} else {
+		for (let i = 0; i < len - 1; i += 2) {
+			const s = chunk.readInt16LE(i);
+			sum += s * s;
+		}
 	}
-	const rms = Math.sqrt(sum / view.length);
+	const rms = Math.sqrt(sum / samples);
 	audioLevel = rms < 8000 ? rms / 8000 : 1;
 	audioLevelSmoothed = audioLevelSmoothed * 0.6 + audioLevel * 0.4;
 }
