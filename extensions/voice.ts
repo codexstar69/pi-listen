@@ -1099,16 +1099,13 @@ export default function (pi: ExtensionAPI) {
 		}
 		const blinking = now < _blinkUntil;
 
-		// Pupil dilation based on audio energy
 		const loud = level > 0.45;
 		const mid = level > 0.15;
-		const quiet = level <= 0.15;
 
-		// Mouth reacts to volume
-		if (blinking) return "╭(－ᴗ－)╮";
-		if (loud)     return "╭(◉▿◉)╮";
-		if (mid)      return "╭(●ᴗ●)╮";
-		return "╭(◕ᴗ◕)╮";
+		if (blinking) return "╭(－  －)╮";
+		if (loud)     return "╭(◉  ◉)╮";
+		if (mid)      return "╭(●  ●)╮";
+		return "╭(◕  ◕)╮";
 	}
 
 	// ─── Breathing Record Dot ───────────────────────────────────────────────
@@ -1137,10 +1134,10 @@ export default function (pi: ExtensionAPI) {
 		const startTime = Date.now();
 		const useCat = config.catAnimation !== false;
 		const catFrames = [
-			"╭(－ －)╮",
-			"╭(◕ ◕)╮",
-			"╭(● ●)╮",
-			"╭(◉ ◉)╮",
+			"╭(－  －)╮",
+			"╭(◕  ◕)╮",
+			"╭(●  ●)╮",
+			"╭(◉  ◉)╮",
 		];
 
 		const renderWarmup = () => {
