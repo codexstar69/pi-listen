@@ -1345,7 +1345,7 @@ export default function (pi: ExtensionAPI) {
 
 			// ── Lumo companion keys ──
 			// Forward p/f/b/m/c/d/s/w to Lumo when editor is empty and not recording
-			if (voiceState === "idle" && data.length === 1 && "pfbmcdsw".includes(data)) {
+			if (voiceState === "idle" && data.length === 1 && "pfbmcdswo".includes(data)) {
 				const editorText = ctx?.hasUI ? (ctx.ui.getEditorText() || "") : "";
 				if (!editorText.trim()) {
 					lumoKeypress(data);
@@ -1935,7 +1935,7 @@ export default function (pi: ExtensionAPI) {
 			// ── Lumo companion interactions ──
 			const lumoCommands: Record<string, string> = {
 				pet: "p", feed: "f", ball: "b", music: "m", color: "c",
-				sleep: "s", wake: "w", flip: "d",
+				sleep: "s", wake: "w", flip: "d", hide: "o",
 			};
 			if (lumoCommands[sub]) {
 				lumoKeypress(lumoCommands[sub]);

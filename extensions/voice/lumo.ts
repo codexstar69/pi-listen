@@ -455,6 +455,17 @@ function updatePhysics(dt: number) {
 	ffY = Math.sin(time * 2.0) * 0.3 + 0.1;
 	ffZ = posZ + Math.sin(time * 0.9) * 0.4;
 
+	// Weather particles
+	const isRaining = new Date().getMinutes() % 10 < 3 && !getWeatherAndTime().isNight;
+	if (isRaining && Math.random() < 0.3) {
+		const effectDim = Math.max(50, Math.min(W, H * 2.0));
+		const scale = 2.0 / effectDim;
+		particles.push({
+			x: (Math.random() - 0.5) * W * scale, y: -H * scale,
+			vx: 0.1, vy: 2.0 + Math.random(), char: "|", r: 150, g: 200, b: 255, life: 1.0, type: "rain",
+		});
+	}
+
 	// Ball physics
 	if (ballY !== -10 && !hasBall) {
 		ballVy += dt * 5.0;
@@ -471,7 +482,11 @@ function updatePhysics(dt: number) {
 		bounceY += (0 - bounceY) * dt * 5.0;
 		lookX += (0 - lookX) * dt * 3.0;
 		if (ballY !== -10 && !hasBall) { currentState = "fetching"; say("Ball!! 🎾", 2.0); }
-		else if (Math.random() < 0.005) { targetX = (Math.random() - 0.5) * 1.0; currentState = "walk"; isWalking = true; }
+		else if (Math.random() < 0.005) {
+			if (Math.random() < 0.15) targetX = (Math.random() > 0.5 ? 1 : -1) * 2.5; // occasional offscreen walk
+			else targetX = (Math.random() - 0.5) * 1.0;
+			currentState = "walk"; isWalking = true;
+		}
 		else if (Math.random() < 0.003) { currentState = "flip"; isFlipping = true; flipPhase = 0; say("Wheee! 💫"); }
 		else if (Math.random() < 0.002) { currentState = "chasing"; actionTimer = 3.0; }
 	}
@@ -480,7 +495,26 @@ function updatePhysics(dt: number) {
 		posX += dir * dt * 0.6;
 		bounceY = -Math.abs(Math.sin(time * 10)) * 0.08;
 		lookX = dir * 0.5;
-		if (Math.abs(posX - targetX) < 0.05) { isWalking = false; posX = targetX; bounceY = 0; lookX = 0; currentState = "idle"; }
+		if (Math.abs(posX - targetX) < 0.05) {
+			isWalking = false; posX = targetX; bounceY = 0; lookX = 0;
+			if (Math.abs(posX) >= 2.0) { currentState = "offscreen"; actionTimer = 2.0 + Math.random() * 3.0; }
+			else currentState = "idle";
+		}
+	}
+	if (currentState === "offscreen") {
+		if (actionTimer <= 0) { currentState = "peek"; actionTimer = 4.0; targetX = Math.sign(posX) * 1.35; isWalking = true; }
+	}
+	if (currentState === "peek") {
+		const dir = Math.sign(targetX - posX);
+		if (Math.abs(posX - targetX) > 0.05) {
+			posX += dir * dt * 0.4; bounceY = -Math.abs(Math.sin(time * 6)) * 0.05;
+			lookX = -Math.sign(posX) * 0.8;
+		} else {
+			isWalking = false; posX = targetX; bounceY = 0;
+			lookX = -Math.sign(posX) * 0.6 + Math.sin(time * 2) * 0.2;
+			if (actionTimer < 3.0 && speechTimer <= 0 && Math.random() < 0.05) say("Peekaboo! 👀", 2.0);
+			if (actionTimer <= 0) { currentState = "walk"; targetX = 0; isWalking = true; }
+		}
 	}
 	if (currentState === "chasing") {
 		const dir = Math.sign(ffX - posX);
@@ -562,6 +596,7 @@ function updatePhysics(dt: number) {
 		p.x += p.vx * dt; p.y += p.vy * dt;
 		if (p.type === "z") p.x += Math.sin(p.y * 4.0) * 0.005;
 		if (p.type === "note") p.x += Math.sin(p.y * 6.0) * 0.01;
+		if (p.type === "rain" && p.y > 0.6) { p.type = "splash"; p.char = "."; p.vy = -0.5; p.vx = (Math.random() - 0.5) * 0.5; p.life = 0.2; }
 		p.life -= dt * 0.8;
 		if (p.life <= 0) particles.splice(i, 1);
 	}
@@ -652,6 +687,37 @@ export function renderLumo(width: number, audioLevel: number, dt: number): strin
 		line += "\x1b[0m";
 		lines.push(line);
 	}
+
+	// ── Status bar with command hints ──
+	const border = "\x1b[38;5;239m";
+	const bar = "─".repeat(Math.max(0, W - 2));
+	lines.push(`${border}╭${bar}╮\x1b[0m`);
+
+	// Command hints
+	let menu = "[w] Wake  [p] Pet  [f] Feed  [b] Ball  [m] Music  [c] Color  [o] Hide  [s] Sleep  [d] Flip";
+	if (isTalking) menu = "🎤 Recording...  " + menu;
+	if (menu.length > Math.max(0, W - 6)) menu = menu.substring(0, Math.max(0, W - 9)) + "...";
+	lines.push(`${border}│\x1b[0m  \x1b[38;5;250m${menu}\x1b[0m`);
+
+	// State message
+	let stateMsg = "";
+	if (hunger < 30) stateMsg = "Pompom's tummy is rumbling... (Press f to feed)";
+	else if (energy < 20 && !isSleeping) stateMsg = "Pompom is looking very sleepy... (Press s to sleep)";
+	else if (currentState === "excited") stateMsg = "Pompom is super happy! ✨";
+	else if (isSleeping) stateMsg = "Pompom is dreaming on their favorite pillow... zZz";
+	else if (currentState === "walk") stateMsg = "Pompom is wandering around... 🐾";
+	else if (currentState === "chasing") stateMsg = "Pompom is chasing a firefly! ✨";
+	else if (currentState === "fetching") stateMsg = "Pompom is playing fetch! 🎾";
+	else if (currentState === "singing") stateMsg = "Pompom is singing a magical melody! 🎵";
+	else if (currentState === "peek") stateMsg = "Pompom is sneaking back in... 👀";
+	else if (currentState === "offscreen") stateMsg = "Where did Pompom go? 🤔";
+	else if (isTalking) stateMsg = "Pompom is listening to you speak... 🎤";
+	else stateMsg = "Pompom floats gently in the terminal.";
+	if (stateMsg.length > Math.max(0, W - 6)) stateMsg = stateMsg.substring(0, Math.max(0, W - 9)) + "...";
+	lines.push(`${border}│\x1b[0m  \x1b[38;5;153m${stateMsg}\x1b[0m`);
+
+	lines.push(`${border}╰${bar}╯\x1b[0m`);
+
 	return lines;
 }
 
@@ -680,6 +746,7 @@ export function lumoKeypress(key: string) {
 	else if (key === "m") { isSleeping = false; currentState = "singing"; actionTimer = 5.0; say("La la la~ 🎵"); }
 	else if (key === "c") { activeTheme = (activeTheme + 1) % themes.length; }
 	else if (key === "d") { currentState = "flip"; isFlipping = true; flipPhase = 0; isSleeping = false; }
+	else if (key === "o") { isSleeping = false; currentState = "walk"; targetX = (Math.random() > 0.5 ? 1 : -1) * 2.5; isWalking = true; }
 }
 
 /** Reset companion state */
@@ -693,5 +760,5 @@ export function resetLumo() {
 	foods.length = 0; particles.length = 0;
 }
 
-/** Current widget height in character rows */
-export const LUMO_HEIGHT = H;
+/** Current widget height in character rows (scene + 4 status bar lines) */
+export const LUMO_HEIGHT = H + 4;
