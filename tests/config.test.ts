@@ -100,6 +100,77 @@ describe("loadConfigWithSource", () => {
 		expect(result.source).toBe("project");
 		expect(result.config.scope).toBe("project");
 	});
+
+	test("preserves deepgramApiKey from settings", () => {
+		const cwd = makeTempDir();
+		const agentDir = path.join(cwd, "agent-home");
+		writeSettings(agentDir, "settings.json", {
+			version: 2,
+			enabled: true,
+			language: "en",
+			deepgramApiKey: "test-api-key-123",
+			onboarding: { completed: true, schemaVersion: 2 },
+		});
+
+		const result = loadConfigWithSource(cwd, { agentDir });
+
+		expect(result.config.deepgramApiKey).toBe("test-api-key-123");
+	});
+
+	test("handles corrupted settings file gracefully", () => {
+		const cwd = makeTempDir();
+		const agentDir = path.join(cwd, "agent-home");
+		const settingsPath = path.join(agentDir, "settings.json");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(settingsPath, "{ invalid json }}}}");
+
+		const result = loadConfigWithSource(cwd, { agentDir });
+
+		// Should fall back to defaults
+		expect(result.source).toBe("default");
+		expect(result.config.onboarding.completed).toBe(false);
+	});
+
+	test("handles empty voice object in settings", () => {
+		const cwd = makeTempDir();
+		const agentDir = path.join(cwd, "agent-home");
+		writeSettings(agentDir, "settings.json", {});
+
+		const result = loadConfigWithSource(cwd, { agentDir });
+
+		expect(result.source).toBe("global");
+		expect(result.config.enabled).toBe(true); // default
+		expect(result.config.onboarding.completed).toBe(false);
+	});
+
+	test("handles voice: null in settings by returning defaults", () => {
+		const cwd = makeTempDir();
+		const agentDir = path.join(cwd, "agent-home");
+		const settingsPath = path.join(agentDir, "settings.json");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(settingsPath, JSON.stringify({ voice: null }));
+
+		const result = loadConfigWithSource(cwd, { agentDir });
+
+		// voice: null is treated as "no config" → defaults
+		expect(result.source).toBe("default");
+		expect(result.config.enabled).toBe(true);
+		expect(result.config.onboarding.completed).toBe(false);
+	});
+
+	test("legacy config with backend only (no model) keeps onboarding incomplete", () => {
+		const cwd = makeTempDir();
+		const agentDir = path.join(cwd, "agent-home");
+		writeSettings(agentDir, "settings.json", {
+			enabled: true,
+			backend: "deepgram",
+			// no model field — partial legacy setup
+		});
+
+		const result = loadConfigWithSource(cwd, { agentDir });
+
+		expect(result.config.onboarding.completed).toBe(false);
+	});
 });
 
 describe("needsOnboarding", () => {
