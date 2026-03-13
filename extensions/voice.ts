@@ -9,7 +9,7 @@
  *              ↑         │
  *              └─────────┘  (rapid re-press recovery)
  *
- *   warmup:     User holds SPACE for ≥ HOLD_THRESHOLD_MS (800ms).
+ *   warmup:     User holds SPACE for ≥ HOLD_THRESHOLD_MS (1200ms).
  *               A "keep holding…" hint with countdown is shown. If released before
  *               the threshold, a normal space character is typed (or "hold longer" hint shown).
  *
@@ -29,7 +29,7 @@
  *      First SPACE press → enter warmup immediately (show countdown).
  *      Released < 300ms → tap → type a space.
  *      Released 300ms–2s → show "hold longer" hint.
- *      Held ≥ 0.8s → activate recording.
+ *      Held ≥ 1.2s → activate recording.
  *      True release event stops recording.
  *
  *   B) Non-Kitty (macOS Terminal, Ghostty on macOS):
@@ -37,8 +37,8 @@
  *      First SPACE press → record time, start release-detect timer (500ms).
  *      No more presses within 500ms → TAP → type a space.
  *      Rapid presses detected → user is HOLDING.
- *      After REPEAT_CONFIRM_COUNT (3) rapid presses → enter warmup.
- *      After HOLD_THRESHOLD_MS (800ms) from first press → activate recording.
+ *      After REPEAT_CONFIRM_COUNT (6) rapid presses → enter warmup.
+ *      After HOLD_THRESHOLD_MS (1200ms) from first press → activate recording.
  *      Gap > RELEASE_DETECT_MS (500ms) after RECORDING_GRACE_MS (1000ms) → stop.
  *
  *   ENTERPRISE FALLBACKS
@@ -53,7 +53,7 @@
  *     from "no speech detected" with distinct user messages.
  *
  * Activation:
- *   - Hold SPACE (≥800ms) → release to finalize
+ *   - Hold SPACE (≥1200ms) → release to finalize
  *   - Ctrl+Shift+V → toggle start/stop (always works)
 
  *
@@ -98,20 +98,27 @@ type VoiceState = "idle" | "warmup" | "recording" | "finalizing";
 const KEEPALIVE_INTERVAL_MS = 8000;
 const MAX_RECORDING_SECS = 120;
 
-// Hold-to-talk timing
-const HOLD_THRESHOLD_MS = 800;    // Must hold for 0.8s before voice activates
+// Hold-to-talk timing — Apple-style deliberate hold detection
+// The goal: typing normally should NEVER accidentally trigger voice.
+// Only a clearly intentional long press activates it.
+const HOLD_THRESHOLD_MS = 1200;   // Must hold for 1.2s before voice activates
+                                   // (Apple Caps Lock uses ~1s — we use slightly more to be safe)
 const RELEASE_DETECT_MS = 500;    // Gap in key-repeat that means "released" (non-Kitty)
                                    // macOS default InitialKeyRepeat is ~375ms, so 500ms
                                    // ensures the first repeat arrives before we decide "tap"
-const REPEAT_CONFIRM_COUNT = 3;   // Need this many rapid repeat presses to confirm "holding"
+const REPEAT_CONFIRM_COUNT = 6;   // Need this many rapid repeat presses to confirm "holding"
+                                   // At ~30ms repeat rate, 6 presses ≈ 180ms of continuous holding
+                                   // This filters out brief pauses while typing
 const REPEAT_CONFIRM_MS = 700;    // Max gap between presses to count as rapid repeat
                                   // macOS initial key-repeat delay is ~417-583ms depending on settings
                                    // Must be > macOS InitialKeyRepeat (~375ms)
-const RECORDING_GRACE_MS = 600;   // After recording starts, ignore release for this long
+const RECORDING_GRACE_MS = 800;   // After recording starts, ignore release for this long
                                    // Covers async gap from holdActivationTimer → startVoiceRecording
 const RELEASE_DETECT_RECORDING_MS = 250; // During active recording, gap before we consider
                                           // the key released (non-Kitty only). macOS Terminal
                                           // key repeat fires every ~30-50ms. 250ms gap = released.
+const TYPING_COOLDOWN_MS = 400;   // If ANY non-space key was pressed within this window,
+                                   // ignore space holds (user is typing, not activating voice)
 const CORRUPTION_GUARD_MS = 200;  // Min gap between stop and restart
 
 // Debug logging — set PI_VOICE_DEBUG=1 to enable
@@ -477,6 +484,7 @@ export default function (pi: ExtensionAPI) {
 	let lastSpacePressTime = 0;       // Timestamp of last space press event
 	let holdConfirmed = false;        // True once we've confirmed user is holding (not tapping)
 	let errorCooldownUntil = 0;       // After an error, block re-activation until this timestamp
+	let lastNonSpaceKeyTime = 0;      // Timestamp of last non-space keypress (typing cooldown)
 
 	// ─── Recording History ───────────────────────────────────────────────────
 
@@ -1100,7 +1108,7 @@ export default function (pi: ExtensionAPI) {
 	//      2. No more presses within RELEASE_DETECT_MS (500ms) → TAP → type space.
 	//      3. Rapid presses arrive → user is HOLDING. After REPEAT_CONFIRM_COUNT
 	//         rapid presses → enter warmup, show countdown.
-	//      4. After HOLD_THRESHOLD_MS (800ms) from first press → start recording.
+	//      4. After HOLD_THRESHOLD_MS (1200ms) from first press → start recording.
 	//      5. Recording continues while key-repeat events arrive.
 	//         Gap > RELEASE_DETECT_MS after RECORDING_GRACE_MS → stop.
 	//
@@ -1181,11 +1189,30 @@ export default function (pi: ExtensionAPI) {
 		terminalInputUnsub = ctx.ui.onTerminalInput((data: string) => {
 			if (!config.enabled) return undefined;
 
+			// ── Track non-space keypresses for typing cooldown ──
+			// If user was just typing (non-space key within TYPING_COOLDOWN_MS),
+			// don't let space holds activate voice — they're just typing.
+			if (!matchesKey(data, "space") && !isKeyRelease(data) && !isKeyRepeat(data)) {
+				// Regular keypress that isn't space — user is typing
+				if (data.length > 0 && data.charCodeAt(0) >= 32) {
+					lastNonSpaceKeyTime = Date.now();
+				}
+			}
+
 			// ── SPACE handling ──
 			if (matchesKey(data, "space")) {
 				// ── ERROR COOLDOWN: block all voice activation for 5s after an error ──
 				if (errorCooldownUntil > Date.now()) {
 					// During cooldown, let space through as a normal character
+					return undefined;
+				}
+
+				// ── TYPING COOLDOWN: if user was just typing, let space through ──
+				// Apple-style: if a non-space key was pressed recently, this space
+				// is part of typing (e.g., "hello world"), not a voice activation.
+				// Only applies to NEW activations — don't interrupt active recording.
+				if (voiceState === "idle" && !spaceConsumed &&
+					lastNonSpaceKeyTime > 0 && (Date.now() - lastNonSpaceKeyTime) < TYPING_COOLDOWN_MS) {
 					return undefined;
 				}
 
