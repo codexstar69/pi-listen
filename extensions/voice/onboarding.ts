@@ -9,10 +9,6 @@ export interface OnboardingResult {
 	summaryLines: string[];
 }
 
-export interface FirstRunDecision {
-	action: "start" | "later";
-}
-
 export function finalizeOnboardingConfig(
 	config: VoiceConfig,
 	options: { validated: boolean; source: "first-run" | "setup-command" },
@@ -45,15 +41,6 @@ export function finalizeOnboardingConfig(
 			skippedAt: undefined,
 		},
 	};
-}
-
-export async function promptFirstRunOnboarding(ctx: VoiceUiContext): Promise<FirstRunDecision> {
-	const choice = await ctx.ui.select("Set up pi-voice now?", [
-		"Start voice setup",
-		"Remind me later",
-	]);
-
-	return { action: choice === "Start voice setup" ? "start" : "later" };
 }
 
 export async function runVoiceOnboarding(

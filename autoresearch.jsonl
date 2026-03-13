@@ -1,1 +1,2 @@
 {"type":"config","name":"pi-voice Enterprise Quality Audit","metricName":"issues_fixed","metricUnit":"","bestDirection":"higher"}
+{"run":1,"commit":"e5e45f7","metric":0,"metrics":{},"status":"keep","description":"Baseline: 14 tests pass, typecheck clean, 1921 lines voice.ts","timestamp":1773373914031,"segment":0}

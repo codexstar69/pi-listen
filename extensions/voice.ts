@@ -53,7 +53,7 @@
  *     from "no speech detected" with distinct user messages.
  *
  * Activation:
- *   - Hold SPACE (≥500ms) → release to finalize
+ *   - Hold SPACE (≥800ms) → release to finalize
  *   - Ctrl+Shift+V → toggle start/stop (always works)
 
  *
@@ -127,13 +127,13 @@ let audioLevelSmoothed = 0;
 function updateAudioLevel(chunk: Buffer) {
 	const len = chunk.length;
 	if (len < 2) return;
+	// Use Int16Array view — avoids per-sample readInt16LE call overhead
+	const view = new Int16Array(chunk.buffer, chunk.byteOffset, len >> 1);
 	let sum = 0;
-	const samples = len >> 1;
-	for (let i = 0; i < len - 1; i += 2) {
-		const sample = chunk.readInt16LE(i);
-		sum += sample * sample;
+	for (let i = 0; i < view.length; i++) {
+		sum += view[i] * view[i];
 	}
-	const rms = Math.sqrt(sum / samples);
+	const rms = Math.sqrt(sum / view.length);
 	audioLevel = rms < 8000 ? rms / 8000 : 1;
 	audioLevelSmoothed = audioLevelSmoothed * 0.6 + audioLevel * 0.4;
 }
@@ -146,9 +146,15 @@ function voiceDebug(...args: unknown[]) {
 	process.stderr.write(line);
 }
 
+// Cache command existence checks — avoid sync spawnSync on every recording start
+const _cmdExistsCache = new Map<string, boolean>();
 function commandExists(cmd: string): boolean {
+	const cached = _cmdExistsCache.get(cmd);
+	if (cached !== undefined) return cached;
 	const which = process.platform === "win32" ? "where" : "which";
-	return spawnSync(which, [cmd], { stdio: "pipe", timeout: 3000 }).status === 0;
+	const result = spawnSync(which, [cmd], { stdio: "pipe", timeout: 3000 }).status === 0;
+	_cmdExistsCache.set(cmd, result);
+	return result;
 }
 
 // ─── Deepgram WebSocket Streaming ────────────────────────────────────────────
@@ -334,8 +340,10 @@ function startStreamingSession(
 	});
 
 	recProc.on("close", (code, signal) => {
-		voiceDebug("SoX process closed", { code, signal, wsClosed: session.closed, wsState: ws.readyState });
-		if (ws.readyState === WebSocket.OPEN) {
+		voiceDebug("SoX process closed", { code, signal, closed: session.closed, wsState: ws.readyState });
+		// Only send CloseStream if the session isn't already being torn down
+		// (stopStreamingSession sends its own CloseStream before killing SoX)
+		if (!session.closed && ws.readyState === WebSocket.OPEN) {
 			try { ws.send(JSON.stringify({ type: "CloseStream" })); } catch {}
 		}
 	});
@@ -600,18 +608,23 @@ export default function (pi: ExtensionAPI) {
 
 	// ─── Sound Feedback ──────────────────────────────────────────────────────
 
+	// Pre-resolve sound paths once at load time (not per-play)
+	const _soundPaths: Record<string, string | null> = {};
+	for (const [type, file] of Object.entries({
+		start: "/System/Library/Sounds/Tink.aiff",
+		stop: "/System/Library/Sounds/Pop.aiff",
+		error: "/System/Library/Sounds/Basso.aiff",
+	})) {
+		_soundPaths[type] = fs.existsSync(file) ? file : null;
+	}
+
 	function playSound(type: "start" | "stop" | "error") {
-		// Use macOS system sounds — lightweight, no dependencies
+		const file = _soundPaths[type];
+		if (!file) return;
 		try {
-			const soundMap: Record<string, string> = {
-				start: "/System/Library/Sounds/Tink.aiff",
-				stop: "/System/Library/Sounds/Pop.aiff",
-				error: "/System/Library/Sounds/Basso.aiff",
-			};
-			const soundFile = soundMap[type];
-			if (soundFile && fs.existsSync(soundFile)) {
-				spawn("afplay", [soundFile], { stdio: "ignore", detached: true }).unref();
-			}
+			const proc = spawn("afplay", [file], { stdio: "ignore", detached: true });
+			proc.unref();
+			proc.on("error", () => {}); // Prevent unhandled error crash
 		} catch {}
 	}
 
@@ -681,15 +694,25 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function clearRecordingAnimTimer() {
-		const timer = (showRecordingWidget as any)?._animTimer;
-		if (timer) {
-			clearInterval(timer);
-			(showRecordingWidget as any)._animTimer = null;
+		if (_recWidgetAnimTimer) {
+			clearInterval(_recWidgetAnimTimer);
+			_recWidgetAnimTimer = null;
 		}
 	}
 
 	function hideWidget() {
 		if (ctx?.hasUI) ctx.ui.setWidget("voice-recording", undefined);
+	}
+
+	/** Reset all hold-to-talk state to idle. Call after any recording stop/error/cancel. */
+	function resetHoldState(opts?: { cooldown?: number }) {
+		spaceConsumed = false;
+		spaceDownTime = null;
+		spacePressCount = 0;
+		holdConfirmed = false;
+		clearHoldTimer();
+		clearReleaseTimer();
+		if (opts?.cooldown) errorCooldownUntil = Date.now() + opts.cooldown;
 	}
 
 	function voiceCleanup() {
@@ -706,11 +729,8 @@ export default function (pi: ExtensionAPI) {
 			activeSession = null;
 		}
 
-		spaceConsumed = false;
-		spaceDownTime = null;
-		spacePressCount = 0;
+		resetHoldState();
 		lastSpacePressTime = 0;
-		holdConfirmed = false;
 		errorCooldownUntil = 0;
 		editorTextBeforeVoice = "";
 		dictationMode = false;
@@ -863,18 +883,19 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	// ─── Recording Widget ───────────────────────────────────────────────
+	let _recWidgetFrame = 0;
+	let _recWidgetAnimTimer: ReturnType<typeof setInterval> | null = null;
+
 	function showRecordingWidget() {
 		if (!ctx?.hasUI) return;
 
-		(showRecordingWidget as any)._frame = 0;
-		(showRecordingWidget as any)._liveText = "";
+		_recWidgetFrame = 0;
 
-		const animTimer = setInterval(() => {
-			(showRecordingWidget as any)._frame = ((showRecordingWidget as any)._frame || 0) + 1;
-			showRecordingWidgetFrame((showRecordingWidget as any)._frame);
+		_recWidgetAnimTimer = setInterval(() => {
+			_recWidgetFrame++;
+			showRecordingWidgetFrame(_recWidgetFrame);
 		}, 120);
 
-		(showRecordingWidget as any)._animTimer = animTimer;
 		showRecordingWidgetFrame(0);
 	}
 
@@ -979,13 +1000,7 @@ export default function (pi: ExtensionAPI) {
 					hideWidget();
 					playSound("error");
 					// Full state reset on empty result
-					spaceConsumed = false;
-					spaceDownTime = null;
-					spacePressCount = 0;
-					holdConfirmed = false;
-					clearHoldTimer();
-					clearReleaseTimer();
-					errorCooldownUntil = Date.now() + 3000; // Block re-activation for 3s
+					resetHoldState({ cooldown: 3000 });
 					if (!meta.hadAudio) {
 						ctx?.ui.notify("Microphone captured no audio. Check mic permissions.", "error");
 					} else if (!meta.hadSpeech) {
@@ -1028,12 +1043,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				playSound("stop");
 				// Full state reset on successful completion
-				spaceConsumed = false;
-				spaceDownTime = null;
-				spacePressCount = 0;
-				holdConfirmed = false;
-				clearHoldTimer();
-				clearReleaseTimer();
+				resetHoldState();
 				setVoiceState("idle");
 			},
 			onError: (err) => {
@@ -1044,12 +1054,7 @@ export default function (pi: ExtensionAPI) {
 				// ── STOP THE LOOP ──
 				// On error, fully reset ALL hold state AND set a cooldown
 				// so incoming key-repeat events can't re-trigger activation.
-				spaceConsumed = false;
-				spaceDownTime = null;
-				spacePressCount = 0;
-				holdConfirmed = false;
-				clearHoldTimer();
-				clearReleaseTimer();
+				resetHoldState();
 				clearWarmupWidget();
 				errorCooldownUntil = Date.now() + 5000; // Block re-activation for 5 seconds
 
@@ -1061,12 +1066,7 @@ export default function (pi: ExtensionAPI) {
 
 		if (!session) {
 			// startStreamingSession returned null — reset ALL state
-			spaceConsumed = false;
-			spaceDownTime = null;
-			spacePressCount = 0;
-			holdConfirmed = false;
-			clearHoldTimer();
-			clearReleaseTimer();
+			resetHoldState();
 			setVoiceState("idle");
 			return false;
 		}
@@ -1178,10 +1178,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			voiceDebug("  → stopping recording");
-			spaceConsumed = false;
-			spaceDownTime = null;
-			spacePressCount = 0;
-			holdConfirmed = false;
+			resetHoldState();
 			stopVoiceRecording();
 		}
 	}
@@ -1268,10 +1265,7 @@ export default function (pi: ExtensionAPI) {
 
 					// Released during recording → stop
 					if (spaceConsumed && voiceState === "recording") {
-						spaceConsumed = false;
-						spaceDownTime = null;
-						spacePressCount = 0;
-						holdConfirmed = false;
+						resetHoldState();
 						stopVoiceRecording();
 						return { consume: true };
 					}
@@ -1327,19 +1321,12 @@ export default function (pi: ExtensionAPI) {
 									voiceDebug("holdActivationTimer fired → starting recording (Kitty repeat path)");
 									startVoiceRecording().then((ok) => {
 										if (!ok) {
-											spaceConsumed = false;
-											spaceDownTime = null;
-											spacePressCount = 0;
-											holdConfirmed = false;
+											resetHoldState();
 											setVoiceState("idle");
 										}
 									}).catch((err) => {
 										voiceDebug('startVoiceRecording THREW', { error: String(err) });
-										spaceConsumed = false;
-										spaceDownTime = null;
-										spacePressCount = 0;
-										holdConfirmed = false;
-										errorCooldownUntil = Date.now() + 5000;
+										resetHoldState({ cooldown: 5000 });
 										setVoiceState('idle');
 									});
 								} else {
@@ -1432,19 +1419,12 @@ export default function (pi: ExtensionAPI) {
 								voiceDebug("holdActivationTimer fired → starting recording (Kitty path)");
 								startVoiceRecording().then((ok) => {
 									if (!ok) {
-										spaceConsumed = false;
-										spaceDownTime = null;
-										spacePressCount = 0;
-										holdConfirmed = false;
+										resetHoldState();
 										setVoiceState("idle");
 									}
 								}).catch((err) => {
 									voiceDebug('startVoiceRecording THREW', { error: String(err) });
-									spaceConsumed = false;
-									spaceDownTime = null;
-									spacePressCount = 0;
-									holdConfirmed = false;
-									errorCooldownUntil = Date.now() + 5000;
+									resetHoldState({ cooldown: 5000 });
 									setVoiceState('idle');
 								});
 							} else {
@@ -1496,10 +1476,7 @@ export default function (pi: ExtensionAPI) {
 									voiceDebug("holdActivationTimer fired → starting recording (non-Kitty)");
 									startVoiceRecording().then((ok) => {
 										if (!ok) {
-											spaceConsumed = false;
-											spaceDownTime = null;
-											spacePressCount = 0;
-											holdConfirmed = false;
+											resetHoldState();
 											setVoiceState("idle");
 										}
 										// Do NOT re-arm release detect here!
@@ -1508,11 +1485,7 @@ export default function (pi: ExtensionAPI) {
 										// the timer fires during the async gap.
 									}).catch((err) => {
 										voiceDebug('startVoiceRecording THREW', { error: String(err) });
-										spaceConsumed = false;
-										spaceDownTime = null;
-										spacePressCount = 0;
-										holdConfirmed = false;
-										errorCooldownUntil = Date.now() + 5000;
+										resetHoldState({ cooldown: 5000 });
 										setVoiceState('idle');
 									});
 								} else {
@@ -1610,10 +1583,7 @@ export default function (pi: ExtensionAPI) {
 					if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
 					// Restore editor text to what it was before recording
 					if (ctx?.hasUI) ctx.ui.setEditorText(editorTextBeforeVoice);
-					spaceConsumed = false;
-					spaceDownTime = null;
-					spacePressCount = 0;
-					holdConfirmed = false;
+					resetHoldState();
 					playSound("error");
 					setVoiceState("idle");
 					return { consume: true };
