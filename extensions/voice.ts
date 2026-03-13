@@ -2311,23 +2311,18 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 
-		// If no separate model found, fall back to sendUserMessage (non-blocking)
+		// If no separate model found, notify user instead of interrupting main agent
 		if (!btwModel) {
-			voiceDebug("BTW: no separate model available, falling back to sendUserMessage");
+			voiceDebug("BTW: no separate model available");
 			const exchange: BtwExchange = {
 				question: message,
-				answer: "(Routed to main agent — no separate BTW model available)",
+				answer: "(No lightweight model available for BTW. Use /btw:inject to send to main agent when it's idle.)",
 				timestamp: Date.now(),
 			};
 			btwThread.push(exchange);
 			pi.appendEntry("btw", exchange);
 			updateBtwWidget();
-
-			// Use followUp so it waits for the main agent to finish
-			pi.sendUserMessage(
-				`[BTW side question — answer briefly]: ${message}`,
-				{ deliverAs: "followUp" },
-			);
+			ctx.ui.notify("BTW: no side model found. Use /btw:inject when agent is idle.", "warning");
 			return;
 		}
 
@@ -2375,21 +2370,16 @@ export default function (pi: ExtensionAPI) {
 			pi.appendEntry("btw", exchange);
 			updateBtwWidget();
 		} catch (err: any) {
-			voiceDebug("BTW: streaming failed, falling back", { error: err.message });
+			voiceDebug("BTW: streaming failed", { error: err.message });
 			const exchange: BtwExchange = {
 				question: message,
-				answer: `(BTW failed: ${err.message}. Sent to main agent.)`,
+				answer: `(BTW failed: ${err.message}. Use /btw:inject to send to main agent when idle.)`,
 				timestamp: Date.now(),
 			};
 			btwThread.push(exchange);
 			pi.appendEntry("btw", exchange);
 			updateBtwWidget();
-
-			// Fall back to main agent via followUp (non-interrupting)
-			pi.sendUserMessage(
-				`[BTW question — answer briefly]: ${message}`,
-				{ deliverAs: "followUp" },
-			);
+			ctx?.ui.notify(`BTW error: ${err.message}. Use /btw:inject when agent is idle.`, "warning");
 		}
 	}
 
