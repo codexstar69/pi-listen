@@ -698,36 +698,7 @@ export default function (pi: ExtensionAPI) {
 		recordingHistory.unshift({ text, timestamp: Date.now(), duration, target, mode });
 		if (recordingHistory.length > MAX_HISTORY) recordingHistory.pop();
 
-		// ─── Game: Award XP + handle battle ──────────
-		const words = text.split(/\s+/).filter(w => w.length > 0).length;
-		// Streak: if last session was within 10 minutes
-		if (Date.now() - pet.lastSessionTime < 600_000 && pet.lastSessionTime > 0) {
-			pet.streak++;
-		} else {
-			pet.streak = 1;
-		}
 
-		// Deal damage in active battle
-		if (battle.active && !battle.defeated) {
-			dealDamage(words, audioLevelSmoothed);
-			if (battle.defeated) {
-				// Add battle XP reward
-				pet.xp += battle.xpReward;
-			}
-		}
-
-		const result = addXP(words, duration);
-		if (result.evolved && ctx?.hasUI) {
-			const evoNames = ["Egg", "Baby", "Teen", "Adult", "Legendary"];
-			ctx.ui.notify(`✨ ${pet.name} evolved into ${evoNames[result.newEvolution]}! (Lv.${result.newLevel})`, "info");
-		} else if (result.leveledUp && ctx?.hasUI) {
-			ctx.ui.notify(`⬆ ${pet.name} reached Lv.${result.newLevel}!`, "info");
-		}
-
-		// Reset battle after recording ends
-		if (battle.active && battle.defeated) {
-			setTimeout(() => { battle.active = false; }, 3000);
-		}
 	}
 
 	// ─── Continuous Dictation Mode ───────────────────────────────────────────
@@ -1062,48 +1033,13 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════
-	// ─── TAMAGOTCHI PET + POKEMON BATTLE SYSTEM ─────────────────────────
-	// Your voice is alive. Every recording feeds your pet, earns XP, and
-	// triggers wild encounters. The terminal becomes a living game world.
-	// ═══════════════════════════════════════════════════════════════════════
-
-	// ─── Pet State (persists in memory per session) ─────────────────────
-	interface PetState {
-		name: string;
-		level: number;
-		xp: number;
-		xpToNext: number;
-		mood: "sleeping" | "happy" | "excited" | "ecstatic";
-		totalWords: number;
-		totalSessions: number;
-		streak: number;
-		lastSessionTime: number;
-		evolution: number; // 0=egg, 1=baby, 2=teen, 3=adult, 4=legendary
-		encounters: number;
-	}
-
-	const pet: PetState = {
-		name: "Pip",
-		level: 1,
-		xp: 0,
-		xpToNext: 50,
-		mood: "sleeping",
-		totalWords: 0,
-		totalSessions: 0,
-		streak: 0,
-		lastSessionTime: 0,
-		evolution: 0,
-		encounters: 0,
-	};
-
-	// ─── Creature: just a cute face ─────────────────────────────────────
-	// ( ◕ ᴗ ◕ ) — that's it. Eyes react to voice. Nothing else.
+	// ─── Face: (◕▽◕) — eyes react to voice ─────────────────────────────
 
 	let _nextBlinkAt = Date.now() + 3000 + Math.random() * 2000;
 	let _blinkUntil = 0;
 	let _doubleBlink = false;
 
-	function getCreature(_evolution: number, _mood: string, audioLevel: number): string {
+	function getFace(audioLevel: number): string {
 		const now = Date.now();
 
 		// ── Natural blink ──
@@ -1134,99 +1070,6 @@ export default function (pi: ExtensionAPI) {
 		return `(${eyes})`;
 	}
 
-	// ─── XP & Level System ──────────────────────────────────────────────
-	interface LevelUpResult {
-		leveledUp: boolean;
-		evolved: boolean;
-		newLevel: number;
-		newEvolution: number;
-	}
-
-	function addXP(words: number, duration: number): LevelUpResult {
-		const wordXP = words * 2;
-		const durationXP = Math.floor(duration / 5) * 3;
-		const streakBonus = Math.min(pet.streak, 5) * 5;
-		const totalXP = wordXP + durationXP + streakBonus;
-
-		pet.xp += totalXP;
-		pet.totalWords += words;
-		pet.totalSessions++;
-		pet.lastSessionTime = Date.now();
-
-		let leveledUp = false;
-		let evolved = false;
-
-		while (pet.xp >= pet.xpToNext) {
-			pet.xp -= pet.xpToNext;
-			pet.level++;
-			pet.xpToNext = Math.floor(50 * Math.pow(1.3, pet.level - 1));
-			leveledUp = true;
-
-			// Evolution thresholds
-			const newEvo = pet.level >= 20 ? 4 : pet.level >= 12 ? 3 : pet.level >= 6 ? 2 : pet.level >= 2 ? 1 : 0;
-			if (newEvo > pet.evolution) {
-				pet.evolution = newEvo;
-				evolved = true;
-			}
-		}
-
-		return { leveledUp, evolved, newLevel: pet.level, newEvolution: pet.evolution };
-	}
-
-	// ─── Pokemon Battle Encounter ───────────────────────────────────────
-	interface BattleState {
-		active: boolean;
-		enemyName: string;
-		enemyHP: number;
-		enemyMaxHP: number;
-		playerDamage: number;
-		combo: number;
-		crit: boolean;
-		defeated: boolean;
-		xpReward: number;
-	}
-
-	const wildCreatures = [
-		"Wild BUG", "Wild TYPO", "Wild SEGFAULT", "Wild NULL",
-		"Wild DEADLOCK", "Wild RACE_COND", "Wild MEM_LEAK", "Wild INF_LOOP",
-		"Wild OFF_BY_1", "Wild STACK_OVF", "Wild PANIC", "Wild SYNTAX_ERR",
-		"Wild TIMEOUT", "Wild 404", "Wild CORS", "Wild FLAKY_TEST",
-	];
-
-	let battle: BattleState = {
-		active: false, enemyName: "", enemyHP: 0, enemyMaxHP: 0,
-		playerDamage: 0, combo: 0, crit: false, defeated: false, xpReward: 0,
-	};
-
-	function triggerEncounter(): void {
-		const idx = Math.floor(Math.random() * wildCreatures.length);
-		const baseHP = 20 + pet.level * 8 + Math.floor(Math.random() * 20);
-		battle = {
-			active: true,
-			enemyName: wildCreatures[idx],
-			enemyHP: baseHP,
-			enemyMaxHP: baseHP,
-			playerDamage: 0,
-			combo: 0,
-			crit: false,
-			defeated: false,
-			xpReward: 10 + pet.level * 3,
-		};
-		pet.encounters++;
-	}
-
-	function dealDamage(wordCount: number, audioLevel: number): void {
-		if (!battle.active || battle.defeated) return;
-		const baseDmg = wordCount * 2 + Math.floor(audioLevel * 15);
-		battle.crit = Math.random() < 0.15;
-		const dmg = battle.crit ? baseDmg * 3 : baseDmg;
-		battle.playerDamage = dmg;
-		battle.combo++;
-		battle.enemyHP = Math.max(0, battle.enemyHP - dmg);
-		if (battle.enemyHP <= 0) {
-			battle.defeated = true;
-		}
-	}
 
 	// ─── Braille Waveform ───────────────────────────────────────────────
 	const _noiseTable: number[] = [];
@@ -1278,27 +1121,11 @@ export default function (pi: ExtensionAPI) {
 		return "○";
 	}
 
-	// ─── XP Bar Builder ─────────────────────────────────────────────────
-	function buildXPBar(current: number, max: number, width: number): string {
-		const filled = Math.round((current / max) * width);
-		return "█".repeat(Math.min(filled, width)) + "░".repeat(Math.max(0, width - filled));
-	}
-
-	// ─── HP Bar Builder ─────────────────────────────────────────────────
-	function buildHPBar(current: number, max: number, width: number): string {
-		const ratio = current / max;
-		const filled = Math.round(ratio * width);
-		const bar = "█".repeat(Math.min(filled, width)) + "░".repeat(Math.max(0, width - filled));
-		return bar;
-	}
-
 	// ─── Warmup Widget ──────────────────────────────────────────────────
 	function showWarmupWidget() {
 		if (!ctx?.hasUI) return;
 
 		const startTime = Date.now();
-		// Wake up the pet
-		pet.mood = "happy";
 
 		const renderWarmup = () => {
 			if (!ctx?.hasUI) return;
@@ -1310,13 +1137,13 @@ export default function (pi: ExtensionAPI) {
 					invalidate() {},
 					render(width: number): string[] {
 						const maxW = Math.max(0, Math.min(width - 4, 72));
-						const creature = getCreature(pet.evolution, pet.mood, 0);
+						const face = getFace(0);
 						const meterLen = Math.max(4, Math.min(10, maxW - 30));
 						const filled = Math.round(progress * meterLen);
 						const meter = theme.fg("accent", "⣿".repeat(filled)) + theme.fg("muted", "⠁".repeat(meterLen - filled));
 						const hint = theme.fg("dim", progress < 1 ? "hold…" : "ready!");
 						const out: string[] = [];
-						out.push(` ${theme.fg("accent", creature)}  ${meter} ${hint}`);
+						out.push(` ${theme.fg("accent", face)}  ${meter} ${hint}`);
 						return out;
 					},
 				};
@@ -1333,17 +1160,11 @@ export default function (pi: ExtensionAPI) {
 
 		(showRecordingWidget as any)._frame = 0;
 		(showRecordingWidget as any)._liveText = "";
-		pet.mood = "excited";
-
-		// 30% chance to trigger a wild encounter
-		if (Math.random() < 0.30 && !battle.active) {
-			triggerEncounter();
-		}
 
 		const animTimer = setInterval(() => {
 			(showRecordingWidget as any)._frame = ((showRecordingWidget as any)._frame || 0) + 1;
 			showRecordingWidgetFrame(target, (showRecordingWidget as any)._frame);
-		}, 100); // faster tick for game feel
+		}, 120);
 
 		(showRecordingWidget as any)._animTimer = animTimer;
 		showRecordingWidgetFrame(target, 0);
@@ -1361,34 +1182,13 @@ export default function (pi: ExtensionAPI) {
 					const mins = Math.floor(elapsed / 60);
 					const secs = elapsed % 60;
 					const timeStr = mins > 0 ? `${mins}:${String(secs).padStart(2, "0")}` : `${secs}s`;
-					const wave = buildPremiumWave(frame, Math.max(6, Math.min(12, maxW - 52)), audioLevelSmoothed);
+					const wave = buildPremiumWave(frame, Math.max(6, Math.min(12, maxW - 30)), audioLevelSmoothed);
 					const hint = target === "btw"
 						? theme.fg("dim", "Ctrl+Shift+B")
 						: theme.fg("dim", "⌴ release");
+					const face = getFace(audioLevelSmoothed);
 
-					// Face reacts to audio
-					pet.mood = audioLevelSmoothed > 0.4 ? "ecstatic" : audioLevelSmoothed > 0.12 ? "excited" : "happy";
-					const creature = getCreature(pet.evolution, pet.mood, audioLevelSmoothed);
-
-					const out: string[] = [];
-
-					if (battle.active && !battle.defeated) {
-						const hpBar = buildHPBar(battle.enemyHP, battle.enemyMaxHP, 10);
-						const hpColor = (battle.enemyHP / battle.enemyMaxHP) > 0.5 ? "success" : (battle.enemyHP / battle.enemyMaxHP) > 0.2 ? "warning" : "error";
-						out.push(` ${theme.fg("error", "⚔")} ${theme.fg("dim", battle.enemyName)} ${theme.fg(hpColor as any, hpBar)}${battle.combo > 1 ? theme.fg("warning", ` x${battle.combo}`) : ""}`);
-						out.push(` ${theme.fg("error", getRecordDot())} ${theme.fg("accent", creature)}  ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)}`);
-						return out;
-					}
-
-					if (battle.active && battle.defeated) {
-						out.push(` ${theme.fg("success", "✦")} ${theme.fg("success", "VICTORY!")} ${theme.fg("warning", `+${battle.xpReward}XP`)}`);
-						out.push(` ${theme.fg("accent", creature)}  ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)}`);
-						return out;
-					}
-
-					// Normal — face + wave + time
-					out.push(` ${theme.fg("error", getRecordDot())} ${theme.fg("accent", creature)}  ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`);
-					return out;
+					return [` ${theme.fg("error", getRecordDot())} ${theme.fg("accent", face)}  ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`];
 				},
 			};
 		}, { placement: "aboveEditor" });
