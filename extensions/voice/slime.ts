@@ -110,15 +110,21 @@ function updatePhysics(dt: number, audioLevel: number) {
 		targets[2].y += 1.5;
 	}
 
-	// Spring physics
+	// Spring physics — sub-step to keep stable at low framerates
 	const K = 150.0;
 	const D = 12.0;
-	for (let i = 0; i < 3; i++) {
-		for (const prop of ["x", "y", "rx", "ry", "rot"] as const) {
-			const force = (targets[i][prop] - blobs[i][prop]) * K;
-			vels[i][prop] += force * dt;
-			vels[i][prop] -= vels[i][prop] * D * dt;
-			blobs[i][prop] += vels[i][prop] * dt;
+	const SUB_DT = 0.016; // ~60fps physics regardless of render rate
+	let remaining = dt;
+	while (remaining > 0) {
+		const step = Math.min(remaining, SUB_DT);
+		remaining -= step;
+		for (let i = 0; i < 3; i++) {
+			for (const prop of ["x", "y", "rx", "ry", "rot"] as const) {
+				const force = (targets[i][prop] - blobs[i][prop]) * K;
+				vels[i][prop] += force * step;
+				vels[i][prop] -= vels[i][prop] * D * step;
+				blobs[i][prop] += vels[i][prop] * step;
+			}
 		}
 	}
 }

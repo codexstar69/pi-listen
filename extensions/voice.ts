@@ -722,43 +722,55 @@ export default function (pi: ExtensionAPI) {
 	// Shows the slime on the right side when voice is enabled but not recording.
 	// During recording, the recording widget takes over.
 	let _slimeCompanionTimer: ReturnType<typeof setInterval> | null = null;
-	let _slimeCompanionLastRender = Date.now();
+	let _slimeCompanionActive = false;
 
 	function showSlimeCompanion() {
-		if (_slimeCompanionTimer) return; // Already running
+		if (_slimeCompanionActive) return;
 		if (!ctx?.hasUI) return;
+		_slimeCompanionActive = true;
+		_lastSlimeRenderTime = Date.now();
 
-		_slimeCompanionLastRender = Date.now();
+		// Set widget ONCE — Pi calls render() on each redraw cycle
+		ctx.ui.setWidget("slime-companion", (_tui, _theme) => ({
+			invalidate() {},
+			render(width: number): string[] {
+				// Don't render during recording — recording widget handles it
+				if (voiceState !== "idle") return [];
+				const now = Date.now();
+				const dt = Math.min(0.1, (now - _lastSlimeRenderTime) / 1000);
+				_lastSlimeRenderTime = now;
+				const slimeLines = renderSlime(0, dt);
+				const pad = Math.max(0, width - SLIME_WIDTH - 2);
+				return slimeLines.map(line => " ".repeat(pad) + line);
+			},
+		}), { placement: "aboveEditor" });
+
+		// Trigger redraws at 5fps by calling setWidget again with same factory
 		_slimeCompanionTimer = setInterval(() => {
-			if (!ctx?.hasUI) return;
-			// Don't show companion during recording/warmup — the recording widget handles it
-			if (voiceState !== "idle") return;
-
-			const now = Date.now();
-			const dt = Math.min(0.1, (now - _slimeCompanionLastRender) / 1000);
-			_slimeCompanionLastRender = now;
-
+			if (!ctx?.hasUI || voiceState !== "idle") return;
 			ctx.ui.setWidget("slime-companion", (_tui, _theme) => ({
 				invalidate() {},
 				render(width: number): string[] {
-					const slimeLines = renderSlime(0, dt); // audioLevel=0 → idle breathing
+					if (voiceState !== "idle") return [];
+					const now = Date.now();
+					const dt = Math.min(0.1, (now - _lastSlimeRenderTime) / 1000);
+					_lastSlimeRenderTime = now;
+					const slimeLines = renderSlime(0, dt);
 					const pad = Math.max(0, width - SLIME_WIDTH - 2);
 					return slimeLines.map(line => " ".repeat(pad) + line);
 				},
 			}), { placement: "aboveEditor" });
-		}, 200); // 5fps for idle — low CPU cost
+		}, 200);
 	}
 
 	function hideSlimeCompanion() {
+		_slimeCompanionActive = false;
 		if (_slimeCompanionTimer) {
 			clearInterval(_slimeCompanionTimer);
 			_slimeCompanionTimer = null;
 		}
 		if (ctx?.hasUI) {
-			ctx.ui.setWidget("slime-companion", (_tui, _theme) => ({
-				invalidate() {},
-				render(): string[] { return []; },
-			}), { placement: "aboveEditor" });
+			ctx.ui.setWidget("slime-companion", undefined);
 		}
 	}
 
