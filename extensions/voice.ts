@@ -390,7 +390,7 @@ function buildDeepgramWsUrl(config: VoiceConfig): string {
 		sample_rate: String(SAMPLE_RATE),
 		channels: String(CHANNELS),
 		endpointing: "200",
-		utterance_end_ms: "500",
+		utterance_end_ms: "1000",
 		language: config.language || "en",
 		model: config.model || "nova-3",
 		smart_format: "true",
