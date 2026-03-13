@@ -8,9 +8,9 @@
  */
 
 // --- Configuration ---
-const SW = 40;   // Widget pixel width (characters)
-const SH = 10;   // Widget pixel height (character rows, each = 2 logical pixels)
-const LOGICAL_H = SH * 2; // 20 logical pixels tall
+const SW = 30;   // Widget pixel width (characters) — compact for right-side placement
+const SH = 8;    // Widget pixel height (character rows, each = 2 logical pixels)
+const LOGICAL_H = SH * 2; // 16 logical pixels tall
 
 // Scale factor from original 80×72 coordinate space
 const SCALE_X = SW / 80;
@@ -42,9 +42,13 @@ const outColors = new Uint8Array(SW * LOGICAL_H * 3);
 // --- Math ---
 function getDensity(x: number, y: number): number {
 	let d = 0;
-	for (const b of blobs) {
+	for (let i = 0; i < blobs.length; i++) {
+		const b = blobs[i];
 		let dx = x - b.x;
 		let dy = y - b.y;
+		// Quick bounding box skip — if far from blob, contribution is negligible
+		const maxR = Math.max(b.rx, b.ry) * 2.5;
+		if (dx > maxR || dx < -maxR || dy > maxR || dy < -maxR) continue;
 		if (b.rot !== 0) {
 			const s = Math.sin(b.rot);
 			const c = Math.cos(b.rot);

@@ -876,7 +876,7 @@ export default function (pi: ExtensionAPI) {
 		_recWidgetAnimTimer = setInterval(() => {
 			_recWidgetFrame++;
 			showRecordingWidgetFrame(_recWidgetFrame);
-		}, 120);
+		}, 150); // 150ms ≈ 6.7fps — gives headroom for slime metaball rendering
 
 		showRecordingWidgetFrame(0);
 	}
@@ -900,21 +900,30 @@ export default function (pi: ExtensionAPI) {
 					const wave = buildPremiumWave(frame, Math.max(6, Math.min(12, maxW - 30)), audioLevelSmoothed);
 					const hint = theme.fg("dim", "⌴ release");
 					const dot = theme.fg("error", getRecordDot());
+					const face = getFace(audioLevelSmoothed);
 
 					// Render slime creature driven by audio level
 					const slimeLines = renderSlime(audioLevelSmoothed, dt);
+					const slimeH = slimeLines.length;
+					const slimeW = 30; // visual width of slime (without ANSI codes)
 
-					// Info bar goes on the right of the slime's middle row
-					const infoBar = ` ${dot}  ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${hint}`;
-					const midRow = Math.floor(slimeLines.length / 2);
+					// Layout: info on left, slime on right
+					// Info lines (centered vertically against slime)
+					const infoLines: string[] = [];
+					infoLines.push(` ${dot} ${theme.fg("accent", face)}  ${theme.fg("accent", wave)}`);
+					infoLines.push(`   ${theme.fg("muted", timeStr)}  ${hint}`);
+
+					// Calculate right-padding to push slime to right edge
+					const gap = Math.max(1, width - slimeW - 40);
+					const pad = " ".repeat(Math.max(0, gap));
 
 					const out: string[] = [];
-					for (let i = 0; i < slimeLines.length; i++) {
-						if (i === midRow) {
-							out.push(` ${slimeLines[i]}  ${infoBar}`);
-						} else {
-							out.push(` ${slimeLines[i]}`);
-						}
+					for (let i = 0; i < slimeH; i++) {
+						const infoRow = i >= Math.floor((slimeH - infoLines.length) / 2)
+							&& i < Math.floor((slimeH - infoLines.length) / 2) + infoLines.length
+							? infoLines[i - Math.floor((slimeH - infoLines.length) / 2)]
+							: "";
+						out.push(`${infoRow}${pad}${slimeLines[i]}`);
 					}
 					return out;
 				},
