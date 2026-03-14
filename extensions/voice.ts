@@ -2034,7 +2034,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (sub === "setup" || sub === "reconfigure") {
-				const result = await runVoiceOnboarding(cmdCtx, config);
+				const result = await runVoiceOnboarding(cmdCtx, config, { isFirstRun: !config.onboarding.completed });
 				if (!result) {
 					cmdCtx.ui.notify("Voice setup cancelled.", "warning");
 					return;
@@ -2056,10 +2056,10 @@ export default function (pi: ExtensionAPI) {
 	// ─── Dedicated setup command ─────────────────────────────────────────────
 
 	pi.registerCommand("voice-setup", {
-		description: "Configure voice input — set Deepgram API key and language",
+		description: "Configure voice input — Deepgram API key and settings",
 		handler: async (_args, cmdCtx) => {
 			ctx = cmdCtx;
-			const result = await runVoiceOnboarding(cmdCtx, config);
+			const result = await runVoiceOnboarding(cmdCtx, config, { isFirstRun: !config.onboarding.completed });
 			if (!result) {
 				cmdCtx.ui.notify("Voice setup cancelled.", "warning");
 				return;

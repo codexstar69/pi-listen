@@ -282,7 +282,9 @@ export async function promptFirstRunOnboarding(ctx: VoiceUiContext): Promise<Fir
 export async function runVoiceOnboarding(
 	ctx: VoiceUiContext,
 	currentConfig: VoiceConfig,
+	options?: { isFirstRun?: boolean },
 ): Promise<OnboardingResult | undefined> {
+	const isFirstRun = options?.isFirstRun ?? !currentConfig.onboarding.completed;
 	const hasDeepgramKey = Boolean(process.env.DEEPGRAM_API_KEY || currentConfig.deepgramApiKey);
 
 	// ─── Deepgram API key setup ──────────────────────────────
@@ -352,9 +354,13 @@ export async function runVoiceOnboarding(
 		}
 	}
 
-	// ─── Choose language ─────────────────────────────────────
-	const langCode = await pickLanguage(ctx, currentConfig.language);
-	if (!langCode) return undefined;
+	// ─── Choose language (first-run only) ────────────────────
+	let langCode = currentConfig.language;
+	if (isFirstRun) {
+		const picked = await pickLanguage(ctx, currentConfig.language);
+		if (!picked) return undefined;
+		langCode = picked;
+	}
 
 	// ─── Choose scope ────────────────────────────────────────
 	const scopeChoice = await ctx.ui.select("Where should pi-voice settings be saved?", [
@@ -366,7 +372,7 @@ export async function runVoiceOnboarding(
 
 	const summaryLines = [
 		"Backend: Deepgram Nova-3 (streaming)",
-		`Language: ${languageDisplayName(langCode)}`,
+		`Language: ${languageDisplayName(langCode)}${isFirstRun ? "" : " (change with /voice-language)"}`,
 		`Scope: ${selectedScope}`,
 		`API key: ${process.env.DEEPGRAM_API_KEY ? "configured" : "not yet set"}`,
 	];
