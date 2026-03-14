@@ -474,7 +474,7 @@ export default function (pi: ExtensionAPI) {
 	let activeSession: StreamingSession | null = null;
 	let preRecordingSession: StreamingSession | null = null;  // Started during warmup, promoted on confirm
 
-	let lastStopTime = 0;    // For corruption guard
+	let lastStopTime = 0;    // For Escape-to-clear-editor within 30s of recording
 	let recordingStartedAt = 0; // When recording actually started (for grace period)
 	let editorTextBeforeVoice = ""; // Snapshot of editor text before recording started
 
@@ -707,6 +707,9 @@ export default function (pi: ExtensionAPI) {
 		errorCooldownUntil = 0;
 		editorTextBeforeVoice = "";
 		dictationMode = false;
+		recordingStart = 0;
+		recordingStartedAt = 0;
+		lastStopTime = 0;
 		hideWidget();
 		setVoiceState("idle");
 	}
