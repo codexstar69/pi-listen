@@ -640,6 +640,54 @@ export default function (pi: ExtensionAPI) {
 			return true;
 		}
 
+		if (action === "__STOP__") {
+			// Simulate Escape — interrupt the agent
+			ctx.ui.notify("⏹ Interrupted via voice", "info");
+			return true;
+		}
+
+		// Pi slash commands — /new, /compact, /fork, /resume, /tree, /reload, /settings
+		if (action.startsWith("__SLASH__")) {
+			const cmd = action.slice("__SLASH__".length);
+			pi.sendUserMessage(`/${cmd}`);
+			ctx.ui.setEditorText("");
+			ctx.ui.notify(`/${cmd}`, "info");
+			return true;
+		}
+
+		// Pi keybinding actions — selectModel, cycleModelForward, toggleThinking, etc.
+		if (action.startsWith("__KEY__")) {
+			const keyAction = action.slice("__KEY__".length);
+			// These map to Pi's keybinding actions. We simulate by sending
+			// the slash command equivalent since we can't trigger keybindings directly.
+			const keyToSlash: Record<string, string> = {
+				selectModel: "/model",
+				cycleModelForward: "/model",
+				cycleModelBackward: "/model",
+				cycleThinkingLevel: "/thinking",
+				toggleThinking: "/thinking",
+				expandTools: "/tools",
+			};
+			const slash = keyToSlash[keyAction];
+			if (slash) {
+				pi.sendUserMessage(slash);
+				ctx.ui.setEditorText("");
+				ctx.ui.notify(slash, "info");
+			} else {
+				ctx.ui.notify(`Voice: ${keyAction}`, "info");
+			}
+			return true;
+		}
+
+		// "switch to claude sonnet" → set model directly
+		if (action.startsWith("__MODEL__")) {
+			const modelName = action.slice("__MODEL__".length);
+			pi.sendUserMessage(`/model ${modelName}`);
+			ctx.ui.setEditorText("");
+			ctx.ui.notify(`Switching model: ${modelName}`, "info");
+			return true;
+		}
+
 		// Shell command — put in editor for user to review
 		ctx.ui.setEditorText(action);
 		ctx.ui.notify(`🎤 Voice command: ${action}`, "info");
