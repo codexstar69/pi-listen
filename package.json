@@ -38,7 +38,8 @@
   },
   "pi": {
     "extensions": [
-      "./extensions/voice.ts"
+      "./extensions/voice.ts",
+      "./extensions/lumo-extension.ts"
     ]
   },
   "files": [
