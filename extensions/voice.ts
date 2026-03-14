@@ -855,7 +855,8 @@ export default function (pi: ExtensionAPI) {
 	function buildPremiumWave(_frame: number, width: number, level: number): string {
 		const t = Date.now() / 1000;
 		const bars = "⠁⠃⠇⡇⣇⣧⣷⣿";
-		const len = Math.max(8, Math.min(width, 16));
+		// Scale waveform to ~40% of available width, min 8, max 48
+		const len = Math.max(8, Math.min(Math.floor(width * 0.4), 48));
 		let out = "";
 		const energy = Math.pow(level, 0.7);
 		const speed = 1.8 + energy * 4.5;
@@ -900,13 +901,12 @@ export default function (pi: ExtensionAPI) {
 					render(width: number): string[] {
 						const maxW = Math.max(0, Math.min(width - 4, 72));
 						const face = getFace(0);
-						const meterLen = Math.max(4, Math.min(10, maxW - 30));
+						// Scale meter to ~30% of available width, min 4
+						const meterLen = Math.max(4, Math.floor(maxW * 0.3));
 						const filled = Math.round(progress * meterLen);
 						const meter = theme.fg("accent", "⣿".repeat(filled)) + theme.fg("muted", "⠁".repeat(meterLen - filled));
 						const hint = theme.fg("dim", progress < 1 ? "hold…" : "ready!");
-						const out: string[] = [];
-						out.push(` ${theme.fg("accent", face)}  ${meter} ${hint}`);
-						return out;
+						return [` ${theme.fg("accent", face)}  ${meter} ${hint}`];
 					},
 				};
 			}, { placement: "aboveEditor" });
@@ -924,6 +924,10 @@ export default function (pi: ExtensionAPI) {
 		if (!ctx?.hasUI) return;
 		// Lumo companion stays visible — it reacts to audio automatically.
 		// We still run the recording widget for the info bar overlay.
+
+		// Stop warmup animation if still running — seamless takeover,
+		// no gap between warmup and recording widgets (same widget ID).
+		clearWarmupWidget();
 
 		_recWidgetFrame = 0;
 
@@ -948,7 +952,8 @@ export default function (pi: ExtensionAPI) {
 					const mins = Math.floor(elapsed / 60);
 					const secs = elapsed % 60;
 					const timeStr = mins > 0 ? `${mins}:${String(secs).padStart(2, "0")}` : `${secs}s`;
-					const wave = buildPremiumWave(frame, Math.max(6, Math.min(12, maxW - 30)), audioLevelSmoothed);
+					// Pass full available width — buildPremiumWave handles scaling
+					const wave = buildPremiumWave(frame, maxW, audioLevelSmoothed);
 					const hint = theme.fg("dim", "⌴ release");
 					const dot = theme.fg("error", getRecordDot());
 					const face = getFace(audioLevelSmoothed);
@@ -1008,8 +1013,9 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		// ── STALE TRANSCRIPT CLEANUP ──
-		// Clear any prior transcript from the widget
-		hideWidget();
+		// Don't hideWidget() here — the warmup widget is still showing and
+		// showRecordingWidget() will seamlessly replace it using the same
+		// widget ID. Hiding it first causes a visible gap (jitter).
 
 		recordingStart = Date.now();
 
@@ -1473,7 +1479,8 @@ export default function (pi: ExtensionAPI) {
 							holdActivationTimer = setTimeout(() => {
 								holdActivationTimer = null;
 								if (voiceState === "warmup") {
-									clearWarmupWidget();
+									// Don't clearWarmupWidget() here — showRecordingWidget()
+									// seamlessly replaces it using the same widget ID.
 									spaceConsumed = true;
 									recordingStartedAt = Date.now();
 									// Clear release timer during async recording startup
@@ -1586,7 +1593,8 @@ export default function (pi: ExtensionAPI) {
 						holdActivationTimer = setTimeout(() => {
 							holdActivationTimer = null;
 							if (voiceState === "warmup") {
-								clearWarmupWidget();
+								// Don't clearWarmupWidget() here — showRecordingWidget()
+								// seamlessly replaces it using the same widget ID.
 								spaceConsumed = true;
 								recordingStartedAt = Date.now();
 								voiceDebug("holdActivationTimer fired → starting recording (Kitty path)");
@@ -1639,7 +1647,8 @@ export default function (pi: ExtensionAPI) {
 							holdActivationTimer = setTimeout(() => {
 								holdActivationTimer = null;
 								if (voiceState === "warmup") {
-									clearWarmupWidget();
+									// Don't clearWarmupWidget() here — showRecordingWidget()
+									// seamlessly replaces it using the same widget ID.
 									spaceConsumed = true;
 									recordingStartedAt = Date.now();
 									// CRITICAL: Clear release timer and DO NOT re-arm.

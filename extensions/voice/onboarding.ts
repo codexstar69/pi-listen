@@ -1,5 +1,7 @@
 import type { ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { VoiceConfig, VoiceSettingsScope } from "./config";
+import * as fs from "node:fs";
+import * as os from "node:os";
 
 type VoiceUiContext = ExtensionContext | ExtensionCommandContext;
 
@@ -75,8 +77,6 @@ export async function runVoiceOnboarding(
 			if (apiKey && apiKey.trim().length > 10) {
 				// Sanitize: Deepgram keys are alphanumeric — strip anything unexpected
 				const trimmedKey = apiKey.trim().replace(/[^a-zA-Z0-9_-]/g, "");
-				const fs = await import("node:fs");
-				const os = await import("node:os");
 				const home = os.homedir();
 				const envSecretsPath = `${home}/.env.secrets`;
 				const zshrcPath = `${home}/.zshrc`;

@@ -753,12 +753,19 @@ export function lumoKeypress(key: string) {
 export function resetLumo() {
 	time = 0; currentState = "idle"; blinkFade = 0; actionTimer = 0;
 	speechTimer = 0; speechText = "";
-	posX = 0; posY = 0; bounceY = 0; lookX = 0; lookY = 0;
+	posX = 0; posY = 0; posZ = 0; bounceY = 0; lookX = 0; lookY = 0;
 	isWalking = false; isFlipping = false; isSleeping = false; isTalking = false;
 	talkAudioLevel = 0; flipPhase = 0;
-	ballX = -10; ballY = -10; hasBall = false;
+	hunger = 100; energy = 100; lastNeedsTick = 0;
+	activeTheme = 0;
+	ballX = -10; ballY = -10; ballVx = 0; ballVy = 0; ballVz = 0; hasBall = false;
+	ffX = 0; ffY = 0; ffZ = 0;
+	targetX = 0;
 	foods.length = 0; particles.length = 0;
 }
 
-/** Current widget height in character rows (scene + 4 status bar lines) */
+/** Current widget height in character rows (scene + 4 status bar lines).
+ *  Returns a live value since H can change when renderLumo resizes. */
+export function lumoHeight(): number { return H + 4; }
+/** @deprecated Use lumoHeight() — this constant is stale after resize. */
 export const LUMO_HEIGHT = H + 4;
