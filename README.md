@@ -7,7 +7,6 @@
 **Hold-to-talk voice input for [Pi](https://github.com/mariozechner/pi-coding-agent).**
 
 [![npm version](https://img.shields.io/npm/v/@codexstar/pi-listen.svg)](https://www.npmjs.com/package/@codexstar/pi-listen)
-[![npm downloads](https://img.shields.io/npm/dm/@codexstar/pi-listen.svg)](https://www.npmjs.com/package/@codexstar/pi-listen)
 [![license](https://img.shields.io/npm/l/@codexstar/pi-listen.svg)](https://github.com/codexstar69/pi-listen/blob/main/LICENSE)
 
 ---
