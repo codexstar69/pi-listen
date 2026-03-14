@@ -1,6 +1,10 @@
-import { getAgentDir } from "@mariozechner/pi-coding-agent";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
+
+function getAgentDir(): string {
+	return path.join(os.homedir(), ".pi", "agent");
+}
 
 export const SETTINGS_KEY = "voice";
 export const VOICE_CONFIG_VERSION = 2;
