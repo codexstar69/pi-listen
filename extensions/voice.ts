@@ -156,8 +156,11 @@ function updateAudioLevel(chunk: Buffer) {
 	audioLevelSmoothed = audioLevel > audioLevelSmoothed
 		? audioLevelSmoothed * 0.35 + audioLevel * 0.65
 		: audioLevelSmoothed * 0.75 + audioLevel * 0.25;
-	// Broadcast for other extensions (e.g. pi-pompom mouth animation)
-	(globalThis as any).__piVoiceAudioLevel = audioLevelSmoothed;
+	// Shared state for other extensions (e.g. pi-pompom mouth animation).
+	// Using a namespaced globalThis object instead of pi.events because
+	// audio levels update at ~60Hz — event emission would be wasteful.
+	const shared = ((globalThis as any).__piListen ??= {});
+	shared.audioLevel = audioLevelSmoothed;
 }
 
 function voiceDebug(...args: unknown[]) {
@@ -673,8 +676,8 @@ export default function (pi: ExtensionAPI) {
 		if (prev !== newState) {
 			voiceDebug(`STATE: ${prev} → ${newState}`);
 		}
-		// Broadcast to other extensions (e.g. pi-pompom mouth animation)
-		(globalThis as any).__piVoiceRecording = newState === "recording";
+		const shared = ((globalThis as any).__piListen ??= {});
+		shared.recording = newState === "recording";
 		updateVoiceStatus();
 	}
 

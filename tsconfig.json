@@ -6,11 +6,7 @@
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
-    "esModuleInterop": true,
-    "baseUrl": "..",
-    "paths": {
-      "@mariozechner/*": ["node_modules/@mariozechner/*"]
-    }
+    "esModuleInterop": true
   },
   "include": ["extensions/**/*.ts"]
 }
