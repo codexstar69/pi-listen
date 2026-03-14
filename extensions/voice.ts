@@ -177,6 +177,78 @@ function commandExists(cmd: string): boolean {
 	return result;
 }
 
+interface AudioCaptureTool { name: string; cmd: string; args: string[]; }
+
+// Try available audio capture tools in order of preference
+let _cachedAudioTool: AudioCaptureTool | null | undefined;
+function detectAudioCaptureTool(): AudioCaptureTool | null {
+	if (_cachedAudioTool !== undefined) return _cachedAudioTool;
+
+	// 1. SoX rec — purpose-built for recording, best quality
+	if (commandExists("rec")) {
+		_cachedAudioTool = {
+			name: "sox",
+			cmd: "rec",
+			args: [
+				"-q",
+				"--buffer", "4096",
+				"-c", String(CHANNELS),
+				"-b", "16",
+				"-e", "signed-integer",
+				"-t", "raw",
+				"-",
+				"rate", String(SAMPLE_RATE),
+			],
+		};
+		return _cachedAudioTool;
+	}
+
+	// 2. ffmpeg — widely installed, captures from default mic
+	if (commandExists("ffmpeg")) {
+		const isLinux = process.platform === "linux";
+		const isMac = process.platform === "darwin";
+		// Input device varies by platform
+		const inputArgs = isMac
+			? ["-f", "avfoundation", "-i", ":default"]
+			: isLinux
+				? ["-f", "pulse", "-i", "default"]
+				: ["-f", "dshow", "-i", "audio=default"];
+		_cachedAudioTool = {
+			name: "ffmpeg",
+			cmd: "ffmpeg",
+			args: [
+				...inputArgs,
+				"-ac", String(CHANNELS),
+				"-ar", String(SAMPLE_RATE),
+				"-sample_fmt", "s16",
+				"-f", "s16le",
+				"-loglevel", "error",
+				"pipe:1",
+			],
+		};
+		return _cachedAudioTool;
+	}
+
+	// 3. arecord — built into Linux ALSA, zero install
+	if (process.platform === "linux" && commandExists("arecord")) {
+		_cachedAudioTool = {
+			name: "arecord",
+			cmd: "arecord",
+			args: [
+				"-q",
+				"-f", "S16_LE",
+				"-r", String(SAMPLE_RATE),
+				"-c", String(CHANNELS),
+				"-t", "raw",
+			],
+		};
+		return _cachedAudioTool;
+	}
+
+	_cachedAudioTool = null;
+	return null;
+}
+
 // ─── Deepgram WebSocket Streaming ────────────────────────────────────────────
 
 interface StreamingSession {
@@ -211,32 +283,22 @@ function startStreamingSession(
 		return null;
 	}
 
-	if (!commandExists("rec")) {
-		voiceDebug("startStreamingSession → no SoX, calling onError");
-		callbacks.onError("Voice requires SoX. Install: brew install sox");
+	// ── Audio capture: try rec (SoX) → ffmpeg → arecord (Linux ALSA) ──
+	const audioTool = detectAudioCaptureTool();
+	if (!audioTool) {
+		voiceDebug("startStreamingSession → no audio capture tool found");
+		callbacks.onError("No audio capture tool found. Install one of: sox, ffmpeg, or arecord (Linux)");
 		return null;
 	}
+	voiceDebug("Using audio capture tool:", audioTool.name);
 
-	// On macOS, SoX's rec ignores -r for input (CoreAudio captures at native rate,
-	// usually 48kHz). We must use the `rate` effect to downsample to 16kHz.
-	// Without this, Deepgram receives 48kHz audio labeled as 16kHz → garbled/silence.
-	// Use smaller buffer (-b 4096) for lower latency audio capture.
-	const recProc = spawn("rec", [
-		"-q",
-		"--buffer", "4096",           // 4096 bytes prevents CoreAudio buffer overruns
-		"-c", String(CHANNELS),
-		"-b", "16",
-		"-e", "signed-integer",
-		"-t", "raw",
-		"-",          // output to stdout
-		"rate", String(SAMPLE_RATE),  // SoX effect: resample to 16kHz
-	], { stdio: ["pipe", "pipe", "pipe"] });
+	const recProc = spawn(audioTool.cmd, audioTool.args, { stdio: ["pipe", "pipe", "pipe"] });
 
 	recProc.stderr?.on("data", (d: Buffer) => {
 		const msg = d.toString().trim();
-		// Suppress CoreAudio buffer overrun spam — these are harmless and frequent
-		if (msg.includes("buffer overrun")) return;
-		voiceDebug("SoX stderr:", msg);
+		// Suppress noisy but harmless messages
+		if (msg.includes("buffer overrun") || msg.includes("Discarding") || msg.includes("Last message repeated")) return;
+		voiceDebug(`${audioTool.name} stderr:`, msg);
 	});
 
 	const wsUrl = buildDeepgramWsUrl(config);
@@ -908,7 +970,7 @@ export default function (pi: ExtensionAPI) {
 	function startPreRecording() {
 		if (preRecordingSession) return; // Already started
 		if (!resolveDeepgramApiKey(config)) return; // No key — skip silently
-		if (!commandExists("rec")) return;           // No SoX — skip silently
+		if (!detectAudioCaptureTool()) return;       // No audio tool — skip silently
 
 		voiceDebug("startPreRecording → capturing audio during warmup");
 
@@ -1863,43 +1925,58 @@ export default function (pi: ExtensionAPI) {
 			if (sub === "test") {
 				cmdCtx.ui.notify("Testing voice setup…", "info");
 				const dgKey = resolveDeepgramApiKey(config);
-				const hasSox = commandExists("rec");
+				const tool = detectAudioCaptureTool();
 
 				const lines = [
 					"Voice diagnostics:",
 					"",
-					"  Prerequisites:",
-					`    SoX (rec):        ${hasSox ? "OK" : "MISSING — brew install sox"}`,
-					`    DEEPGRAM_API_KEY:  ${dgKey ? "set (" + dgKey.slice(0, 8) + "…)" : "NOT SET"}`,
-					"",
-					"  Config:",
-					`    language:          ${config.language}`,
-					`    onboarding:        ${config.onboarding.completed ? "complete" : "incomplete"}`,
-					`    hold threshold:    ${HOLD_THRESHOLD_MS}ms`,
-					`    kitty protocol:    ${kittyReleaseDetected ? "detected" : "not detected"}`,
-					`    state:             ${voiceState}`,
+					"  Audio capture:",
+					`    tool:              ${tool ? `${tool.name} (${tool.cmd})` : "NONE FOUND"}`,
 				];
+				if (!tool) {
+					lines.push("    available:         sox ✗  ffmpeg ✗  arecord ✗");
+					lines.push("    install one:       brew install sox (or ffmpeg)");
+				}
 
-				// Mic capture test
-				if (hasSox) {
+				lines.push(`    DEEPGRAM_API_KEY:  ${dgKey ? "set (" + dgKey.slice(0, 8) + "…)" : "NOT SET"}`);
+				lines.push("");
+				lines.push("  Config:");
+				lines.push(`    language:          ${config.language}`);
+				lines.push(`    onboarding:        ${config.onboarding.completed ? "complete" : "incomplete"}`);
+				lines.push(`    hold threshold:    ${HOLD_THRESHOLD_MS}ms`);
+				lines.push(`    kitty protocol:    ${kittyReleaseDetected ? "detected" : "not detected"}`);
+				lines.push(`    state:             ${voiceState}`);
+
+				// Mic capture test using detected tool
+				if (tool) {
 					const testFile = path.join(os.tmpdir(), "pi-voice-test.wav");
-					const testProc = spawn("rec", ["-q", "-r", "16000", "-c", "1", "-b", "16", "-d", "1", testFile], { stdio: "pipe" });
+					let testProc;
+					if (tool.name === "sox") {
+						testProc = spawn("rec", ["-q", "-r", "16000", "-c", "1", "-b", "16", "-d", "1", testFile], { stdio: "pipe" });
+					} else if (tool.name === "ffmpeg") {
+						const isMac = process.platform === "darwin";
+						const isLinux = process.platform === "linux";
+						const inputArgs = isMac ? ["-f", "avfoundation", "-i", ":default"] : isLinux ? ["-f", "pulse", "-i", "default"] : ["-f", "dshow", "-i", "audio=default"];
+						testProc = spawn("ffmpeg", [...inputArgs, "-t", "1", "-ar", "16000", "-ac", "1", "-y", "-loglevel", "error", testFile], { stdio: "pipe" });
+					} else {
+						testProc = spawn("arecord", ["-q", "-f", "S16_LE", "-r", "16000", "-c", "1", "-d", "1", testFile], { stdio: "pipe" });
+					}
 					testProc.on("error", () => {});
 					await new Promise<void>((resolve) => {
 						let resolved = false;
 						const done = () => { if (!resolved) { resolved = true; resolve(); } };
 						testProc.on("close", done);
-						setTimeout(() => { try { testProc.kill(); } catch {} done(); }, 2000);
+						setTimeout(() => { try { testProc.kill(); } catch {} done(); }, 3000);
 					});
 					if (fs.existsSync(testFile)) {
 						const size = fs.statSync(testFile).size;
-						lines.push(`    mic capture:       OK (${size} bytes)`);
+						lines.push(`    mic capture:       OK (${size} bytes via ${tool.name})`);
 						try { fs.unlinkSync(testFile); } catch {}
 					} else {
-						lines.push("    mic capture:       FAILED — no audio captured");
+						lines.push(`    mic capture:       FAILED — ${tool.name} ran but no audio captured`);
 					}
 				} else {
-					lines.push("    mic capture:       skipped (SoX not installed)");
+					lines.push("    mic capture:       skipped (no audio tool)");
 				}
 
 				// Deepgram API key validation
@@ -1930,17 +2007,19 @@ export default function (pi: ExtensionAPI) {
 					lines.push("    1. Get a free key → https://dpgr.am/pi-voice ($200 free credit)");
 					lines.push("    2. export DEEPGRAM_API_KEY=\"your-key\" (add to ~/.zshrc)");
 					lines.push("    3. Or run /voice-setup to paste it interactively");
-				} else if (!hasSox) {
-					lines.push("  Setup needed:");
-					lines.push("    brew install sox    # macOS");
-					lines.push("    apt install sox     # Linux");
-					lines.push("    choco install sox   # Windows");
+				} else if (!tool) {
+					lines.push("  Setup needed — install any one of:");
+					lines.push("    brew install sox       # macOS (recommended)");
+					lines.push("    brew install ffmpeg    # macOS (alternative)");
+					lines.push("    apt install sox        # Linux");
+					lines.push("    apt install ffmpeg     # Linux (alternative)");
+					lines.push("    choco install sox      # Windows");
 				} else {
 					lines.push("  All checks passed — voice is ready!");
 					lines.push("  Hold SPACE to record, or use Ctrl+Shift+V to toggle.");
 				}
 
-				const ready = !!dgKey && hasSox;
+				const ready = !!dgKey && !!tool;
 				cmdCtx.ui.notify(lines.join("\n"), ready ? "info" : "warning");
 				return;
 			}
