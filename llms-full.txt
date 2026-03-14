@@ -22,7 +22,10 @@ pi-voice adds hold-to-talk voice input to the Pi coding agent CLI:
 2. **Voice commands:** Detected phrases like "hey pi, run tests" or "undo" are executed as actions instead of being typed.
 3. **Continuous dictation:** `/voice dictate` mode for long-form speaking without holding keys.
 4. **Double-escape clear:** Two escape presses within 500ms clears the editor text.
-5. **Cross-platform:** Kitty keyboard protocol for modern terminals, gap-based fallback for legacy terminals. macOS, Windows, Linux.
+5. **Zero-config start:** If `DEEPGRAM_API_KEY` is in the environment, pi-voice auto-activates on first launch with a keybinding guide. No wizard needed.
+6. **Full diagnostics:** `/voice test` validates SoX, mic capture, and the Deepgram API key against the live API in one command.
+7. **First-run hint:** Shows a one-time notification on first session explaining how to get started.
+8. **Cross-platform:** Kitty keyboard protocol for modern terminals, gap-based fallback for legacy terminals. macOS, Windows, Linux.
 
 ---
 
@@ -66,7 +69,7 @@ No release events. Holding sends rapid press events (~30-90ms apart). Algorithm 
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `extensions/voice.ts` | ~1900 | Main extension: SoX recording, Deepgram WebSocket streaming, hold-to-talk state machine (Kitty + non-Kitty), voice command detection, warmup/recording widgets, live transcript display, double-escape editor clear, `/voice` command suite |
+| `extensions/voice.ts` | ~1970 | Main extension: SoX recording, Deepgram WebSocket streaming, hold-to-talk state machine (Kitty + non-Kitty), voice command detection, warmup/recording widgets, live transcript display, double-escape editor clear, first-run welcome hint, API key validation, `/voice` command suite |
 | `extensions/voice/config.ts` | ~170 | VoiceConfig type, loading from global/project settings, schema migration, onboarding state |
 | `extensions/voice/onboarding.ts` | ~160 | Interactive first-run setup wizard — Deepgram API key entry, scope selection |
 

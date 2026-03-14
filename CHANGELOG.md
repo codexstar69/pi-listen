@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.2] - 2026-03-14
+
+### Added
+- **First-run welcome hint** — shows keybinding guide on first session when API key is set, or setup instructions when it's not
+- **Zero-config auto-activation** — if `DEEPGRAM_API_KEY` is already in environment, voice activates immediately without running `/voice setup`
+- **Deepgram API key validation** — `/voice test` now hits the Deepgram API to verify the key is valid (not just checking if it's set)
+- **Full diagnostics output** — `/voice test` shows pass/fail for each prerequisite with actionable setup instructions
+
 ## [3.0.0] - 2026-03-14
 
 ### Changed

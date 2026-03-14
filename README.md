@@ -24,6 +24,8 @@ pi-voice adds hands-free voice input to the Pi coding agent CLI. Hold `SPACE` to
 | **Voice commands** | "hey pi, run tests", "undo", "submit", "new line", "period" |
 | **Continuous dictation** | `/voice dictate` for long-form speaking without holding keys |
 | **Double-escape clear** | Press `Escape` twice to clear the editor |
+| **Zero-config start** | Auto-activates if `DEEPGRAM_API_KEY` is set — no wizard needed |
+| **Full diagnostics** | `/voice test` validates SoX, mic capture, and Deepgram API key in one command |
 | **Cross-platform** | macOS, Windows, Linux — Kitty protocol + non-Kitty fallback |
 
 ---
@@ -46,7 +48,9 @@ brew install sox                           # macOS
 export DEEPGRAM_API_KEY="your-key-here"    # add to ~/.zshrc
 ```
 
-Then open Pi — the onboarding wizard handles the rest.
+Then open Pi — if `DEEPGRAM_API_KEY` is in your environment, pi-voice auto-activates and shows a keybinding guide. No wizard needed.
+
+If the key isn't set yet, you'll see a one-time hint pointing you to `/voice setup`.
 
 ---
 
@@ -154,13 +158,16 @@ Settings stored in Pi's settings files under the `voice` key:
 ## Troubleshooting
 
 ```bash
-/voice test     # Test full pipeline (mic + Deepgram)
+/voice test     # Full diagnostics: SoX, mic capture, Deepgram API key validation
 ```
+
+`/voice test` checks everything in one shot — SoX installation, microphone capture, and validates your Deepgram API key against the live API. It tells you exactly what's missing and how to fix it.
 
 | Problem | Solution |
 |---------|----------|
 | "DEEPGRAM_API_KEY not set" | `export DEEPGRAM_API_KEY="your-key"` in `~/.zshrc` |
-| "SoX error" | `brew install sox` (macOS) or `apt install sox` (Linux) |
+| "INVALID KEY" | Check your key at [console.deepgram.com](https://console.deepgram.com) |
+| "SoX error" | `brew install sox` (macOS) / `apt install sox` (Linux) / `choco install sox` (Windows) |
 | Space doesn't activate | Check `/voice info` — voice may be disabled |
 | Double space in editor | Increase typing cooldown or use `Ctrl+Shift+V` |
 

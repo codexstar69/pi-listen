@@ -4,7 +4,7 @@
 
 ## Overview
 
-pi-voice is a Pi extension that adds streaming voice-to-text input to the Pi coding agent. Hold SPACE to record, release to transcribe — text appears in the editor in real time via Deepgram Nova 3 WebSocket streaming.
+pi-voice is a Pi extension that adds streaming voice-to-text input to the Pi coding agent. Hold SPACE to record, release to transcribe — text appears in the editor in real time via Deepgram Nova 3 WebSocket streaming. Auto-activates when DEEPGRAM_API_KEY is set — no wizard needed.
 
 ## Core Documentation
 
@@ -17,9 +17,9 @@ pi-voice is a Pi extension that adds streaming voice-to-text input to the Pi cod
 
 ## Key Components
 
-- `extensions/voice.ts`: Main extension — hold-to-talk state machine, Deepgram streaming, voice commands, UI widgets, double-escape editor clear
+- `extensions/voice.ts`: Main extension — hold-to-talk state machine, Deepgram streaming, voice commands, UI widgets, double-escape editor clear, first-run welcome hint
 - `extensions/voice/config.ts`: Configuration loading, saving, migration, onboarding state
-- `extensions/voice/onboarding.ts`: Interactive first-run setup wizard (Deepgram API key)
+- `extensions/voice/onboarding.ts`: Interactive setup wizard (Deepgram API key entry)
 
 ## Features
 
@@ -28,6 +28,9 @@ pi-voice is a Pi extension that adds streaming voice-to-text input to the Pi cod
 - Voice commands: "hey pi, run tests", "undo", "submit", "new line", etc.
 - Continuous dictation mode (/voice dictate)
 - Double-escape clears editor text (cross-platform)
+- Zero-config auto-activation when DEEPGRAM_API_KEY is set
+- /voice test validates SoX, mic capture, and Deepgram API key against live API
+- First-run welcome hint with keybinding guide
 - Kitty protocol support + non-Kitty gap-based fallback
 - Cross-platform: macOS, Windows, Linux
 
