@@ -3,8 +3,9 @@ import type { VoiceBackend, VoiceConfig, VoiceSettingsScope } from "./config";
 import {
 	LOCAL_MODELS, DEFAULT_LOCAL_MODEL, DEFAULT_LOCAL_ENDPOINT,
 	checkLocalServer, getLanguagesForLocalModel,
-	type LocalLangEntry,
+	type LocalLangEntry, type LocalModelInfo,
 } from "./local";
+import { detectDevice, autoRecommendModel, getModelFitness, formatDeviceSummary, localeToLanguageCode, type ModelFitness } from "./device";
 
 type VoiceUiContext = ExtensionContext | ExtensionCommandContext;
 
@@ -294,6 +295,145 @@ export async function promptFirstRunOnboarding(ctx: VoiceUiContext): Promise<Fir
 	return { action: choice === "Start voice setup" ? "start" : "later" };
 }
 
+/**
+ * Pick a local model using fuzzy search — device-aware with fitness badges.
+ * Shows recommended models first, with color-coded fitness indicators.
+ */
+export async function pickLocalModel(
+	ctx: VoiceUiContext,
+	currentModelId: string | undefined,
+	language: string,
+): Promise<LocalModelInfo | undefined> {
+	const { Container, Input, Spacer, Text, fuzzyFilter, getEditorKeybindings } = await import("@mariozechner/pi-tui");
+
+	const device = detectDevice();
+	const allItems = LOCAL_MODELS.map(m => {
+		const fitness = getModelFitness(m, device);
+		const badge = fitnessLabel(fitness);
+		return {
+			...m,
+			fitness,
+			label: `${m.name} — ${m.size} ${badge} (${m.notes})`,
+		};
+	});
+
+	// Sort: recommended → compatible → warning → incompatible, then by size (larger = more accurate)
+	const fitnessOrder: Record<ModelFitness, number> = { recommended: 0, compatible: 1, warning: 2, incompatible: 3 };
+	allItems.sort((a, b) => {
+		const fitDiff = fitnessOrder[a.fitness] - fitnessOrder[b.fitness];
+		if (fitDiff !== 0) return fitDiff;
+		return b.sizeBytes - a.sizeBytes;
+	});
+
+	return ctx.ui.custom<LocalModelInfo | undefined>((tui, theme, _keybindings, done) => {
+		const container = new Container();
+		const searchInput = new Input();
+		const listContainer = new Container();
+
+		let filtered = allItems;
+		let selectedIndex = 0;
+
+		function updateList() {
+			listContainer.clear();
+			const maxVisible = 14;
+			const start = Math.max(0, Math.min(selectedIndex - Math.floor(maxVisible / 2), filtered.length - maxVisible));
+			const end = Math.min(start + maxVisible, filtered.length);
+
+			for (let i = start; i < end; i++) {
+				const item = filtered[i];
+				if (!item) continue;
+				const isSelected = i === selectedIndex;
+				const isCurrent = item.id === currentModelId;
+				const prefix = isSelected ? theme.fg("accent", "→ ") : "  ";
+				const nameText = isSelected ? theme.fg("accent", item.name) : item.name;
+				const sizeText = theme.fg("muted", ` — ${item.size}`);
+				const badge = fitnessThemeBadge(item.fitness, theme);
+				const notes = theme.fg("muted", ` (${item.notes})`);
+				const check = isCurrent ? theme.fg("success", " ✓") : "";
+				listContainer.addChild(new Text(`${prefix}${nameText}${sizeText} ${badge}${notes}${check}`, 0, 0));
+			}
+
+			if (filtered.length === 0) {
+				listContainer.addChild(new Text(theme.fg("muted", "  No matching models"), 0, 0));
+			} else if (start > 0 || end < filtered.length) {
+				listContainer.addChild(new Text(theme.fg("muted", `  (${selectedIndex + 1}/${filtered.length})`), 0, 0));
+			}
+
+			tui.requestRender();
+		}
+
+		function filterList(query: string) {
+			if (!query) {
+				filtered = allItems;
+			} else {
+				filtered = fuzzyFilter(allItems, query, (item) => `${item.name} ${item.id} ${item.notes} ${item.langSupport}`);
+			}
+			selectedIndex = Math.min(selectedIndex, Math.max(0, filtered.length - 1));
+			updateList();
+		}
+
+		// Build UI
+		container.addChild(new Spacer(1));
+		container.addChild(new Text(theme.fg("accent", `Choose local model (${formatDeviceSummary(device)})`), 1, 0));
+		container.addChild(new Text(theme.fg("muted", "Type to search, ↑↓ to navigate, Enter to select, Esc to cancel"), 1, 0));
+		container.addChild(new Spacer(1));
+		container.addChild(searchInput);
+		container.addChild(new Spacer(1));
+		container.addChild(listContainer);
+		container.addChild(new Spacer(1));
+
+		updateList();
+
+		const kb = getEditorKeybindings();
+		(container as any).handleInput = (keyData: string) => {
+			if (kb.matches(keyData, "selectUp")) {
+				if (filtered.length === 0) return;
+				selectedIndex = selectedIndex === 0 ? filtered.length - 1 : selectedIndex - 1;
+				updateList();
+			} else if (kb.matches(keyData, "selectDown")) {
+				if (filtered.length === 0) return;
+				selectedIndex = selectedIndex === filtered.length - 1 ? 0 : selectedIndex + 1;
+				updateList();
+			} else if (kb.matches(keyData, "selectConfirm") || keyData === "\n") {
+				const item = filtered[selectedIndex];
+				done(item ? LOCAL_MODELS.find(m => m.id === item.id) : undefined);
+			} else if (kb.matches(keyData, "selectCancel")) {
+				done(undefined);
+			} else {
+				searchInput.handleInput(keyData);
+				filterList(searchInput.getValue());
+			}
+		};
+
+		Object.defineProperty(container, "focused", {
+			get: () => (searchInput as any).focused,
+			set: (v: boolean) => { (searchInput as any).focused = v; },
+		});
+
+		return container;
+	});
+}
+
+/** Fitness label for display */
+function fitnessLabel(fitness: ModelFitness): string {
+	switch (fitness) {
+		case "recommended": return "[recommended]";
+		case "compatible": return "[compatible]";
+		case "warning": return "[may be slow]";
+		case "incompatible": return "[too large]";
+	}
+}
+
+/** Fitness badge with theme colors */
+function fitnessThemeBadge(fitness: ModelFitness, theme: any): string {
+	switch (fitness) {
+		case "recommended": return theme.fg("success", "[recommended]");
+		case "compatible": return theme.fg("accent", "[compatible]");
+		case "warning": return theme.fg("warning", "[may be slow]");
+		case "incompatible": return theme.fg("error", "[too large]");
+	}
+}
+
 export async function runVoiceOnboarding(
 	ctx: VoiceUiContext,
 	currentConfig: VoiceConfig,
@@ -306,54 +446,74 @@ export async function runVoiceOnboarding(
 		"Choose transcription backend:",
 		[
 			"Deepgram (cloud, real-time streaming, needs API key)",
-			"Local model (offline, no API key, uses whisper.cpp / compatible server)",
+			"Local model (offline, no API key, auto-download)",
 		],
 	);
 	if (!backendChoice) return undefined;
 	const selectedBackend: VoiceBackend = backendChoice.startsWith("Local") ? "local" : "deepgram";
 
 	let localModel = currentConfig.localModel;
-	let localEndpoint = currentConfig.localEndpoint;
+	let localEndpoint: string | undefined = currentConfig.localEndpoint;
 
 	if (selectedBackend === "local") {
-		// ─── Local backend setup ─────────────────────────────
-		const modelOptions = LOCAL_MODELS.map(m => `${m.name} — ${m.size} (${m.notes})`);
-		const modelChoice = await ctx.ui.select("Choose local model:", modelOptions);
-		if (!modelChoice) return undefined;
-		const modelIndex = modelOptions.indexOf(modelChoice);
-		localModel = LOCAL_MODELS[modelIndex]?.id || DEFAULT_LOCAL_MODEL;
+		// ─── Smart local backend setup ───────────────────────
+		const device = detectDevice();
+		const detectedLang = localeToLanguageCode(device.systemLocale);
+		const language = currentConfig.language || detectedLang;
 
-		// Ask for server endpoint
-		ctx.ui.notify(
-			[
-				"Local transcription requires a server running locally.",
-				"",
-				"Quick start with whisper.cpp:",
-				"  1. Build: git clone https://github.com/ggerganov/whisper.cpp && cd whisper.cpp && make",
-				"  2. Download model: ./models/download-ggml-model.sh small",
-				"  3. Run server: ./build/bin/whisper-server -m models/ggml-small.bin --port 8080",
-				"",
-				"Or use any OpenAI-compatible transcription server.",
-			].join("\n"),
-			"info",
-		);
+		// Auto-recommend the best model
+		const recommended = autoRecommendModel(LOCAL_MODELS, device, language);
+		const deviceSummary = formatDeviceSummary(device);
 
-		const customEndpoint = await ctx.ui.input(`Server URL (Enter for ${DEFAULT_LOCAL_ENDPOINT})`);
-		if (customEndpoint && customEndpoint.trim()) {
-			localEndpoint = customEndpoint.trim();
-		} else {
-			localEndpoint = DEFAULT_LOCAL_ENDPOINT;
-		}
-
-		// Check if server is reachable
-		const serverCheck = await checkLocalServer(localEndpoint);
-		if (!serverCheck.ok) {
-			ctx.ui.notify(
-				`Server not reachable at ${localEndpoint}\n${serverCheck.error || ""}\nYou can start it later — voice will work once the server is running.`,
-				"warning",
+		if (recommended) {
+			const fitness = getModelFitness(recommended, device);
+			const setupChoice = await ctx.ui.select(
+				`Detected: ${deviceSummary}`,
+				[
+					`Install ${recommended.name} (${recommended.size}) ${fitnessLabel(fitness)} — recommended`,
+					"Choose a different model",
+					"Advanced: use external server",
+				],
 			);
+			if (!setupChoice) return undefined;
+
+			if (setupChoice.startsWith("Install")) {
+				// Accept recommendation — will auto-download on first use
+				localModel = recommended.id;
+				localEndpoint = undefined; // In-process, no server needed
+				ctx.ui.notify(
+					[
+						`Selected: ${recommended.name} (${recommended.size})`,
+						"Model will download automatically on first voice recording.",
+						"No server setup needed — runs in-process.",
+					].join("\n"),
+					"info",
+				);
+			} else if (setupChoice.startsWith("Choose")) {
+				// Full model list with fuzzy search
+				const picked = await pickLocalModel(ctx, localModel, language);
+				if (!picked) return undefined;
+				localModel = picked.id;
+				localEndpoint = undefined;
+				ctx.ui.notify(`Selected: ${picked.name} (${picked.size})`, "info");
+			} else {
+				// Advanced: external server
+				localEndpoint = await promptServerEndpoint(ctx);
+				if (localEndpoint === undefined) return undefined;
+
+				// Still pick a model for server
+				const modelOptions = LOCAL_MODELS.map(m => `${m.name} — ${m.size} (${m.notes})`);
+				const modelChoice = await ctx.ui.select("Choose model (for server):", modelOptions);
+				if (!modelChoice) return undefined;
+				const modelIndex = modelOptions.indexOf(modelChoice);
+				localModel = LOCAL_MODELS[modelIndex]?.id || DEFAULT_LOCAL_MODEL;
+			}
 		} else {
-			ctx.ui.notify(`Server detected at ${localEndpoint}`, "info");
+			// No recommendation — show full picker
+			const picked = await pickLocalModel(ctx, localModel, language);
+			if (!picked) return undefined;
+			localModel = picked.id;
+			localEndpoint = undefined;
 		}
 	} else {
 		// ─── Deepgram backend setup (unchanged logic) ────────
@@ -432,18 +592,26 @@ export async function runVoiceOnboarding(
 		if (selectedBackend === "local" && localModel) {
 			const { languages, englishOnly } = getLanguagesForLocalModel(localModel);
 			if (englishOnly) {
-				// Single-language model — auto-set to the only supported language
+				// Single-language model — auto-set
 				langCode = languages[0]?.code || "en";
 				const langName = languages[0]?.name || "English";
 				ctx.ui.notify(`Language set to ${langName} (only language supported by this model).`, "info");
 			} else {
-				// Whisper / Parakeet V3 — show model-specific language list
-				const picked = await pickLanguage(ctx, currentConfig.language, languages);
-				if (!picked) return undefined;
-				langCode = picked;
+				// Auto-detect from system locale, let user confirm or change
+				const device = detectDevice();
+				const detectedLang = localeToLanguageCode(device.systemLocale);
+				const detectedEntry = languages.find(l => l.code === detectedLang);
+				if (detectedEntry) {
+					langCode = detectedLang;
+					ctx.ui.notify(`Language auto-detected: ${detectedEntry.name} (${detectedEntry.code}). Change with /voice-language.`, "info");
+				} else {
+					const picked = await pickLanguage(ctx, currentConfig.language, languages);
+					if (!picked) return undefined;
+					langCode = picked;
+				}
 			}
 		} else {
-			// Deepgram — show full Deepgram language list
+			// Deepgram — show full language list
 			const picked = await pickLanguage(ctx, currentConfig.language);
 			if (!picked) return undefined;
 			langCode = picked;
@@ -458,8 +626,9 @@ export async function runVoiceOnboarding(
 	if (!scopeChoice) return undefined;
 	const selectedScope: VoiceSettingsScope = scopeChoice.startsWith("Project") ? "project" : "global";
 
+	const selectedModel = LOCAL_MODELS.find(m => m.id === localModel);
 	const backendLabel = selectedBackend === "local"
-		? `Local — ${LOCAL_MODELS.find(m => m.id === localModel)?.name || localModel} at ${localEndpoint}`
+		? `Local — ${selectedModel?.name || localModel}${localEndpoint ? ` at ${localEndpoint}` : " (in-process)"}`
 		: "Deepgram Nova-3 (streaming)";
 
 	const summaryLines = [
@@ -492,4 +661,32 @@ export async function runVoiceOnboarding(
 			},
 		},
 	};
+}
+
+/** Prompt for external server URL. Returns undefined if cancelled. */
+async function promptServerEndpoint(ctx: VoiceUiContext): Promise<string | undefined> {
+	ctx.ui.notify(
+		[
+			"External server mode — you manage your own transcription server.",
+			"",
+			"Compatible servers: whisper.cpp, faster-whisper-server, transcribe-rs",
+			"Must implement POST /v1/audio/transcriptions (OpenAI-compatible).",
+		].join("\n"),
+		"info",
+	);
+
+	const customEndpoint = await ctx.ui.input(`Server URL (Enter for ${DEFAULT_LOCAL_ENDPOINT})`);
+	const endpoint = customEndpoint?.trim() || DEFAULT_LOCAL_ENDPOINT;
+
+	const serverCheck = await checkLocalServer(endpoint);
+	if (!serverCheck.ok) {
+		ctx.ui.notify(
+			`Server not reachable at ${endpoint}\n${serverCheck.error || ""}\nVoice will work once the server is running.`,
+			"warning",
+		);
+	} else {
+		ctx.ui.notify(`Server detected at ${endpoint}`, "info");
+	}
+
+	return endpoint;
 }

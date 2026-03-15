@@ -751,17 +751,22 @@ export default function (pi: ExtensionAPI) {
 		summaryLines: string[],
 		source: "first-run" | "setup-command",
 	) {
+		const isLocal = nextConfig.backend === "local";
 		const hasKey = !!resolveDeepgramApiKey(nextConfig);
-		config = finalizeOnboardingConfig(nextConfig, { validated: hasKey, source });
+		// Local backend is always valid (sherpa handles everything). Deepgram needs API key.
+		const validated = isLocal || hasKey;
+		config = finalizeOnboardingConfig(nextConfig, { validated, source });
 		configSource = selectedScope;
 		const savedPath = saveConfig(config, selectedScope, currentCwd);
-		const statusHeader = hasKey ? "Voice setup complete." : "Voice setup saved, but DEEPGRAM_API_KEY is still required.";
+		const statusHeader = validated
+			? "Voice setup complete."
+			: "Voice setup saved, but DEEPGRAM_API_KEY is still required.";
 		uiCtx.ui.notify([
 			statusHeader,
 			...summaryLines,
 			"",
 			`Saved to ${savedPath}`,
-		].join("\n"), hasKey ? "info" : "warning");
+		].join("\n"), validated ? "info" : "warning");
 	}
 
 	// ─── Warmup Widget ──────────────────────────────────────────────────────
@@ -1776,6 +1781,11 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async () => {
 		voiceCleanup();
+		// Clean up sherpa recognizer cache
+		try {
+			const { clearRecognizerCache } = await import("./voice/sherpa-engine");
+			clearRecognizerCache();
+		} catch {}
 		ctx = null;
 	});
 
@@ -2232,7 +2242,7 @@ export default function (pi: ExtensionAPI) {
 				`  scope:       ${config.scope}`,
 			];
 			if (isLocal) {
-				lines.push(`  endpoint:    ${config.localEndpoint || DEFAULT_LOCAL_ENDPOINT}`);
+				lines.push(`  endpoint:    ${config.localEndpoint ? config.localEndpoint : "in-process (sherpa-onnx)"}`);
 			} else {
 				lines.push(`  api key:     ${dgKey ? "set (" + dgKey.slice(0, 8) + "…)" : "NOT SET"}`);
 			}
@@ -2244,10 +2254,147 @@ export default function (pi: ExtensionAPI) {
 				"Commands:",
 				"  /voice-setup      Reconfigure (backend, API key, language, scope)",
 				"  /voice-language   Change language (56+ supported)",
+				"  /voice-models     Manage local models (download, delete, switch)",
 				"  /voice test       Run diagnostics",
 				"  /voice on|off     Enable/disable",
 			);
 			cmdCtx.ui.notify(lines.join("\n"), "info");
+		},
+	});
+
+	// ─── /voice-models — local model management ─────────────────────────────
+
+	pi.registerCommand("voice-models", {
+		description: "Manage local voice models — list, download, delete, switch",
+		handler: async (args, cmdCtx) => {
+			ctx = cmdCtx;
+			const sub = (args || "").trim().toLowerCase();
+
+			const { detectDevice, getModelFitness, formatDeviceSummary } = await import("./voice/device");
+			const { getDownloadedModels, deleteModel, isModelDownloaded } = await import("./voice/model-download");
+			const { isSherpaAvailable } = await import("./voice/sherpa-engine");
+			const { pickLocalModel } = await import("./voice/onboarding");
+
+			if (sub === "list" || sub === "" || !sub) {
+				// List all models with device fitness + download status
+				const device = detectDevice();
+				const downloaded = getDownloadedModels();
+				const downloadedIds = new Set(downloaded.map(d => d.id));
+				const lines = [
+					`Local models (${formatDeviceSummary(device)}):`,
+					`sherpa-onnx: ${isSherpaAvailable() ? "available" : "not initialized"}`,
+					"",
+				];
+
+				const currentModel = config.localModel || "whisper-small";
+				for (const m of LOCAL_MODELS) {
+					const fitness = getModelFitness(m, device);
+					const isDownloaded = downloadedIds.has(m.id);
+					const isCurrent = m.id === currentModel;
+					const dlInfo = downloaded.find(d => d.id === m.id);
+					const badge = fitness === "recommended" ? " [recommended]" :
+						fitness === "compatible" ? "" :
+						fitness === "warning" ? " [may be slow]" : " [too large]";
+					const status = isCurrent ? " (active)" : isDownloaded ? ` (${dlInfo?.sizeMB || "?"}MB on disk)` : "";
+					const prefix = isCurrent ? "→ " : "  ";
+					lines.push(`${prefix}${m.name} — ${m.size}${badge}${status}`);
+				}
+
+				lines.push(
+					"",
+					"Commands:",
+					"  /voice-models switch    — Pick a different model (fuzzy search)",
+					"  /voice-models delete    — Delete a downloaded model",
+					"  /voice-models device    — Show device profile",
+				);
+				cmdCtx.ui.notify(lines.join("\n"), "info");
+				return;
+			}
+
+			if (sub === "switch" || sub === "change" || sub === "pick") {
+				const picked = await pickLocalModel(cmdCtx, config.localModel, config.language);
+				if (!picked) {
+					cmdCtx.ui.notify("Model selection cancelled.", "info");
+					return;
+				}
+
+				// Clear cached recognizer if model changed
+				if (config.localModel !== picked.id) {
+					try {
+						const { clearRecognizerCache } = await import("./voice/sherpa-engine");
+						clearRecognizerCache();
+					} catch {}
+				}
+
+				config.localModel = picked.id;
+				config.backend = "local";
+				config.localEndpoint = undefined; // Switch to in-process
+				saveConfig(config, config.scope === "project" ? "project" : "global", currentCwd);
+
+				const device = detectDevice();
+				const fitness = getModelFitness(picked, device);
+				const badge = fitness === "recommended" ? " (recommended)" :
+					fitness === "compatible" ? "" :
+					fitness === "warning" ? " (may be slow)" : " (too large for this device)";
+
+				cmdCtx.ui.notify(
+					`Switched to ${picked.name}${badge}\nModel will download automatically on first recording.`,
+					fitness === "incompatible" ? "warning" : "info",
+				);
+				return;
+			}
+
+			if (sub === "delete" || sub === "remove") {
+				const downloaded = getDownloadedModels();
+				if (downloaded.length === 0) {
+					cmdCtx.ui.notify("No downloaded models to delete.", "info");
+					return;
+				}
+
+				const options = downloaded.map(d => `${d.id} (${d.sizeMB} MB)`);
+				const choice = await cmdCtx.ui.select("Delete which model?", options);
+				if (!choice) return;
+
+				const modelId = choice.split(" (")[0]!;
+				if (deleteModel(modelId)) {
+					// Clear cached recognizer if deleting active model
+					if (config.localModel === modelId) {
+						try {
+							const { clearRecognizerCache } = await import("./voice/sherpa-engine");
+							clearRecognizerCache();
+						} catch {}
+					}
+					cmdCtx.ui.notify(`Deleted ${modelId}.`, "info");
+				} else {
+					cmdCtx.ui.notify(`Failed to delete ${modelId}.`, "error");
+				}
+				return;
+			}
+
+			if (sub === "device" || sub === "info") {
+				const device = detectDevice();
+				const lines = [
+					"Device profile:",
+					"",
+					`  Platform:    ${device.platform} ${device.arch}`,
+					`  RAM:         ${(device.totalRamMB / 1024).toFixed(1)} GB total, ${(device.freeRamMB / 1024).toFixed(1)} GB free`,
+					`  CPU:         ${device.cpuCores} cores — ${device.cpuModel}`,
+					`  RPi:         ${device.isRaspberryPi ? (device.piModel || "yes") : "no"}`,
+					`  GPU:         ${device.gpu.hasNvidia ? (device.gpu.gpuName || "NVIDIA") : device.gpu.hasMetal ? "Apple Silicon (Metal)" : "none"}`,
+					`  Container:   ${device.isContainer ? "yes" : "no"}`,
+					`  Locale:      ${device.systemLocale}`,
+				];
+				if (device.gpu.vramMB) {
+					lines.push(`  VRAM:        ${device.gpu.vramMB} MB`);
+				}
+				cmdCtx.ui.notify(lines.join("\n"), "info");
+				return;
+			}
+
+			cmdCtx.ui.notify(
+				"Usage: /voice-models [list|switch|delete|device]",
+				"info",
+			);
 		},
 	});
 

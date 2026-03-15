@@ -1,14 +1,13 @@
 /**
- * Local transcription backend — batch-mode STT using a local server.
+ * Local transcription backend — in-process STT via sherpa-onnx + external server fallback.
  *
- * Supports any OpenAI-compatible transcription API:
- *   - whisper.cpp server (built-in /v1/audio/transcriptions)
- *   - faster-whisper-server
- *   - Any server implementing POST /v1/audio/transcriptions
+ * Default: sherpa-onnx in-process inference (zero-config, auto-download models).
+ * Fallback: External server via POST /v1/audio/transcriptions (advanced users).
  *
- * Models mirror what handy.computer supports via transcribe-rs.
+ * All 20+ models supported in-process via sherpa-onnx-node.
+ * Int8 quantized models used by default for smaller downloads and lower RAM.
  *
- * Architecture difference from Deepgram:
+ * Architecture:
  *   Deepgram  → real-time streaming (WebSocket, interim results while speaking)
  *   Local     → batch mode (record complete audio, transcribe after stop)
  */
@@ -17,46 +16,148 @@ import type { ChildProcess } from "node:child_process";
 import type { VoiceConfig } from "./config";
 import { SAMPLE_RATE, CHANNELS } from "./deepgram";
 
-// ─── Model catalog (mirrors handy.computer's transcribe-rs models) ───────────
+// ─── Model catalog ───────────────────────────────────────────────────────────
+
+export interface SherpaModelConfig {
+	/** Recognizer type for sherpa-onnx */
+	type: "whisper" | "moonshine" | "sense_voice" | "nemo_ctc" | "transducer";
+	/** Map of role → filename within model directory */
+	files: Record<string, string>;
+	/** Map of role → download URL (HuggingFace or GitHub releases) */
+	downloadUrls: Record<string, string>;
+}
 
 export interface LocalModelInfo {
 	id: string;
 	name: string;
+	/** Human-readable download size (int8 where available) */
 	size: string;
+	/** Download size in bytes (for progress tracking + fitness scoring) */
+	sizeBytes: number;
+	/** Peak runtime RAM in MB (~2.5x model file size) */
+	runtimeRamMB: number;
 	notes: string;
 	/** Language family — determines which language list to show */
 	langSupport: "whisper" | "english-only" | "parakeet-multi" | "sensevoice" | "russian-only"
 		| "single-ar" | "single-zh" | "single-ja" | "single-ko" | "single-uk" | "single-vi" | "single-es";
+	/** Device tier: edge (<256 MB), standard (256 MB–1 GB), heavy (>1 GB) */
+	tier: "edge" | "standard" | "heavy";
+	/** sherpa-onnx model configuration — file paths and download URLs */
+	sherpaModel: SherpaModelConfig;
 }
 
+// HuggingFace base URL for sherpa-onnx models
+const HF = "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny/resolve/main";
+const SHERPA_GH = "https://github.com/k2-fsa/sherpa-onnx/releases/download";
+
 export const LOCAL_MODELS: LocalModelInfo[] = [
-	// ── Whisper (OpenAI) — multilingual, 57 languages ─────────────────────
-	{ id: "whisper-small", name: "Whisper Small", size: "487 MB", notes: "Good balance of speed and accuracy", langSupport: "whisper" },
-	{ id: "whisper-medium", name: "Whisper Medium", size: "492 MB", notes: "Better accuracy, moderate speed", langSupport: "whisper" },
-	{ id: "whisper-turbo", name: "Whisper Turbo", size: "1.6 GB", notes: "Fast and accurate, needs GPU", langSupport: "whisper" },
-	{ id: "whisper-large", name: "Whisper Large", size: "1.1 GB", notes: "Best accuracy, slowest", langSupport: "whisper" },
+	// ── Moonshine v2 Streaming — English only, low-latency, best for edge ──
+	{
+		id: "moonshine-v2-tiny", name: "Moonshine v2 Tiny", size: "~31 MB", sizeBytes: 32_505_856, runtimeRamMB: 80,
+		notes: "Streaming, 34M params, 50ms latency, English only", langSupport: "english-only", tier: "edge",
+		sherpaModel: { type: "moonshine", files: { preprocessor: "preprocess.onnx", encoder: "encode.int8.onnx", uncachedDecoder: "uncached_decode.int8.onnx", cachedDecoder: "cached_decode.int8.onnx", tokens: "tokens.txt" }, downloadUrls: {} },
+	},
+	{
+		id: "moonshine-v2-small", name: "Moonshine v2 Small", size: "~100 MB", sizeBytes: 104_857_600, runtimeRamMB: 250,
+		notes: "Streaming, 123M params, 148ms latency, English only", langSupport: "english-only", tier: "edge",
+		sherpaModel: { type: "moonshine", files: { preprocessor: "preprocess.onnx", encoder: "encode.int8.onnx", uncachedDecoder: "uncached_decode.int8.onnx", cachedDecoder: "cached_decode.int8.onnx", tokens: "tokens.txt" }, downloadUrls: {} },
+	},
+	{
+		id: "moonshine-v2-medium", name: "Moonshine v2 Medium", size: "~192 MB", sizeBytes: 201_326_592, runtimeRamMB: 480,
+		notes: "Streaming, 245M params, beats Whisper Large v3 WER, English only", langSupport: "english-only", tier: "standard",
+		sherpaModel: { type: "moonshine", files: { preprocessor: "preprocess.onnx", encoder: "encode.int8.onnx", uncachedDecoder: "uncached_decode.int8.onnx", cachedDecoder: "cached_decode.int8.onnx", tokens: "tokens.txt" }, downloadUrls: {} },
+	},
 	// ── Moonshine v1 (Useful Sensors) — English only ──────────────────────
-	{ id: "moonshine-tiny", name: "Moonshine Tiny", size: "~60 MB", notes: "Ultra-fast, 5x less compute than Whisper, English only", langSupport: "english-only" },
-	{ id: "moonshine-base", name: "Moonshine Base", size: "~130 MB", notes: "Fast and accurate, edge-optimized, English only", langSupport: "english-only" },
-	// ── Moonshine v2 Streaming — English only, low-latency ────────────────
-	{ id: "moonshine-v2-tiny", name: "Moonshine v2 Tiny", size: "~31 MB", notes: "Streaming, 34M params, 50ms latency, English only", langSupport: "english-only" },
-	{ id: "moonshine-v2-small", name: "Moonshine v2 Small", size: "~100 MB", notes: "Streaming, 123M params, 148ms latency, English only", langSupport: "english-only" },
-	{ id: "moonshine-v2-medium", name: "Moonshine v2 Medium", size: "~192 MB", notes: "Streaming, 245M params, beats Whisper Large v3 WER, English only", langSupport: "english-only" },
+	{
+		id: "moonshine-tiny", name: "Moonshine Tiny", size: "~60 MB", sizeBytes: 62_914_560, runtimeRamMB: 150,
+		notes: "Ultra-fast, 5x less compute than Whisper, English only", langSupport: "english-only", tier: "edge",
+		sherpaModel: { type: "moonshine", files: { preprocessor: "preprocess.onnx", encoder: "encode.int8.onnx", uncachedDecoder: "uncached_decode.int8.onnx", cachedDecoder: "cached_decode.int8.onnx", tokens: "tokens.txt" }, downloadUrls: {} },
+	},
+	{
+		id: "moonshine-base", name: "Moonshine Base", size: "~130 MB", sizeBytes: 136_314_880, runtimeRamMB: 325,
+		notes: "Fast and accurate, edge-optimized, English only", langSupport: "english-only", tier: "standard",
+		sherpaModel: { type: "moonshine", files: { preprocessor: "preprocess.onnx", encoder: "encode.int8.onnx", uncachedDecoder: "uncached_decode.int8.onnx", cachedDecoder: "cached_decode.int8.onnx", tokens: "tokens.txt" }, downloadUrls: {} },
+	},
+	// ── Whisper (OpenAI) — multilingual, 57 languages ─────────────────────
+	{
+		id: "whisper-small", name: "Whisper Small", size: "~180 MB", sizeBytes: 188_743_680, runtimeRamMB: 450,
+		notes: "Good balance of speed and accuracy, 57 languages", langSupport: "whisper", tier: "standard",
+		sherpaModel: { type: "whisper", files: { encoder: "encoder.int8.onnx", decoder: "decoder.int8.onnx", tokens: "tokens.txt" }, downloadUrls: {} },
+	},
+	{
+		id: "whisper-medium", name: "Whisper Medium", size: "~500 MB", sizeBytes: 524_288_000, runtimeRamMB: 1250,
+		notes: "Better accuracy, moderate speed, 57 languages", langSupport: "whisper", tier: "standard",
+		sherpaModel: { type: "whisper", files: { encoder: "encoder.int8.onnx", decoder: "decoder.int8.onnx", tokens: "tokens.txt" }, downloadUrls: {} },
+	},
+	{
+		id: "whisper-turbo", name: "Whisper Turbo", size: "~574 MB", sizeBytes: 601_882_624, runtimeRamMB: 1400,
+		notes: "Fast and accurate, 57 languages", langSupport: "whisper", tier: "heavy",
+		sherpaModel: { type: "whisper", files: { encoder: "encoder.int8.onnx", decoder: "decoder.int8.onnx", tokens: "tokens.txt" }, downloadUrls: {} },
+	},
+	{
+		id: "whisper-large", name: "Whisper Large v3", size: "~1.0 GB", sizeBytes: 1_073_741_824, runtimeRamMB: 2500,
+		notes: "Best accuracy, slowest, 57 languages", langSupport: "whisper", tier: "heavy",
+		sherpaModel: { type: "whisper", files: { encoder: "encoder.int8.onnx", decoder: "decoder.int8.onnx", tokens: "tokens.txt" }, downloadUrls: {} },
+	},
 	// ── Moonshine Flavors — single-language specialized tiny models ────────
-	{ id: "moonshine-tiny-ar", name: "Moonshine Tiny Arabic", size: "~60 MB", notes: "Arabic-specialized, 27M params", langSupport: "single-ar" },
-	{ id: "moonshine-tiny-zh", name: "Moonshine Tiny Chinese", size: "~60 MB", notes: "Chinese-specialized, 27M params", langSupport: "single-zh" },
-	{ id: "moonshine-tiny-ja", name: "Moonshine Tiny Japanese", size: "~60 MB", notes: "Japanese-specialized, 27M params", langSupport: "single-ja" },
-	{ id: "moonshine-tiny-ko", name: "Moonshine Tiny Korean", size: "~60 MB", notes: "Korean-specialized, 27M params", langSupport: "single-ko" },
-	{ id: "moonshine-tiny-uk", name: "Moonshine Tiny Ukrainian", size: "~60 MB", notes: "Ukrainian-specialized, 27M params", langSupport: "single-uk" },
-	{ id: "moonshine-tiny-vi", name: "Moonshine Tiny Vietnamese", size: "~60 MB", notes: "Vietnamese-specialized, 27M params", langSupport: "single-vi" },
-	{ id: "moonshine-base-es", name: "Moonshine Base Spanish", size: "~130 MB", notes: "Spanish-specialized, 61M params", langSupport: "single-es" },
+	{
+		id: "moonshine-tiny-ar", name: "Moonshine Tiny Arabic", size: "~60 MB", sizeBytes: 62_914_560, runtimeRamMB: 150,
+		notes: "Arabic-specialized, 27M params", langSupport: "single-ar", tier: "edge",
+		sherpaModel: { type: "moonshine", files: { preprocessor: "preprocess.onnx", encoder: "encode.int8.onnx", uncachedDecoder: "uncached_decode.int8.onnx", cachedDecoder: "cached_decode.int8.onnx", tokens: "tokens.txt" }, downloadUrls: {} },
+	},
+	{
+		id: "moonshine-tiny-zh", name: "Moonshine Tiny Chinese", size: "~60 MB", sizeBytes: 62_914_560, runtimeRamMB: 150,
+		notes: "Chinese-specialized, 27M params", langSupport: "single-zh", tier: "edge",
+		sherpaModel: { type: "moonshine", files: { preprocessor: "preprocess.onnx", encoder: "encode.int8.onnx", uncachedDecoder: "uncached_decode.int8.onnx", cachedDecoder: "cached_decode.int8.onnx", tokens: "tokens.txt" }, downloadUrls: {} },
+	},
+	{
+		id: "moonshine-tiny-ja", name: "Moonshine Tiny Japanese", size: "~60 MB", sizeBytes: 62_914_560, runtimeRamMB: 150,
+		notes: "Japanese-specialized, 27M params", langSupport: "single-ja", tier: "edge",
+		sherpaModel: { type: "moonshine", files: { preprocessor: "preprocess.onnx", encoder: "encode.int8.onnx", uncachedDecoder: "uncached_decode.int8.onnx", cachedDecoder: "cached_decode.int8.onnx", tokens: "tokens.txt" }, downloadUrls: {} },
+	},
+	{
+		id: "moonshine-tiny-ko", name: "Moonshine Tiny Korean", size: "~60 MB", sizeBytes: 62_914_560, runtimeRamMB: 150,
+		notes: "Korean-specialized, 27M params", langSupport: "single-ko", tier: "edge",
+		sherpaModel: { type: "moonshine", files: { preprocessor: "preprocess.onnx", encoder: "encode.int8.onnx", uncachedDecoder: "uncached_decode.int8.onnx", cachedDecoder: "cached_decode.int8.onnx", tokens: "tokens.txt" }, downloadUrls: {} },
+	},
+	{
+		id: "moonshine-tiny-uk", name: "Moonshine Tiny Ukrainian", size: "~60 MB", sizeBytes: 62_914_560, runtimeRamMB: 150,
+		notes: "Ukrainian-specialized, 27M params", langSupport: "single-uk", tier: "edge",
+		sherpaModel: { type: "moonshine", files: { preprocessor: "preprocess.onnx", encoder: "encode.int8.onnx", uncachedDecoder: "uncached_decode.int8.onnx", cachedDecoder: "cached_decode.int8.onnx", tokens: "tokens.txt" }, downloadUrls: {} },
+	},
+	{
+		id: "moonshine-tiny-vi", name: "Moonshine Tiny Vietnamese", size: "~60 MB", sizeBytes: 62_914_560, runtimeRamMB: 150,
+		notes: "Vietnamese-specialized, 27M params", langSupport: "single-vi", tier: "edge",
+		sherpaModel: { type: "moonshine", files: { preprocessor: "preprocess.onnx", encoder: "encode.int8.onnx", uncachedDecoder: "uncached_decode.int8.onnx", cachedDecoder: "cached_decode.int8.onnx", tokens: "tokens.txt" }, downloadUrls: {} },
+	},
+	{
+		id: "moonshine-base-es", name: "Moonshine Base Spanish", size: "~130 MB", sizeBytes: 136_314_880, runtimeRamMB: 325,
+		notes: "Spanish-specialized, 61M params", langSupport: "single-es", tier: "standard",
+		sherpaModel: { type: "moonshine", files: { preprocessor: "preprocess.onnx", encoder: "encode.int8.onnx", uncachedDecoder: "uncached_decode.int8.onnx", cachedDecoder: "cached_decode.int8.onnx", tokens: "tokens.txt" }, downloadUrls: {} },
+	},
 	// ── SenseVoice (Alibaba/FunAudioLLM) — 5 languages ───────────────────
-	{ id: "sensevoice-small", name: "SenseVoice Small", size: "~228 MB", notes: "5 languages (zh/en/ja/ko/yue), 244M params, ultra-fast batch", langSupport: "sensevoice" },
+	{
+		id: "sensevoice-small", name: "SenseVoice Small", size: "~228 MB", sizeBytes: 239_075_328, runtimeRamMB: 570,
+		notes: "5 languages (zh/en/ja/ko/yue), 244M params, ultra-fast batch", langSupport: "sensevoice", tier: "standard",
+		sherpaModel: { type: "sense_voice", files: { model: "model.int8.onnx", tokens: "tokens.txt" }, downloadUrls: {} },
+	},
 	// ── GigaAM v3 (Sber/Salute) — Russian only ───────────────────────────
-	{ id: "gigaam-v3", name: "GigaAM v3", size: "~225 MB", notes: "Russian only, 220M params, 50% lower WER than Whisper on Russian", langSupport: "russian-only" },
+	{
+		id: "gigaam-v3", name: "GigaAM v3", size: "~225 MB", sizeBytes: 235_929_600, runtimeRamMB: 560,
+		notes: "Russian only, 220M params, 50% lower WER than Whisper on Russian", langSupport: "russian-only", tier: "standard",
+		sherpaModel: { type: "nemo_ctc", files: { model: "model.int8.onnx", tokens: "tokens.txt" }, downloadUrls: {} },
+	},
 	// ── Parakeet (NVIDIA) ─────────────────────────────────────────────────
-	{ id: "parakeet-v2", name: "Parakeet V2", size: "473 MB", notes: "CPU-optimized, English only", langSupport: "english-only" },
-	{ id: "parakeet-v3", name: "Parakeet V3", size: "478 MB", notes: "CPU-optimized, auto language detection", langSupport: "parakeet-multi" },
+	{
+		id: "parakeet-v2", name: "Parakeet V2", size: "~473 MB", sizeBytes: 495_976_448, runtimeRamMB: 1180,
+		notes: "CPU-optimized, English only, NVIDIA NeMo", langSupport: "english-only", tier: "standard",
+		sherpaModel: { type: "nemo_ctc", files: { model: "model.int8.onnx", tokens: "tokens.txt" }, downloadUrls: {} },
+	},
+	{
+		id: "parakeet-v3", name: "Parakeet V3", size: "~478 MB", sizeBytes: 501_219_328, runtimeRamMB: 1195,
+		notes: "CPU-optimized, auto language detection, NVIDIA NeMo", langSupport: "parakeet-multi", tier: "standard",
+		sherpaModel: { type: "nemo_ctc", files: { model: "model.int8.onnx", tokens: "tokens.txt" }, downloadUrls: {} },
+	},
 ];
 
 export const DEFAULT_LOCAL_ENDPOINT = "http://localhost:8080";
@@ -399,8 +500,11 @@ export function startLocalSession(
 }
 
 /**
- * Stop recording and transcribe the buffered audio via local server.
- * This is async — transcription takes time with local models.
+ * Stop recording and transcribe the buffered audio.
+ *
+ * Routes transcription based on config:
+ *   - If localEndpoint is set → external server (advanced users)
+ *   - Otherwise → sherpa-onnx in-process (default, zero-config)
  */
 export async function stopLocalSession(session: LocalSession, config: VoiceConfig): Promise<void> {
 	if (session.closed) return;
@@ -419,10 +523,18 @@ export async function stopLocalSession(session: LocalSession, config: VoiceConfi
 		return;
 	}
 
-	const wavBuffer = createWavBuffer(pcmData);
-
 	try {
-		const text = await transcribeWithServer(wavBuffer, config);
+		let text: string;
+
+		if (config.localEndpoint) {
+			// External server mode (advanced override)
+			const wavBuffer = createWavBuffer(pcmData);
+			text = await transcribeWithServer(wavBuffer, config);
+		} else {
+			// In-process via sherpa-onnx (default)
+			text = await transcribeInProcess(pcmData, config);
+		}
+
 		session.closed = true;
 		session.onDone(text, { hadAudio: true, hadSpeech: text.trim().length > 0 });
 	} catch (err: any) {
@@ -436,6 +548,39 @@ export function abortLocalSession(session: LocalSession | null): void {
 	if (!session || session.closed) return;
 	session.closed = true;
 	try { session.recProcess.kill("SIGKILL"); } catch {}
+}
+
+// ─── In-process transcription via sherpa-onnx ────────────────────────────────
+
+/**
+ * Transcribe PCM audio using sherpa-onnx in-process.
+ * Auto-downloads model on first use.
+ */
+async function transcribeInProcess(pcmData: Buffer, config: VoiceConfig): Promise<string> {
+	const { initSherpa, isSherpaAvailable, getSherpaError, getOrCreateRecognizer, transcribeBuffer } = await import("./sherpa-engine");
+	const { ensureModelDownloaded } = await import("./model-download");
+
+	// Initialize sherpa if needed
+	if (!isSherpaAvailable()) {
+		const ok = await initSherpa();
+		if (!ok) {
+			throw new Error(`sherpa-onnx not available: ${getSherpaError() || "unknown error"}. Set localEndpoint in config to use an external server instead.`);
+		}
+	}
+
+	const model = LOCAL_MODELS.find(m => m.id === (config.localModel || DEFAULT_LOCAL_MODEL));
+	if (!model) throw new Error(`Unknown model: ${config.localModel}`);
+
+	// Ensure model files are downloaded
+	const modelDir = await ensureModelDownloaded(
+		model.id,
+		model.sherpaModel.downloadUrls,
+		model.sizeBytes,
+	);
+
+	// Create/reuse recognizer and transcribe
+	const recognizer = getOrCreateRecognizer(model, modelDir, config.language || "en");
+	return transcribeBuffer(pcmData, recognizer);
 }
 
 /** Check if a local transcription server is reachable. */
