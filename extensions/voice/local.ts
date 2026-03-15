@@ -24,19 +24,132 @@ export interface LocalModelInfo {
 	name: string;
 	size: string;
 	notes: string;
+	/** Language family — determines which language list to show */
+	langSupport: "whisper" | "parakeet-en" | "parakeet-multi";
 }
 
 export const LOCAL_MODELS: LocalModelInfo[] = [
-	{ id: "whisper-small", name: "Whisper Small", size: "487 MB", notes: "Good balance of speed and accuracy" },
-	{ id: "whisper-medium", name: "Whisper Medium", size: "492 MB", notes: "Better accuracy, moderate speed" },
-	{ id: "whisper-turbo", name: "Whisper Turbo", size: "1.6 GB", notes: "Fast and accurate, needs GPU" },
-	{ id: "whisper-large", name: "Whisper Large", size: "1.1 GB", notes: "Best accuracy, slowest" },
-	{ id: "parakeet-v2", name: "Parakeet V2", size: "473 MB", notes: "CPU-optimized, English-focused" },
-	{ id: "parakeet-v3", name: "Parakeet V3", size: "478 MB", notes: "CPU-optimized, auto language detection" },
+	{ id: "whisper-small", name: "Whisper Small", size: "487 MB", notes: "Good balance of speed and accuracy", langSupport: "whisper" },
+	{ id: "whisper-medium", name: "Whisper Medium", size: "492 MB", notes: "Better accuracy, moderate speed", langSupport: "whisper" },
+	{ id: "whisper-turbo", name: "Whisper Turbo", size: "1.6 GB", notes: "Fast and accurate, needs GPU", langSupport: "whisper" },
+	{ id: "whisper-large", name: "Whisper Large", size: "1.1 GB", notes: "Best accuracy, slowest", langSupport: "whisper" },
+	{ id: "parakeet-v2", name: "Parakeet V2", size: "473 MB", notes: "CPU-optimized, English only", langSupport: "parakeet-en" },
+	{ id: "parakeet-v3", name: "Parakeet V3", size: "478 MB", notes: "CPU-optimized, auto language detection", langSupport: "parakeet-multi" },
 ];
 
 export const DEFAULT_LOCAL_ENDPOINT = "http://localhost:8080";
 export const DEFAULT_LOCAL_MODEL = "whisper-small";
+
+// ─── Language support per model family ───────────────────────────────────────
+// Whisper uses simple ISO 639-1 codes (no regional variants like "en-AU").
+// Parakeet V2 is English-only. Parakeet V3 shares Whisper's language set.
+
+export interface LocalLangEntry { name: string; code: string; popular?: boolean; }
+
+const WHISPER_LANGUAGES: LocalLangEntry[] = [
+	// Popular — shown first
+	{ name: "English", code: "en", popular: true },
+	{ name: "Hindi", code: "hi", popular: true },
+	{ name: "Spanish", code: "es", popular: true },
+	{ name: "French", code: "fr", popular: true },
+	{ name: "German", code: "de", popular: true },
+	{ name: "Portuguese", code: "pt", popular: true },
+	{ name: "Japanese", code: "ja", popular: true },
+	{ name: "Korean", code: "ko", popular: true },
+	{ name: "Chinese", code: "zh", popular: true },
+	{ name: "Arabic", code: "ar", popular: true },
+	{ name: "Russian", code: "ru", popular: true },
+	{ name: "Italian", code: "it", popular: true },
+	// All others alphabetically
+	{ name: "Afrikaans", code: "af" },
+	{ name: "Armenian", code: "hy" },
+	{ name: "Azerbaijani", code: "az" },
+	{ name: "Belarusian", code: "be" },
+	{ name: "Bengali", code: "bn" },
+	{ name: "Bosnian", code: "bs" },
+	{ name: "Bulgarian", code: "bg" },
+	{ name: "Catalan", code: "ca" },
+	{ name: "Croatian", code: "hr" },
+	{ name: "Czech", code: "cs" },
+	{ name: "Danish", code: "da" },
+	{ name: "Dutch", code: "nl" },
+	{ name: "Estonian", code: "et" },
+	{ name: "Finnish", code: "fi" },
+	{ name: "Galician", code: "gl" },
+	{ name: "Greek", code: "el" },
+	{ name: "Hebrew", code: "he" },
+	{ name: "Hungarian", code: "hu" },
+	{ name: "Icelandic", code: "is" },
+	{ name: "Indonesian", code: "id" },
+	{ name: "Kannada", code: "kn" },
+	{ name: "Kazakh", code: "kk" },
+	{ name: "Latvian", code: "lv" },
+	{ name: "Lithuanian", code: "lt" },
+	{ name: "Macedonian", code: "mk" },
+	{ name: "Malay", code: "ms" },
+	{ name: "Maori", code: "mi" },
+	{ name: "Marathi", code: "mr" },
+	{ name: "Nepali", code: "ne" },
+	{ name: "Norwegian", code: "no" },
+	{ name: "Persian", code: "fa" },
+	{ name: "Polish", code: "pl" },
+	{ name: "Romanian", code: "ro" },
+	{ name: "Serbian", code: "sr" },
+	{ name: "Slovak", code: "sk" },
+	{ name: "Slovenian", code: "sl" },
+	{ name: "Swahili", code: "sw" },
+	{ name: "Swedish", code: "sv" },
+	{ name: "Tagalog", code: "tl" },
+	{ name: "Tamil", code: "ta" },
+	{ name: "Telugu", code: "te" },
+	{ name: "Thai", code: "th" },
+	{ name: "Turkish", code: "tr" },
+	{ name: "Ukrainian", code: "uk" },
+	{ name: "Urdu", code: "ur" },
+	{ name: "Vietnamese", code: "vi" },
+	{ name: "Welsh", code: "cy" },
+];
+
+const PARAKEET_EN_LANGUAGES: LocalLangEntry[] = [
+	{ name: "English", code: "en", popular: true },
+];
+
+/**
+ * Get the supported language list for a local model.
+ * Returns undefined if the model is English-only (no picker needed).
+ */
+export function getLanguagesForLocalModel(modelId: string): { languages: LocalLangEntry[]; englishOnly: boolean } {
+	const model = LOCAL_MODELS.find(m => m.id === modelId);
+	if (!model) return { languages: WHISPER_LANGUAGES, englishOnly: false };
+
+	switch (model.langSupport) {
+		case "parakeet-en":
+			return { languages: PARAKEET_EN_LANGUAGES, englishOnly: true };
+		case "parakeet-multi":
+		case "whisper":
+		default:
+			return { languages: WHISPER_LANGUAGES, englishOnly: false };
+	}
+}
+
+/**
+ * Check if a language code is supported by a local model.
+ * Used to validate /voice-language changes against current model.
+ */
+export function isLanguageSupportedByModel(modelId: string, langCode: string): boolean {
+	const { languages } = getLanguagesForLocalModel(modelId);
+	// Match base code (e.g. "en" matches "en", regional variants stripped for local)
+	const baseCode = langCode.split("-")[0];
+	return languages.some(l => l.code === baseCode || l.code === langCode);
+}
+
+/**
+ * Find display name for a language code in local model context.
+ */
+export function localLanguageDisplayName(code: string): string {
+	const entry = WHISPER_LANGUAGES.find(l => l.code === code);
+	return entry ? `${entry.name} (${entry.code})` : code;
+}
 
 // ─── Local session type ──────────────────────────────────────────────────────
 

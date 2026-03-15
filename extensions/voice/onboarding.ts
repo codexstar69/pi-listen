@@ -1,6 +1,10 @@
 import type { ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { VoiceBackend, VoiceConfig, VoiceSettingsScope } from "./config";
-import { LOCAL_MODELS, DEFAULT_LOCAL_MODEL, DEFAULT_LOCAL_ENDPOINT, checkLocalServer } from "./local";
+import {
+	LOCAL_MODELS, DEFAULT_LOCAL_MODEL, DEFAULT_LOCAL_ENDPOINT,
+	checkLocalServer, getLanguagesForLocalModel,
+	type LocalLangEntry,
+} from "./local";
 
 type VoiceUiContext = ExtensionContext | ExtensionCommandContext;
 
@@ -110,13 +114,23 @@ export function languageDisplayName(code: string): string {
 	return entry ? `${entry.name} (${entry.code})` : code;
 }
 
-/** Show language picker with fuzzy search — uses ctx.ui.custom() for real-time filtering */
-export async function pickLanguage(ctx: VoiceUiContext, currentCode: string): Promise<string | undefined> {
+/** Show language picker with fuzzy search — uses ctx.ui.custom() for real-time filtering.
+ *  Pass `overrideLanguages` to show a model-specific language list (e.g. for local Whisper/Parakeet). */
+export async function pickLanguage(
+	ctx: VoiceUiContext,
+	currentCode: string,
+	overrideLanguages?: LocalLangEntry[],
+): Promise<string | undefined> {
 	const { Container, Input, Spacer, Text, fuzzyFilter, getEditorKeybindings } = await import("@mariozechner/pi-tui");
 
-	const current = languageDisplayName(currentCode);
-	const popular = LANGUAGES.filter(l => l.popular);
-	const allItems = LANGUAGES.map(l => ({ ...l, label: formatLangOption(l) }));
+	const langList: LangEntry[] = overrideLanguages
+		? overrideLanguages.map(l => ({ name: l.name, code: l.code, popular: l.popular }))
+		: LANGUAGES;
+	const current = overrideLanguages
+		? (langList.find(l => l.code === currentCode)?.name ?? currentCode)
+		: languageDisplayName(currentCode);
+	const popular = langList.filter(l => l.popular);
+	const allItems = langList.map(l => ({ ...l, label: formatLangOption(l) }));
 
 	return ctx.ui.custom<string | undefined>((tui, theme, _keybindings, done) => {
 		const container = new Container();
@@ -415,9 +429,24 @@ export async function runVoiceOnboarding(
 	// ─── Choose language (first-run only) ────────────────────
 	let langCode = currentConfig.language;
 	if (isFirstRun) {
-		const picked = await pickLanguage(ctx, currentConfig.language);
-		if (!picked) return undefined;
-		langCode = picked;
+		if (selectedBackend === "local" && localModel) {
+			const { languages, englishOnly } = getLanguagesForLocalModel(localModel);
+			if (englishOnly) {
+				// Parakeet V2 — English only, skip picker
+				langCode = "en";
+				ctx.ui.notify("Language set to English (only language supported by this model).", "info");
+			} else {
+				// Whisper / Parakeet V3 — show model-specific language list
+				const picked = await pickLanguage(ctx, currentConfig.language, languages);
+				if (!picked) return undefined;
+				langCode = picked;
+			}
+		} else {
+			// Deepgram — show full Deepgram language list
+			const picked = await pickLanguage(ctx, currentConfig.language);
+			if (!picked) return undefined;
+			langCode = picked;
+		}
 	}
 
 	// ─── Choose scope ────────────────────────────────────────

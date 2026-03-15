@@ -81,6 +81,7 @@ import { buildDeepgramWsUrl, resolveDeepgramApiKey, SAMPLE_RATE, CHANNELS } from
 import {
 	startLocalSession, stopLocalSession, abortLocalSession,
 	checkLocalServer, LOCAL_MODELS, DEFAULT_LOCAL_ENDPOINT,
+	getLanguagesForLocalModel, isLanguageSupportedByModel, localLanguageDisplayName,
 	type LocalSession,
 } from "./voice/local";
 
@@ -2041,24 +2042,51 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			// /voice language — fuzzy search picker for 58+ languages
+			// /voice language — fuzzy search picker
 			if (sub === "language" || sub === "lang") {
-				const langCode = await pickLanguage(cmdCtx, config.language);
-				if (langCode) {
-					config.language = langCode;
-					saveConfig(config, config.scope === "project" ? "project" : "global", currentCwd);
-					const model = modelForLanguage(langCode);
-					cmdCtx.ui.notify(`Language: ${languageDisplayName(langCode)}\nModel: ${model}`, "info");
+				if (config.backend === "local") {
+					const localModelId = config.localModel || "whisper-small";
+					const { languages, englishOnly } = getLanguagesForLocalModel(localModelId);
+					if (englishOnly) {
+						cmdCtx.ui.notify(`${LOCAL_MODELS.find(m => m.id === localModelId)?.name || localModelId} only supports English.`, "warning");
+						return;
+					}
+					const langCode = await pickLanguage(cmdCtx, config.language, languages);
+					if (langCode) {
+						config.language = langCode;
+						saveConfig(config, config.scope === "project" ? "project" : "global", currentCwd);
+						cmdCtx.ui.notify(`Language: ${localLanguageDisplayName(langCode)}\nModel: ${localModelId}`, "info");
+					}
+				} else {
+					const langCode = await pickLanguage(cmdCtx, config.language);
+					if (langCode) {
+						config.language = langCode;
+						saveConfig(config, config.scope === "project" ? "project" : "global", currentCwd);
+						const model = modelForLanguage(langCode);
+						cmdCtx.ui.notify(`Language: ${languageDisplayName(langCode)}\nModel: ${model}`, "info");
+					}
 				}
 				return;
 			}
 			// /voice language <code> — direct set without picker
 			if (sub.startsWith("language ") || sub.startsWith("lang ")) {
 				const langCode = sub.replace(/^lang(uage)?\s+/, "").trim();
+				if (config.backend === "local") {
+					const localModelId = config.localModel || "whisper-small";
+					if (!isLanguageSupportedByModel(localModelId, langCode)) {
+						const modelName = LOCAL_MODELS.find(m => m.id === localModelId)?.name || localModelId;
+						cmdCtx.ui.notify(`"${langCode}" is not supported by ${modelName}.\nUse /voice language to see supported languages.`, "warning");
+						return;
+					}
+				}
 				config.language = langCode;
 				saveConfig(config, config.scope === "project" ? "project" : "global", currentCwd);
-				const model = modelForLanguage(langCode);
+				if (config.backend === "local") {
+					cmdCtx.ui.notify(`Language: ${localLanguageDisplayName(langCode)}\nModel: ${config.localModel || "whisper-small"}`, "info");
+				} else {
+					const model = modelForLanguage(langCode);
 					cmdCtx.ui.notify(`Language: ${languageDisplayName(langCode)}\nModel: ${model}`, "info");
+				}
 				return;
 			}
 
@@ -2128,25 +2156,55 @@ export default function (pi: ExtensionAPI) {
 	// ─── /voice-language — dedicated language picker ────────────────────────
 
 	pi.registerCommand("voice-language", {
-		description: "Change voice transcription language (56+ supported)",
+		description: "Change voice transcription language",
 		handler: async (args, cmdCtx) => {
 			ctx = cmdCtx;
+			const isLocal = config.backend === "local";
+			const localModelId = config.localModel || "whisper-small";
+
 			// Direct set: /voice-language hi
 			const direct = (args || "").trim().toLowerCase();
 			if (direct) {
+				if (isLocal) {
+					if (!isLanguageSupportedByModel(localModelId, direct)) {
+						const modelName = LOCAL_MODELS.find(m => m.id === localModelId)?.name || localModelId;
+						cmdCtx.ui.notify(`"${direct}" is not supported by ${modelName}.\nUse /voice-language to see supported languages.`, "warning");
+						return;
+					}
+				}
 				config.language = direct;
 				saveConfig(config, config.scope === "project" ? "project" : "global", currentCwd);
-				const model = modelForLanguage(direct);
-				cmdCtx.ui.notify(`Language: ${languageDisplayName(direct)}\nModel: ${model}`, "info");
+				if (isLocal) {
+					cmdCtx.ui.notify(`Language: ${localLanguageDisplayName(direct)}\nModel: ${localModelId}`, "info");
+				} else {
+					const model = modelForLanguage(direct);
+					cmdCtx.ui.notify(`Language: ${languageDisplayName(direct)}\nModel: ${model}`, "info");
+				}
 				return;
 			}
-			// Fuzzy picker
-			const langCode = await pickLanguage(cmdCtx, config.language);
-			if (langCode) {
-				config.language = langCode;
-				saveConfig(config, config.scope === "project" ? "project" : "global", currentCwd);
-				const model = modelForLanguage(langCode);
-				cmdCtx.ui.notify(`Language: ${languageDisplayName(langCode)}\nModel: ${model}`, "info");
+
+			// Fuzzy picker — show model-appropriate languages
+			if (isLocal) {
+				const { languages, englishOnly } = getLanguagesForLocalModel(localModelId);
+				if (englishOnly) {
+					const modelName = LOCAL_MODELS.find(m => m.id === localModelId)?.name || localModelId;
+					cmdCtx.ui.notify(`${modelName} only supports English.`, "warning");
+					return;
+				}
+				const langCode = await pickLanguage(cmdCtx, config.language, languages);
+				if (langCode) {
+					config.language = langCode;
+					saveConfig(config, config.scope === "project" ? "project" : "global", currentCwd);
+					cmdCtx.ui.notify(`Language: ${localLanguageDisplayName(langCode)}\nModel: ${localModelId}`, "info");
+				}
+			} else {
+				const langCode = await pickLanguage(cmdCtx, config.language);
+				if (langCode) {
+					config.language = langCode;
+					saveConfig(config, config.scope === "project" ? "project" : "global", currentCwd);
+					const model = modelForLanguage(langCode);
+					cmdCtx.ui.notify(`Language: ${languageDisplayName(langCode)}\nModel: ${model}`, "info");
+				}
 			}
 		},
 	});
