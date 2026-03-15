@@ -180,8 +180,10 @@ export async function downloadModel(
 				// Handle backpressure to avoid unbounded memory on slow disks
 				if (!writeStream.write(value)) {
 					await new Promise<void>((resolve, reject) => {
-						writeStream.once("drain", resolve);
-						writeStream.once("error", reject);
+						const onDrain = () => { writeStream.removeListener("error", onError); resolve(); };
+						const onError = (err: Error) => { writeStream.removeListener("drain", onDrain); reject(err); };
+						writeStream.once("drain", onDrain);
+						writeStream.once("error", onError);
 					});
 				}
 				fileDownloaded += value.byteLength;
