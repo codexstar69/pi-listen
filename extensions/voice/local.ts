@@ -25,7 +25,7 @@ export interface LocalModelInfo {
 	size: string;
 	notes: string;
 	/** Language family — determines which language list to show */
-	langSupport: "whisper" | "parakeet-en" | "parakeet-multi";
+	langSupport: "whisper" | "english-only" | "parakeet-multi";
 }
 
 export const LOCAL_MODELS: LocalModelInfo[] = [
@@ -33,7 +33,9 @@ export const LOCAL_MODELS: LocalModelInfo[] = [
 	{ id: "whisper-medium", name: "Whisper Medium", size: "492 MB", notes: "Better accuracy, moderate speed", langSupport: "whisper" },
 	{ id: "whisper-turbo", name: "Whisper Turbo", size: "1.6 GB", notes: "Fast and accurate, needs GPU", langSupport: "whisper" },
 	{ id: "whisper-large", name: "Whisper Large", size: "1.1 GB", notes: "Best accuracy, slowest", langSupport: "whisper" },
-	{ id: "parakeet-v2", name: "Parakeet V2", size: "473 MB", notes: "CPU-optimized, English only", langSupport: "parakeet-en" },
+	{ id: "moonshine-tiny", name: "Moonshine Tiny", size: "~60 MB", notes: "Ultra-fast, 5x less compute than Whisper, English only", langSupport: "english-only" },
+	{ id: "moonshine-base", name: "Moonshine Base", size: "~130 MB", notes: "Fast and accurate, edge-optimized, English only", langSupport: "english-only" },
+	{ id: "parakeet-v2", name: "Parakeet V2", size: "473 MB", notes: "CPU-optimized, English only", langSupport: "english-only" },
 	{ id: "parakeet-v3", name: "Parakeet V3", size: "478 MB", notes: "CPU-optimized, auto language detection", langSupport: "parakeet-multi" },
 ];
 
@@ -110,21 +112,21 @@ const WHISPER_LANGUAGES: LocalLangEntry[] = [
 	{ name: "Welsh", code: "cy" },
 ];
 
-const PARAKEET_EN_LANGUAGES: LocalLangEntry[] = [
+const ENGLISH_ONLY_LANGUAGES: LocalLangEntry[] = [
 	{ name: "English", code: "en", popular: true },
 ];
 
 /**
  * Get the supported language list for a local model.
- * Returns undefined if the model is English-only (no picker needed).
+ * Returns englishOnly=true for Moonshine and Parakeet V2 (no picker needed).
  */
 export function getLanguagesForLocalModel(modelId: string): { languages: LocalLangEntry[]; englishOnly: boolean } {
 	const model = LOCAL_MODELS.find(m => m.id === modelId);
 	if (!model) return { languages: WHISPER_LANGUAGES, englishOnly: false };
 
 	switch (model.langSupport) {
-		case "parakeet-en":
-			return { languages: PARAKEET_EN_LANGUAGES, englishOnly: true };
+		case "english-only":
+			return { languages: ENGLISH_ONLY_LANGUAGES, englishOnly: true };
 		case "parakeet-multi":
 		case "whisper":
 		default:
