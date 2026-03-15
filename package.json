@@ -53,5 +53,8 @@
     "README.md",
     "LICENSE",
     "package.json"
-  ]
+  ],
+  "optionalDependencies": {
+    "sherpa-onnx-node": "^1.12.29"
+  }
 }
