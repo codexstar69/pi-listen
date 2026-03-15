@@ -43,8 +43,10 @@ export type ModelFitness = "recommended" | "compatible" | "warning" | "incompati
 export function detectDevice(): DeviceProfile {
 	const platform = process.platform;
 	const arch = process.arch;
-	const cpuCores = os.cpus().length;
-	const cpuModel = os.cpus()[0]?.model || "unknown";
+	// os.cpus() can return undefined on Alpine/restricted containers
+	const cpuList = os.cpus() || [];
+	const cpuCores = cpuList.length || 1;
+	const cpuModel = cpuList[0]?.model || "unknown";
 
 	// RAM — container-aware
 	const isContainer = detectContainer();
@@ -260,7 +262,9 @@ function getContainerRamMB(hostRamMB: number): number {
 	for (const p of paths) {
 		try {
 			const raw = fs.readFileSync(p, "utf-8").trim();
-			if (raw === "max" || raw === "9223372036854775807") continue; // Unlimited
+			// "max" = cgroup v2 unlimited, LLONG_MAX variants = cgroup v1 unlimited
+		// Kernel sometimes returns page-aligned 9223372036854771712 instead of exact LLONG_MAX
+		if (raw === "max" || raw === "9223372036854775807" || raw === "9223372036854771712") continue;
 			const bytes = parseInt(raw, 10);
 			if (Number.isFinite(bytes) && bytes > 0) {
 				return Math.min(Math.round(bytes / (1024 * 1024)), hostRamMB);
