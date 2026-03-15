@@ -2132,6 +2132,8 @@ export default function (pi: ExtensionAPI) {
 					if (langCode) {
 						config.language = langCode;
 						saveConfig(config, config.scope === "project" ? "project" : "global", currentCwd);
+						// Clear cached recognizer so it's rebuilt with the new language
+						try { const { clearRecognizerCache } = await import("./voice/sherpa-engine"); clearRecognizerCache(); } catch {}
 						cmdCtx.ui.notify(`Language: ${localLanguageDisplayName(langCode)}\nModel: ${localModelId}`, "info");
 					}
 				} else {
@@ -2159,6 +2161,8 @@ export default function (pi: ExtensionAPI) {
 				config.language = langCode;
 				saveConfig(config, config.scope === "project" ? "project" : "global", currentCwd);
 				if (config.backend === "local") {
+					// Clear cached recognizer so it's rebuilt with the new language
+					try { const { clearRecognizerCache } = await import("./voice/sherpa-engine"); clearRecognizerCache(); } catch {}
 					cmdCtx.ui.notify(`Language: ${localLanguageDisplayName(langCode)}\nModel: ${config.localModel || "whisper-small"}`, "info");
 				} else {
 					const model = modelForLanguage(langCode);

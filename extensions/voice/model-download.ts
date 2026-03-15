@@ -179,7 +179,10 @@ export async function downloadModel(
 				// Write Uint8Array directly (no Buffer.from copy needed)
 				// Handle backpressure to avoid unbounded memory on slow disks
 				if (!writeStream.write(value)) {
-					await new Promise<void>(resolve => writeStream.once("drain", resolve));
+					await new Promise<void>((resolve, reject) => {
+						writeStream.once("drain", resolve);
+						writeStream.once("error", reject);
+					});
 				}
 				fileDownloaded += value.byteLength;
 				overallDownloaded += value.byteLength;

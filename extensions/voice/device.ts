@@ -333,7 +333,7 @@ function detectGPU(platform: NodeJS.Platform, arch: string): DeviceProfile["gpu"
 	}
 
 	// NVIDIA — skip expensive nvidia-smi if no GPU device file exists (Linux)
-	if (platform === "linux" && !fs.existsSync("/dev/nvidia0")) {
+	if (platform === "linux" && !fs.existsSync("/dev/nvidiactl")) {
 		return result;
 	}
 
