@@ -2048,7 +2048,9 @@ export default function (pi: ExtensionAPI) {
 					const localModelId = config.localModel || "whisper-small";
 					const { languages, englishOnly } = getLanguagesForLocalModel(localModelId);
 					if (englishOnly) {
-						cmdCtx.ui.notify(`${LOCAL_MODELS.find(m => m.id === localModelId)?.name || localModelId} only supports English.`, "warning");
+						const modelName = LOCAL_MODELS.find(m => m.id === localModelId)?.name || localModelId;
+						const langName = languages[0]?.name || "English";
+						cmdCtx.ui.notify(`${modelName} only supports ${langName}.`, "warning");
 						return;
 					}
 					const langCode = await pickLanguage(cmdCtx, config.language, languages);
@@ -2188,7 +2190,8 @@ export default function (pi: ExtensionAPI) {
 				const { languages, englishOnly } = getLanguagesForLocalModel(localModelId);
 				if (englishOnly) {
 					const modelName = LOCAL_MODELS.find(m => m.id === localModelId)?.name || localModelId;
-					cmdCtx.ui.notify(`${modelName} only supports English.`, "warning");
+					const langName = languages[0]?.name || "English";
+					cmdCtx.ui.notify(`${modelName} only supports ${langName}.`, "warning");
 					return;
 				}
 				const langCode = await pickLanguage(cmdCtx, config.language, languages);

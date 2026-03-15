@@ -432,9 +432,10 @@ export async function runVoiceOnboarding(
 		if (selectedBackend === "local" && localModel) {
 			const { languages, englishOnly } = getLanguagesForLocalModel(localModel);
 			if (englishOnly) {
-				// Parakeet V2 — English only, skip picker
-				langCode = "en";
-				ctx.ui.notify("Language set to English (only language supported by this model).", "info");
+				// Single-language model — auto-set to the only supported language
+				langCode = languages[0]?.code || "en";
+				const langName = languages[0]?.name || "English";
+				ctx.ui.notify(`Language set to ${langName} (only language supported by this model).`, "info");
 			} else {
 				// Whisper / Parakeet V3 — show model-specific language list
 				const picked = await pickLanguage(ctx, currentConfig.language, languages);

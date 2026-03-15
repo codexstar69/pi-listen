@@ -25,16 +25,36 @@ export interface LocalModelInfo {
 	size: string;
 	notes: string;
 	/** Language family — determines which language list to show */
-	langSupport: "whisper" | "english-only" | "parakeet-multi";
+	langSupport: "whisper" | "english-only" | "parakeet-multi" | "sensevoice" | "russian-only"
+		| "single-ar" | "single-zh" | "single-ja" | "single-ko" | "single-uk" | "single-vi" | "single-es";
 }
 
 export const LOCAL_MODELS: LocalModelInfo[] = [
+	// ── Whisper (OpenAI) — multilingual, 57 languages ─────────────────────
 	{ id: "whisper-small", name: "Whisper Small", size: "487 MB", notes: "Good balance of speed and accuracy", langSupport: "whisper" },
 	{ id: "whisper-medium", name: "Whisper Medium", size: "492 MB", notes: "Better accuracy, moderate speed", langSupport: "whisper" },
 	{ id: "whisper-turbo", name: "Whisper Turbo", size: "1.6 GB", notes: "Fast and accurate, needs GPU", langSupport: "whisper" },
 	{ id: "whisper-large", name: "Whisper Large", size: "1.1 GB", notes: "Best accuracy, slowest", langSupport: "whisper" },
+	// ── Moonshine v1 (Useful Sensors) — English only ──────────────────────
 	{ id: "moonshine-tiny", name: "Moonshine Tiny", size: "~60 MB", notes: "Ultra-fast, 5x less compute than Whisper, English only", langSupport: "english-only" },
 	{ id: "moonshine-base", name: "Moonshine Base", size: "~130 MB", notes: "Fast and accurate, edge-optimized, English only", langSupport: "english-only" },
+	// ── Moonshine v2 Streaming — English only, low-latency ────────────────
+	{ id: "moonshine-v2-tiny", name: "Moonshine v2 Tiny", size: "~70 MB", notes: "Streaming, 34M params, 50ms latency, English only", langSupport: "english-only" },
+	{ id: "moonshine-v2-small", name: "Moonshine v2 Small", size: "~250 MB", notes: "Streaming, 123M params, 148ms latency, English only", langSupport: "english-only" },
+	{ id: "moonshine-v2-medium", name: "Moonshine v2 Medium", size: "~490 MB", notes: "Streaming, 245M params, beats Whisper Large v3 WER, English only", langSupport: "english-only" },
+	// ── Moonshine Flavors — single-language specialized tiny models ────────
+	{ id: "moonshine-tiny-ar", name: "Moonshine Tiny Arabic", size: "~60 MB", notes: "Arabic-specialized, 27M params", langSupport: "single-ar" },
+	{ id: "moonshine-tiny-zh", name: "Moonshine Tiny Chinese", size: "~60 MB", notes: "Chinese-specialized, 27M params", langSupport: "single-zh" },
+	{ id: "moonshine-tiny-ja", name: "Moonshine Tiny Japanese", size: "~60 MB", notes: "Japanese-specialized, 27M params", langSupport: "single-ja" },
+	{ id: "moonshine-tiny-ko", name: "Moonshine Tiny Korean", size: "~60 MB", notes: "Korean-specialized, 27M params", langSupport: "single-ko" },
+	{ id: "moonshine-tiny-uk", name: "Moonshine Tiny Ukrainian", size: "~60 MB", notes: "Ukrainian-specialized, 27M params", langSupport: "single-uk" },
+	{ id: "moonshine-tiny-vi", name: "Moonshine Tiny Vietnamese", size: "~60 MB", notes: "Vietnamese-specialized, 27M params", langSupport: "single-vi" },
+	{ id: "moonshine-base-es", name: "Moonshine Base Spanish", size: "~130 MB", notes: "Spanish-specialized, 61M params", langSupport: "single-es" },
+	// ── SenseVoice (Alibaba/FunAudioLLM) — 5 languages ───────────────────
+	{ id: "sensevoice-small", name: "SenseVoice Small", size: "~228 MB", notes: "5 languages (zh/en/ja/ko/yue), 244M params, ultra-fast batch", langSupport: "sensevoice" },
+	// ── GigaAM v3 (Sber/Salute) — Russian only ───────────────────────────
+	{ id: "gigaam-v3", name: "GigaAM v3", size: "~225 MB", notes: "Russian only, 220M params, 50% lower WER than Whisper on Russian", langSupport: "russian-only" },
+	// ── Parakeet (NVIDIA) ─────────────────────────────────────────────────
 	{ id: "parakeet-v2", name: "Parakeet V2", size: "473 MB", notes: "CPU-optimized, English only", langSupport: "english-only" },
 	{ id: "parakeet-v3", name: "Parakeet V3", size: "478 MB", notes: "CPU-optimized, auto language detection", langSupport: "parakeet-multi" },
 ];
@@ -116,9 +136,32 @@ const ENGLISH_ONLY_LANGUAGES: LocalLangEntry[] = [
 	{ name: "English", code: "en", popular: true },
 ];
 
+const SENSEVOICE_LANGUAGES: LocalLangEntry[] = [
+	{ name: "Chinese (Mandarin)", code: "zh", popular: true },
+	{ name: "English", code: "en", popular: true },
+	{ name: "Japanese", code: "ja", popular: true },
+	{ name: "Korean", code: "ko", popular: true },
+	{ name: "Cantonese", code: "yue", popular: true },
+];
+
+const RUSSIAN_ONLY_LANGUAGES: LocalLangEntry[] = [
+	{ name: "Russian", code: "ru", popular: true },
+];
+
+// Single-language lists for Moonshine Flavors
+const SINGLE_LANG: Record<string, LocalLangEntry[]> = {
+	ar: [{ name: "Arabic", code: "ar", popular: true }],
+	zh: [{ name: "Chinese", code: "zh", popular: true }],
+	ja: [{ name: "Japanese", code: "ja", popular: true }],
+	ko: [{ name: "Korean", code: "ko", popular: true }],
+	uk: [{ name: "Ukrainian", code: "uk", popular: true }],
+	vi: [{ name: "Vietnamese", code: "vi", popular: true }],
+	es: [{ name: "Spanish", code: "es", popular: true }],
+};
+
 /**
  * Get the supported language list for a local model.
- * Returns englishOnly=true for Moonshine and Parakeet V2 (no picker needed).
+ * Returns englishOnly=true when only one language is supported (no picker needed).
  */
 export function getLanguagesForLocalModel(modelId: string): { languages: LocalLangEntry[]; englishOnly: boolean } {
 	const model = LOCAL_MODELS.find(m => m.id === modelId);
@@ -127,6 +170,17 @@ export function getLanguagesForLocalModel(modelId: string): { languages: LocalLa
 	switch (model.langSupport) {
 		case "english-only":
 			return { languages: ENGLISH_ONLY_LANGUAGES, englishOnly: true };
+		case "russian-only":
+			return { languages: RUSSIAN_ONLY_LANGUAGES, englishOnly: true };
+		case "single-ar": return { languages: SINGLE_LANG.ar!, englishOnly: true };
+		case "single-zh": return { languages: SINGLE_LANG.zh!, englishOnly: true };
+		case "single-ja": return { languages: SINGLE_LANG.ja!, englishOnly: true };
+		case "single-ko": return { languages: SINGLE_LANG.ko!, englishOnly: true };
+		case "single-uk": return { languages: SINGLE_LANG.uk!, englishOnly: true };
+		case "single-vi": return { languages: SINGLE_LANG.vi!, englishOnly: true };
+		case "single-es": return { languages: SINGLE_LANG.es!, englishOnly: true };
+		case "sensevoice":
+			return { languages: SENSEVOICE_LANGUAGES, englishOnly: false };
 		case "parakeet-multi":
 		case "whisper":
 		default:
@@ -149,8 +203,13 @@ export function isLanguageSupportedByModel(modelId: string, langCode: string): b
  * Find display name for a language code in local model context.
  */
 export function localLanguageDisplayName(code: string): string {
-	const entry = WHISPER_LANGUAGES.find(l => l.code === code);
-	return entry ? `${entry.name} (${entry.code})` : code;
+	// Check all language lists
+	const allLists = [WHISPER_LANGUAGES, SENSEVOICE_LANGUAGES, RUSSIAN_ONLY_LANGUAGES, ...Object.values(SINGLE_LANG)];
+	for (const list of allLists) {
+		const entry = list.find(l => l.code === code);
+		if (entry) return `${entry.name} (${entry.code})`;
+	}
+	return code;
 }
 
 // ─── Local session type ──────────────────────────────────────────────────────
