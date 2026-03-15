@@ -8,6 +8,14 @@
  *
  * Recognizer instances are cached and reused (model loading is expensive).
  * Destroyed on: model change, language change, extension deactivation.
+ *
+ * API verified against:
+ *   https://github.com/k2-fsa/sherpa-onnx/tree/master/nodejs-addon-examples
+ *   - acceptWaveform({sampleRate, samples}) — object parameter
+ *   - Config requires featConfig: {sampleRate: 16000, featureDim: 80}
+ *   - Moonshine v2: {encoder, mergedDecoder} (2 files)
+ *   - Moonshine v1: {preprocessor, encoder, uncachedDecoder, cachedDecoder} (4 files)
+ *   - SenseVoice: useInverseTextNormalization is 1/0, not true/false
  */
 
 import * as path from "node:path";
@@ -99,14 +107,8 @@ export function getOrCreateRecognizer(model: LocalModelInfo, modelDir: string, l
 /** Destroy cached recognizer and free memory. */
 export function clearRecognizerCache(): void {
 	if (cachedRecognizer) {
-		try {
-			// sherpa-onnx recognizers may have a free/delete method
-			if (typeof cachedRecognizer.recognizer?.free === "function") {
-				cachedRecognizer.recognizer.free();
-			}
-		} catch {
-			// Ignore cleanup errors
-		}
+		// sherpa-onnx-node recognizers are garbage-collected via N-API Release
+		// No explicit free/delete method exists in the Node.js API
 		cachedRecognizer = null;
 	}
 }
@@ -123,20 +125,17 @@ export function clearRecognizerCache(): void {
 export function transcribeBuffer(pcmData: Buffer, recognizer: SherpaRecognizer): string {
 	if (!sherpaModule) throw new Error("sherpa-onnx not initialized");
 
-	// Convert 16-bit PCM to Float32Array (sherpa expects float samples)
+	// Convert 16-bit PCM to Float32Array (sherpa expects float samples in [-1, 1])
 	const samples = pcmToFloat32(pcmData);
 
 	// Create a stream, accept waveform, decode
+	// API: stream.acceptWaveform({sampleRate, samples}) — verified from official examples
 	const stream = recognizer.createStream();
-	stream.acceptWaveform(16000, samples);
+	stream.acceptWaveform({ sampleRate: 16000, samples });
 	recognizer.decode(stream);
 
-	const text = recognizer.getResult(stream)?.text || "";
-
-	// Clean up stream
-	if (typeof stream.free === "function") stream.free();
-
-	return text.trim();
+	const result = recognizer.getResult(stream);
+	return (result?.text || "").trim();
 }
 
 // ─── Internal: Recognizer creation per model type ────────────────────────────
@@ -160,9 +159,14 @@ function createRecognizer(model: LocalModelInfo, modelDir: string, language: str
 	}
 }
 
+// Verified against: nodejs-addon-examples/test_asr_non_streaming_whisper.js
 function createWhisperRecognizer(model: LocalModelInfo, modelDir: string, language: string): SherpaRecognizer {
 	const files = model.sherpaModel!.files;
 	return new sherpaModule.OfflineRecognizer({
+		featConfig: {
+			sampleRate: 16000,
+			featureDim: 80,
+		},
 		modelConfig: {
 			whisper: {
 				encoder: path.join(modelDir, files.encoder!),
@@ -177,16 +181,34 @@ function createWhisperRecognizer(model: LocalModelInfo, modelDir: string, langua
 	});
 }
 
+// Verified against: nodejs-addon-examples/test_asr_non_streaming_moonshine_v2.js
+// Moonshine v2: {encoder, mergedDecoder} — 2 files
+// Moonshine v1: {preprocessor, encoder, uncachedDecoder, cachedDecoder} — 4 files
 function createMoonshineRecognizer(model: LocalModelInfo, modelDir: string): SherpaRecognizer {
 	const files = model.sherpaModel!.files;
+
+	// Detect v1 vs v2 by presence of mergedDecoder field
+	const moonshineConfig: Record<string, string> = {};
+
+	if (files.mergedDecoder) {
+		// Moonshine v2: encoder + mergedDecoder
+		moonshineConfig.encoder = path.join(modelDir, files.encoder!);
+		moonshineConfig.mergedDecoder = path.join(modelDir, files.mergedDecoder!);
+	} else {
+		// Moonshine v1: preprocessor + encoder + uncachedDecoder + cachedDecoder
+		moonshineConfig.preprocessor = path.join(modelDir, files.preprocessor!);
+		moonshineConfig.encoder = path.join(modelDir, files.encoder!);
+		moonshineConfig.uncachedDecoder = path.join(modelDir, files.uncachedDecoder!);
+		moonshineConfig.cachedDecoder = path.join(modelDir, files.cachedDecoder!);
+	}
+
 	return new sherpaModule.OfflineRecognizer({
+		featConfig: {
+			sampleRate: 16000,
+			featureDim: 80,
+		},
 		modelConfig: {
-			moonshine: {
-				preprocessor: path.join(modelDir, files.preprocessor!),
-				encoder: path.join(modelDir, files.encoder!),
-				uncachedDecoder: path.join(modelDir, files.uncachedDecoder!),
-				cachedDecoder: path.join(modelDir, files.cachedDecoder!),
-			},
+			moonshine: moonshineConfig,
 			tokens: path.join(modelDir, files.tokens!),
 			numThreads: getNumThreads(),
 			provider: "cpu",
@@ -194,14 +216,19 @@ function createMoonshineRecognizer(model: LocalModelInfo, modelDir: string): She
 	});
 }
 
+// Verified against: nodejs-addon-examples/test_asr_non_streaming_sense_voice.js
 function createSenseVoiceRecognizer(model: LocalModelInfo, modelDir: string, language: string): SherpaRecognizer {
 	const files = model.sherpaModel!.files;
 	return new sherpaModule.OfflineRecognizer({
+		featConfig: {
+			sampleRate: 16000,
+			featureDim: 80,
+		},
 		modelConfig: {
 			senseVoice: {
 				model: path.join(modelDir, files.model!),
 				language: language || "auto",
-				useInverseTextNormalization: true,
+				useInverseTextNormalization: 1,
 			},
 			tokens: path.join(modelDir, files.tokens!),
 			numThreads: getNumThreads(),
@@ -210,9 +237,14 @@ function createSenseVoiceRecognizer(model: LocalModelInfo, modelDir: string, lan
 	});
 }
 
+// Verified against: nodejs-addon-examples/test_asr_non_streaming_nemo_ctc.js
 function createNemoCtcRecognizer(model: LocalModelInfo, modelDir: string): SherpaRecognizer {
 	const files = model.sherpaModel!.files;
 	return new sherpaModule.OfflineRecognizer({
+		featConfig: {
+			sampleRate: 16000,
+			featureDim: 80,
+		},
 		modelConfig: {
 			nemoCtc: {
 				model: path.join(modelDir, files.model!),
@@ -224,9 +256,14 @@ function createNemoCtcRecognizer(model: LocalModelInfo, modelDir: string): Sherp
 	});
 }
 
+// Verified against: nodejs-addon-examples/test_asr_non_streaming_transducer.js
 function createTransducerRecognizer(model: LocalModelInfo, modelDir: string): SherpaRecognizer {
 	const files = model.sherpaModel!.files;
 	return new sherpaModule.OfflineRecognizer({
+		featConfig: {
+			sampleRate: 16000,
+			featureDim: 80,
+		},
 		modelConfig: {
 			transducer: {
 				encoder: path.join(modelDir, files.encoder!),

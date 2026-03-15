@@ -50,7 +50,9 @@ export function detectDevice(): DeviceProfile {
 	const isContainer = detectContainer();
 	const hostRamMB = Math.round(os.totalmem() / (1024 * 1024));
 	const totalRamMB = isContainer ? getContainerRamMB(hostRamMB) : hostRamMB;
-	const freeRamMB = Math.round(os.freemem() / (1024 * 1024));
+	// Use MemAvailable from /proc/meminfo on Linux (more accurate than os.freemem()
+	// which returns MemFree, ignoring reclaimable buffer/cache memory)
+	const freeRamMB = getAvailableRamMB();
 
 	// Raspberry Pi
 	const piInfo = detectRaspberryPi();
@@ -206,11 +208,43 @@ export function formatDeviceSummary(device: DeviceProfile): string {
 
 // ─── Internal detection helpers ──────────────────────────────────────────────
 
+/**
+ * Get available RAM in MB — uses /proc/meminfo MemAvailable on Linux
+ * (includes reclaimable buffer/cache), falls back to os.freemem() elsewhere.
+ *
+ * os.freemem() returns MemFree on Linux, which excludes buffer/cache and is
+ * often ~500MB even on a 32GB machine. MemAvailable is what the kernel considers
+ * actually available for new processes.
+ */
+function getAvailableRamMB(): number {
+	if (process.platform === "linux") {
+		try {
+			const meminfo = fs.readFileSync("/proc/meminfo", "utf-8");
+			const match = meminfo.match(/^MemAvailable:\s+(\d+)\s+kB$/m);
+			if (match) {
+				return Math.round(parseInt(match[1]!, 10) / 1024);
+			}
+		} catch {
+			// Fallback to os.freemem()
+		}
+	}
+	return Math.round(os.freemem() / (1024 * 1024));
+}
+
 function detectContainer(): boolean {
 	try {
 		if (fs.existsSync("/.dockerenv")) return true;
 		const cgroup = fs.readFileSync("/proc/1/cgroup", "utf-8");
 		if (cgroup.includes("docker") || cgroup.includes("kubepods") || cgroup.includes("containerd")) return true;
+		// cgroup v2: check /proc/self/mountinfo for container indicators
+		if (cgroup.trim() === "0::/") {
+			try {
+				const mountinfo = fs.readFileSync("/proc/self/mountinfo", "utf-8");
+				if (mountinfo.includes("/docker/") || mountinfo.includes("/containers/")) return true;
+			} catch {
+				// Not accessible
+			}
+		}
 	} catch {
 		// Not Linux or no permissions
 	}
@@ -253,8 +287,10 @@ function detectRaspberryPi(): { isRPi: boolean; model?: string } {
 	try {
 		const cpuinfo = fs.readFileSync("/proc/cpuinfo", "utf-8");
 		if (cpuinfo.includes("BCM2")) {
+			// Prefer "Model" field (human-readable) over "Hardware" (just shows BCM2835 for all models)
+			const modelMatch = cpuinfo.match(/^Model\s*:\s*(.+)$/m);
 			const hwMatch = cpuinfo.match(/^Hardware\s*:\s*(.+)$/m);
-			return { isRPi: true, model: hwMatch?.[1]?.trim() };
+			return { isRPi: true, model: modelMatch?.[1]?.trim() || hwMatch?.[1]?.trim() };
 		}
 	} catch {
 		// Not available

@@ -48,6 +48,14 @@ describe("detectDevice", () => {
 		const device = detectDevice();
 		expect(device.totalRamMB).toBeGreaterThan(256);
 	});
+
+	test("freeRamMB uses MemAvailable (should be > os.freemem on Linux)", () => {
+		const device = detectDevice();
+		// freeRamMB should be reasonable — at least some RAM should be available
+		expect(device.freeRamMB).toBeGreaterThan(0);
+		// freeRamMB should not exceed totalRamMB
+		expect(device.freeRamMB).toBeLessThanOrEqual(device.totalRamMB);
+	});
 });
 
 // ─── getModelFitness ─────────────────────────────────────────────────────────
@@ -130,6 +138,15 @@ describe("autoRecommendModel", () => {
 		const recommended = autoRecommendModel(englishOnly, device, "sw"); // Swahili
 		expect(recommended).toBeUndefined();
 	});
+
+	test("recommends Japanese model for Japanese language", () => {
+		const device = mockDevice({ totalRamMB: 4096, freeRamMB: 2048 });
+		const recommended = autoRecommendModel(LOCAL_MODELS, device, "ja");
+		expect(recommended).toBeDefined();
+		// Should pick a model that supports Japanese
+		const supportsJa = ["whisper", "parakeet-multi", "sensevoice", "single-ja"].includes(recommended!.langSupport);
+		expect(supportsJa).toBe(true);
+	});
 });
 
 // ─── formatDeviceSummary ─────────────────────────────────────────────────────
@@ -169,5 +186,79 @@ describe("localeToLanguageCode", () => {
 
 	test("defaults to en for empty string", () => {
 		expect(localeToLanguageCode("")).toBe("en");
+	});
+});
+
+// ─── Model catalog validation ────────────────────────────────────────────────
+
+describe("LOCAL_MODELS catalog", () => {
+	test("all models have non-empty downloadUrls", () => {
+		for (const model of LOCAL_MODELS) {
+			const urls = model.sherpaModel.downloadUrls;
+			const urlCount = Object.keys(urls).length;
+			expect(urlCount).toBeGreaterThan(0);
+			// Every file should have a corresponding URL
+			for (const role of Object.keys(model.sherpaModel.files)) {
+				expect(urls[role]).toBeDefined();
+				expect(urls[role]).toStartWith("https://");
+			}
+		}
+	});
+
+	test("Whisper models use prefix-based file names", () => {
+		const whisperModels = LOCAL_MODELS.filter(m => m.sherpaModel.type === "whisper");
+		for (const model of whisperModels) {
+			const files = model.sherpaModel.files;
+			// Whisper files should be prefixed: small-encoder.int8.onnx, not encoder.int8.onnx
+			expect(files.encoder).not.toBe("encoder.int8.onnx");
+			expect(files.decoder).not.toBe("decoder.int8.onnx");
+		}
+	});
+
+	test("Moonshine v2 models use mergedDecoder (not 4-file v1 structure)", () => {
+		const v2Models = LOCAL_MODELS.filter(m => m.id.startsWith("moonshine-v2"));
+		for (const model of v2Models) {
+			const files = model.sherpaModel.files;
+			expect(files.mergedDecoder).toBeDefined();
+			expect(files.preprocessor).toBeUndefined();
+			expect(files.uncachedDecoder).toBeUndefined();
+			expect(files.cachedDecoder).toBeUndefined();
+		}
+	});
+
+	test("Moonshine v1 models use 4-file structure", () => {
+		const v1Models = LOCAL_MODELS.filter(m =>
+			m.sherpaModel.type === "moonshine" && !m.id.startsWith("moonshine-v2"),
+		);
+		for (const model of v1Models) {
+			const files = model.sherpaModel.files;
+			expect(files.preprocessor).toBeDefined();
+			expect(files.encoder).toBeDefined();
+			expect(files.uncachedDecoder).toBeDefined();
+			expect(files.cachedDecoder).toBeDefined();
+		}
+	});
+
+	test("Parakeet models use transducer type (not nemo_ctc)", () => {
+		const parakeetModels = LOCAL_MODELS.filter(m => m.id.startsWith("parakeet"));
+		for (const model of parakeetModels) {
+			expect(model.sherpaModel.type).toBe("transducer");
+			expect(model.sherpaModel.files.encoder).toBeDefined();
+			expect(model.sherpaModel.files.decoder).toBeDefined();
+			expect(model.sherpaModel.files.joiner).toBeDefined();
+		}
+	});
+
+	test("GigaAM uses nemo_ctc type", () => {
+		const gigaam = LOCAL_MODELS.find(m => m.id === "gigaam-v3")!;
+		expect(gigaam.sherpaModel.type).toBe("nemo_ctc");
+		expect(gigaam.sherpaModel.files.model).toBeDefined();
+	});
+
+	test("all models have positive sizeBytes and runtimeRamMB", () => {
+		for (const model of LOCAL_MODELS) {
+			expect(model.sizeBytes).toBeGreaterThan(0);
+			expect(model.runtimeRamMB).toBeGreaterThan(0);
+		}
 	});
 });

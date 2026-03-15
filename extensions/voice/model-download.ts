@@ -226,8 +226,8 @@ function fileNameFromUrl(url: string): string {
 	return path.basename(urlPath);
 }
 
-/** Get total size of a directory in MB. */
-function getDirSizeMB(dirPath: string): number {
+/** Get total size of a directory in bytes. */
+function getDirSizeBytes(dirPath: string): number {
 	let total = 0;
 	try {
 		const entries = fs.readdirSync(dirPath, { withFileTypes: true });
@@ -236,11 +236,16 @@ function getDirSizeMB(dirPath: string): number {
 			if (entry.isFile()) {
 				total += fs.statSync(fullPath).size;
 			} else if (entry.isDirectory()) {
-				total += getDirSizeMB(fullPath) * 1024 * 1024; // Convert back to bytes
+				total += getDirSizeBytes(fullPath);
 			}
 		}
 	} catch {
 		// Permission error
 	}
-	return Math.round(total / (1024 * 1024));
+	return total;
+}
+
+/** Get total size of a directory in MB. */
+function getDirSizeMB(dirPath: string): number {
+	return Math.round(getDirSizeBytes(dirPath) / (1024 * 1024));
 }
