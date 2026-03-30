@@ -103,7 +103,7 @@ Your terminal may be sending key-repeat events faster than expected. The typing 
 ### Workarounds
 - Use `Ctrl+Shift+V` exclusively (toggle mode, no hold detection involved)
 - Kitty-protocol terminals now wait ~200ms before showing warmup, which reduces brief accidental flashes
-- The hold threshold is 1200ms — a normal space press is well under this
+- The hold threshold is 500ms — a normal space press is still well under this
 
 ## Symptom: "Connection lost" or "Deepgram connection timed out"
 

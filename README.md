@@ -126,7 +126,7 @@ See your hardware profile (RAM, CPU, GPU), dependency status (sherpa-onnx runtim
 
 | Action | Key | Notes |
 |--------|-----|-------|
-| **Record to editor** | Hold `SPACE` (≥1.2s) | Release to finalize. Pre-records during warmup so you don't miss words. |
+| **Record to editor** | Hold `SPACE` (≥0.5s) | Release to finalize. Pre-records during warmup so you don't miss words. |
 | **Toggle recording** | `Ctrl+Shift+V` | Works in all terminals — press to start, press again to stop. |
 | **Clear editor** | `Escape` × 2 | Double-tap within 500ms to clear all text. |
 

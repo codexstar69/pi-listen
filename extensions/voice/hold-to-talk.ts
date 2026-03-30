@@ -20,5 +20,25 @@ export function shouldInsertSpaceOnKittyReleaseBeforeRecording(
 	state: VoiceHoldState,
 	spaceConsumed: boolean,
 ): boolean {
-	return !spaceConsumed && (state === "idle" || state === "warmup");
+	return !spaceConsumed && state === "idle";
+}
+
+export function stripInsertedSpaceOnWarmupStart({
+	textBeforePress,
+	currentText,
+}: {
+	textBeforePress: string;
+	currentText: string;
+}): string {
+	return currentText === `${textBeforePress} ` ? textBeforePress : currentText;
+}
+
+export function shouldStartRecordingFromWarmup({
+	state,
+	releasePending,
+}: {
+	state: VoiceHoldState;
+	releasePending: boolean;
+}): boolean {
+	return state === "warmup" && !releasePending;
 }
