@@ -1488,7 +1488,6 @@ export default function (pi: ExtensionAPI) {
 
 					if (spaceDownTime && shouldInsertSpaceOnKittyReleaseBeforeRecording(voiceState, spaceConsumed)) {
 						resetHoldState();
-						if (ctx?.hasUI) ctx.ui.setEditorText((ctx.ui.getEditorText() || "") + " ");
 						return { consume: true };
 					}
 
@@ -1659,6 +1658,7 @@ export default function (pi: ExtensionAPI) {
 						holdConfirmed = false;
 						kittyWarmupReleasePending = false;
 						editorTextBeforeSpacePress = ctx?.hasUI ? (ctx.ui.getEditorText() || "") : "";
+						if (ctx?.hasUI) ctx.ui.setEditorText(editorTextBeforeSpacePress + " ");
 
 						const { warmupDelayMs } = getKittyHoldTiming({
 							heldMs: 0,
