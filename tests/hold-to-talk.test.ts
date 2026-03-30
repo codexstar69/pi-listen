@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 import {
 	getKittyHoldTiming,
 	stripInsertedSpaceOnWarmupStart,
-	shouldInsertSpaceOnKittyReleaseBeforeRecording,
 	shouldStartRecordingFromWarmup,
 } from "../extensions/voice/hold-to-talk";
 
@@ -14,22 +13,11 @@ describe("getKittyHoldTiming", () => {
 		});
 	});
 
-	test("starts warmup immediately once intent delay has passed", () => {
+	test("starts warmup immediately once intent delay has passed but keeps a full cancel window", () => {
 		expect(getKittyHoldTiming({ heldMs: 350, intentDelayMs: 200, holdThresholdMs: 500 })).toEqual({
 			warmupDelayMs: 0,
-			activationDelayMs: 150,
+			activationDelayMs: 500,
 		});
-	});
-});
-
-describe("shouldInsertSpaceOnKittyReleaseBeforeRecording", () => {
-	test("preserves a space only before warmup has started", () => {
-		expect(shouldInsertSpaceOnKittyReleaseBeforeRecording("idle", false)).toBe(true);
-		expect(shouldInsertSpaceOnKittyReleaseBeforeRecording("warmup", false)).toBe(false);
-	});
-
-	test("does not insert a space once recording has started", () => {
-		expect(shouldInsertSpaceOnKittyReleaseBeforeRecording("recording", true)).toBe(false);
 	});
 });
 

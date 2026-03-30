@@ -126,16 +126,17 @@ See your hardware profile (RAM, CPU, GPU), dependency status (sherpa-onnx runtim
 
 | Action | Key | Notes |
 |--------|-----|-------|
-| **Record to editor** | Hold `SPACE` (≥0.5s) | Release to finalize. Pre-records during warmup so you don't miss words. |
+| **Record to editor** | Hold `SPACE` (~0.7s total) | Release to finalize. Warmup appears after ~0.2s, then recording starts ~0.5s later. |
 | **Toggle recording** | `Ctrl+Shift+V` | Works in all terminals — press to start, press again to stop. |
 | **Clear editor** | `Escape` × 2 | Double-tap within 500ms to clear all text. |
 
 ### How recording works
 
 1. **Hold SPACE** — after a brief intent delay (~200ms), warmup countdown appears and audio capture starts immediately (pre-recording)
-2. **Keep holding** — live transcription streams into the editor (Deepgram) or audio buffers (local)
-3. **Release SPACE** — recording continues for 1.5s (tail recording) to catch your last word, then finalizes
-4. Text appears in the editor, ready to send
+2. **Keep holding** — after ~500ms of visible warmup, recording starts
+3. **Keep holding** — live transcription streams into the editor (Deepgram) or audio buffers (local)
+4. **Release SPACE** — recording continues for 1.5s (tail recording) to catch your last word, then finalizes
+5. Text appears in the editor, ready to send
 
 ### Commands
 

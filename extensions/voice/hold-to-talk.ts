@@ -12,15 +12,8 @@ export function getKittyHoldTiming({
 	const normalizedHeldMs = Math.max(0, heldMs);
 	return {
 		warmupDelayMs: Math.max(0, intentDelayMs - normalizedHeldMs),
-		activationDelayMs: Math.max(0, holdThresholdMs - normalizedHeldMs),
+		activationDelayMs: holdThresholdMs,
 	};
-}
-
-export function shouldInsertSpaceOnKittyReleaseBeforeRecording(
-	state: VoiceHoldState,
-	spaceConsumed: boolean,
-): boolean {
-	return !spaceConsumed && state === "idle";
 }
 
 export function stripInsertedSpaceOnWarmupStart({

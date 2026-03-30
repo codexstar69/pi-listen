@@ -9,7 +9,7 @@
  *              ↑         │
  *              └─────────┘  (rapid re-press recovery)
  *
- *   warmup:     User holds SPACE for ≥ HOLD_THRESHOLD_MS (500ms).
+ *   warmup:     User holds SPACE until recording starts.
  *               On kitty-protocol terminals, warmup UI waits for a brief intent delay
  *               so normal space taps don't flash the mic indicator. Releasing before
  *               warmup starts types a space; releasing during warmup cancels silently.
@@ -31,7 +31,7 @@
  *      Still holding after intent delay → enter warmup (show countdown).
  *      Released before warmup starts → type a space.
  *      Released during warmup → cancel without inserting a space.
- *      Held ≥ 500ms from initial press → activate recording.
+ *      Held ≥ 500ms from warmup start → activate recording.
  *      True release event stops recording.
  *
  *   B) Non-Kitty (macOS Terminal, Ghostty on macOS):
@@ -40,7 +40,7 @@
  *      No more presses within 500ms → TAP → type a space.
  *      Rapid presses detected → user is HOLDING.
  *      After REPEAT_CONFIRM_COUNT (6) rapid presses → enter warmup.
- *      After HOLD_THRESHOLD_MS (500ms) from first press → activate recording.
+ *      After HOLD_THRESHOLD_MS (500ms) from warmup start → activate recording.
  *      Gap > RELEASE_DETECT_MS (500ms) after RECORDING_GRACE_MS (800ms) → stop.
  *
  *   ENTERPRISE FALLBACKS
@@ -53,7 +53,7 @@
  *     from "no speech detected" with distinct user messages.
  *
  * Activation:
- *   - Hold SPACE (≥500ms) → release to finalize
+ *   - Hold SPACE (~200ms intent delay + 500ms warmup) → release to finalize
  *   - Configurable shortcut → toggle start/stop (always works)
 
  *
@@ -83,7 +83,6 @@ import {
 import { formatVoiceStatus } from "./voice/status-labels";
 import {
 	getKittyHoldTiming,
-	shouldInsertSpaceOnKittyReleaseBeforeRecording,
 	shouldStartRecordingFromWarmup,
 	stripInsertedSpaceOnWarmupStart,
 } from "./voice/hold-to-talk";
@@ -653,6 +652,7 @@ export default function (pi: ExtensionAPI) {
 	let holdActivationTimer: ReturnType<typeof setTimeout> | null = null;
 	let kittyIntentTimer: ReturnType<typeof setTimeout> | null = null;
 	let kittyWarmupReleasePending = false;
+	let warmupStartedAt: number | null = null;
 	let editorTextBeforeSpacePress = "";
 	let spaceConsumed = false;        // True once threshold passed and recording started
 	let releaseDetectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -805,6 +805,7 @@ export default function (pi: ExtensionAPI) {
 		spacePressCount = 0;
 		holdConfirmed = false;
 		kittyWarmupReleasePending = false;
+		warmupStartedAt = null;
 		editorTextBeforeSpacePress = "";
 		clearHoldTimer();
 		clearKittyIntentTimer();
@@ -906,8 +907,8 @@ export default function (pi: ExtensionAPI) {
 
 		const renderWarmup = () => {
 			if (!ctx?.hasUI) return;
-			const holdStart = spaceDownTime ?? startTime;
-			const elapsed = Date.now() - holdStart;
+			const warmupStart = warmupStartedAt ?? startTime;
+			const elapsed = Date.now() - warmupStart;
 			const progress = Math.min(elapsed / HOLD_THRESHOLD_MS, 1);
 
 			ctx.ui.setWidget("voice-recording", (_tui, theme) => {
@@ -1280,7 +1281,7 @@ export default function (pi: ExtensionAPI) {
 	//      2. No more presses within RELEASE_DETECT_MS (500ms) → TAP → type space.
 	//      3. Rapid presses arrive → user is HOLDING. After REPEAT_CONFIRM_COUNT
 	//         rapid presses → enter warmup, show countdown.
-	//      4. After HOLD_THRESHOLD_MS (500ms) from first press → start recording.
+	//      4. After HOLD_THRESHOLD_MS (500ms) from warmup start → start recording.
 	//      5. Recording continues while key-repeat events arrive.
 	//         Gap > RELEASE_DETECT_MS after RECORDING_GRACE_MS → stop.
 	//
@@ -1351,14 +1352,10 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function scheduleKittyActivation() {
-		if (!spaceDownTime) return;
+		if (!spaceDownTime || !warmupStartedAt) return;
 		kittyWarmupReleasePending = false;
 		clearHoldTimer();
-		const { activationDelayMs } = getKittyHoldTiming({
-			heldMs: Date.now() - spaceDownTime,
-			intentDelayMs: KITTY_INTENT_DELAY_MS,
-			holdThresholdMs: HOLD_THRESHOLD_MS,
-		});
+		const activationDelayMs = Math.max(0, HOLD_THRESHOLD_MS - (Date.now() - warmupStartedAt));
 
 		holdActivationTimer = setTimeout(() => {
 			holdActivationTimer = null;
@@ -1380,6 +1377,7 @@ export default function (pi: ExtensionAPI) {
 				spaceDownTime = null;
 				spaceConsumed = false;
 				spacePressCount = 0;
+				warmupStartedAt = null;
 				holdConfirmed = false;
 			}
 		}, activationDelayMs);
@@ -1393,6 +1391,7 @@ export default function (pi: ExtensionAPI) {
 
 			holdConfirmed = true;
 			kittyWarmupReleasePending = false;
+			warmupStartedAt = Date.now();
 			if (ctx?.hasUI) {
 				const currentText = ctx.ui.getEditorText() || "";
 				const nextText = stripInsertedSpaceOnWarmupStart({
@@ -1473,20 +1472,16 @@ export default function (pi: ExtensionAPI) {
 						warmupReleaseTimer = setTimeout(() => {
 							warmupReleaseTimer = null;
 							if (voiceState !== "warmup" || !kittyWarmupReleasePending) return;
-							const shouldInsertSpace = shouldInsertSpaceOnKittyReleaseBeforeRecording(voiceState, spaceConsumed);
 							resetHoldState();
 							abortPreRecording();
 							clearWarmupWidget();
 							hideWidget();
 							setVoiceState("idle");
-							if (shouldInsertSpace && ctx?.hasUI) {
-								ctx.ui.setEditorText((ctx.ui.getEditorText() || "") + " ");
-							}
 						}, WARMUP_RELEASE_GRACE_MS);
 						return { consume: true };
 					}
 
-					if (spaceDownTime && shouldInsertSpaceOnKittyReleaseBeforeRecording(voiceState, spaceConsumed)) {
+					if (spaceDownTime && voiceState === "idle" && !holdConfirmed) {
 						resetHoldState();
 						return { consume: true };
 					}
@@ -1501,6 +1496,7 @@ export default function (pi: ExtensionAPI) {
 					spaceDownTime = null;
 					spaceConsumed = false;
 					spacePressCount = 0;
+					warmupStartedAt = null;
 					holdConfirmed = false;
 					return undefined;
 				}
@@ -1657,8 +1653,8 @@ export default function (pi: ExtensionAPI) {
 						lastSpacePressTime = now;
 						holdConfirmed = false;
 						kittyWarmupReleasePending = false;
+						warmupStartedAt = null;
 						editorTextBeforeSpacePress = ctx?.hasUI ? (ctx.ui.getEditorText() || "") : "";
-						if (ctx?.hasUI) ctx.ui.setEditorText(editorTextBeforeSpacePress + " ");
 
 						const { warmupDelayMs } = getKittyHoldTiming({
 							heldMs: 0,
@@ -1667,7 +1663,7 @@ export default function (pi: ExtensionAPI) {
 						});
 						voiceDebug("kitty intent delay", { warmupDelayMs, holdThresholdMs: HOLD_THRESHOLD_MS });
 						scheduleKittyWarmup();
-						return { consume: true };
+						return undefined;
 					}
 					return { consume: true };
 				}
