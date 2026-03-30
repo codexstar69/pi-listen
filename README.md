@@ -132,7 +132,7 @@ See your hardware profile (RAM, CPU, GPU), dependency status (sherpa-onnx runtim
 
 ### How recording works
 
-1. **Hold SPACE** — warmup countdown appears, audio capture starts immediately (pre-recording)
+1. **Hold SPACE** — after a brief intent delay (~200ms), warmup countdown appears and audio capture starts immediately (pre-recording)
 2. **Keep holding** — live transcription streams into the editor (Deepgram) or audio buffers (local)
 3. **Release SPACE** — recording continues for 1.5s (tail recording) to catch your last word, then finalizes
 4. Text appears in the editor, ready to send
@@ -217,6 +217,7 @@ Models from [Handy](https://github.com/cjpais/handy) (`~/Library/Application Sup
 | **56+ languages** | Deepgram: 56+ with live streaming. Local: up to 57 depending on model. |
 | **Continuous dictation** | `/voice dictate` for long-form input without holding keys |
 | **Typing cooldown** | Space holds within 400ms of typing are ignored |
+| **Kitty intent delay** | Kitty-protocol terminals wait ~200ms before showing warmup, reducing accidental mic flashes |
 | **Sound feedback** | macOS system sounds for start, stop, and error events |
 | **Cross-platform** | macOS, Windows, Linux — Kitty protocol + non-Kitty fallback |
 
