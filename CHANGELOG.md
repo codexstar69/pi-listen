@@ -5,6 +5,71 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.0.8] - 2026-04-28
+
+### Changed
+- **Peer dependency floor raised to `>=0.70.0`** for both
+  `@mariozechner/pi-coding-agent` and `@mariozechner/pi-tui`. Pi-mono 0.65.0
+  removed `session_switch` and added `event.reason` metadata to
+  `session_start` / `session_shutdown`; pi-tui 0.61.0 renamed
+  `getEditorKeybindings` → `getKeybindings` and namespaced action ids
+  (`selectUp` → `tui.select.up`). Older Pi hosts can no longer install this
+  extension. If you're on Pi < 0.70, run `pi update` first, then reinstall
+  pi-listen.
+
+### Fixed
+- **Session lifecycle now actually honors `event.reason`** — `session_start`
+  extracts the reason (compat-narrowed against pre-0.65 typings), runs setup
+  wiring on every transition, and gates the first-run install hint on
+  `reason === "startup"`. The v5.0.7 changelog claimed this was implemented
+  but the code did not match; this entry closes that gap.
+- **`session_shutdown` ordering hardened** — `ctx = null` now runs synchronously
+  before any `await`, and the sherpa recognizer cache is cleared only on
+  `reason === "quit" | undefined` to avoid racing the recognizer init in the
+  replacement session on `/new`, `/fork`, `/resume`. `voiceCleanup()` is wrapped
+  in try/catch in all lifecycle handlers so a single child-process kill EPERM
+  cannot leak ctx or skip the cache clear.
+- **Stale local-transcription callbacks neutralized** — `abortSession()`
+  replaces `onTranscript` / `onDone` / `onError` with no-ops before the
+  backend-specific abort, preventing post-abort sherpa transcription or late
+  WebSocket events from writing into a replacement session's editor or firing
+  notifications on the new ctx.
+- **`initSherpa()` re-entrancy** — concurrent callers now share a single
+  in-flight promise via `initPromise ??= doInitSherpa()` (atomic claim under
+  JS run-to-completion). The cached promise is released in `finally` once
+  `sherpaInitialized` flips, so the synchronous fast-path serves every later
+  caller. Previously two callers arriving on the same tick could both run
+  platform checks and re-import the native module.
+- **Status bar refresh on session_start when voice is disabled** —
+  `updateVoiceStatus()` now runs on every transition (even when
+  `config.enabled === false`), clearing the status entry instead of leaving
+  stale `MIC STREAM` text from the prior session.
+
+### Removed
+- **Legacy `session_switch` handler** — pi-mono 0.65.0 dropped the event and
+  the new peer floor (`>=0.70.0`) makes the shim unreachable. Cleanup is now
+  handled entirely via `session_shutdown` → `session_start` (with `reason`).
+
+### Internal
+- **Drop `as any` on `pi.registerShortcut`** — replaced with `as KeyId`
+  assertion; `isValidShortcut()` validates the runtime config string at load
+  time, so the assertion documents intent instead of hiding type info.
+- **`pi-tui` keybinding API migration** — `getEditorKeybindings` →
+  `getKeybindings`, action ids updated to namespaced form
+  (`selectUp` → `tui.select.up`, `selectConfirm` → `tui.select.confirm`, etc.).
+- **Dev dependencies pinned** — `@mariozechner/pi-coding-agent` and
+  `@mariozechner/pi-tui` now appear in `devDependencies` at `^0.70.5` so local
+  typecheck runs against the same API surface the runtime expects.
+
+### Verification
+- `bunx tsc -p tsconfig.json --noEmit` — clean against pi-coding-agent 0.70.5
+- `bun test` — 79/79 passing (564 expect calls)
+- Module-load smoke (mock pi): every `event.reason` value handled cleanly,
+  concurrent `initSherpa()` calls return identical results
+- Real `pi 0.70.5` RPC smoke: extension loads, `session_start` runs,
+  status bar populates, clean teardown
+- godspeed multi-model review: 7/7 SHIP, 0 NO_SHIP, 0 VETO
+
 ## [5.0.7] - 2026-04-03
 
 ### Added
@@ -165,6 +230,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - VAD pre-filtering
 - Pompom/Lumo creature companion (now separate package)
 
+[5.0.8]: https://github.com/codexstar69/pi-listen/releases/tag/v5.0.8
+[5.0.7]: https://github.com/codexstar69/pi-listen/releases/tag/v5.0.7
+[5.0.5]: https://github.com/codexstar69/pi-listen/releases/tag/v5.0.5
 [5.0.1]: https://github.com/codexstar69/pi-listen/releases/tag/v5.0.1
 [5.0.4]: https://github.com/codexstar69/pi-listen/releases/tag/v5.0.4
 [4.0.0]: https://github.com/codexstar69/pi-listen/releases/tag/v4.0.0

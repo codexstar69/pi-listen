@@ -12,12 +12,14 @@
 [![license](https://img.shields.io/npm/l/@codexstar/pi-listen.svg)](https://github.com/codexstar69/pi-listen/blob/main/LICENSE)
 [![author](https://img.shields.io/badge/author-@baanditeagle-1DA1F2?logo=x&logoColor=white)](https://x.com/baanditeagle)
 
-> **v5.0.5 — Security patch** — env-derived Deepgram keys now stay runtime-only
-> and are no longer written into global Pi settings. Project config secret
-> stripping, loopback-only local endpoints, shell-safe onboarding writes, and
-> atomic config saves remain in place. Thanks to
-> [@dvic](https://github.com/dvic) for reporting the remaining global config
-> leak. [Full changelog →](CHANGELOG.md)
+> **v5.0.8 — Pi 0.70 compatibility + concurrency hardening** — session
+> lifecycle now actually honors `event.reason` (the v5.0.7 changelog claim
+> is finally true), `abortSession()` neutralizes stale callbacks before the
+> backend abort to keep cross-session UI state clean, `initSherpa()` shares a
+> single in-flight promise across concurrent callers, and the keybinding API
+> is migrated to pi-tui's namespaced ids. **Peer dependency floor raised to
+> `pi-coding-agent >=0.70.0` and `pi-tui >=0.70.0`** — run `pi update` first
+> if you're on an older Pi. [Full changelog →](CHANGELOG.md)
 
 ---
 
