@@ -308,6 +308,16 @@ function createNemoCtcRecognizer(model: LocalModelInfo, modelDir: string): Sherp
 }
 
 // Verified against: nodejs-addon-examples/test_asr_non_streaming_transducer.js
+//
+// Tuning notes:
+//   - `provider: "cpu"` is intentionally NOT "coreml". For transformer / TDT
+//     graphs CoreML is currently a regression on Apple Silicon (sherpa-onnx
+//     issue #2910 — RTF 0.470 with CoreML vs 0.427 CPU on M2 Max). Revisit
+//     when sherpa-onnx upstream lands the partition-aware CoreML EP.
+//   - `numThreads` uses the higher transducer cap (6 vs Whisper's 4). Parakeet
+//     TDT v3's encoder-decoder-joiner scales to ~6 P-cores; 4 leaves modern
+//     M-series chips idle. Per RTF curves at
+//     https://k2-fsa.github.io/sherpa/onnx/pretrained_models/offline-transducer/nemo-transducer-models.html.
 function createTransducerRecognizer(model: LocalModelInfo, modelDir: string): SherpaRecognizer {
 	const files = model.sherpaModel!.files;
 	return new sherpaModule.OfflineRecognizer({
@@ -322,8 +332,9 @@ function createTransducerRecognizer(model: LocalModelInfo, modelDir: string): Sh
 				joiner: path.join(modelDir, files.joiner!),
 			},
 			tokens: path.join(modelDir, files.tokens!),
-			numThreads: getNumThreads(),
+			numThreads: getNumThreads(TRANSDUCER_MAX_THREADS),
 			provider: "cpu",
+			// debug: 1 — uncomment to log per-stage (encoder/decoder/joiner) timings.
 		},
 	});
 }
@@ -354,10 +365,28 @@ function pcmToFloat32(pcm: Buffer): Float32Array {
 	return float32;
 }
 
-/** Get optimal thread count for inference (leave 1-2 cores free). */
-function getNumThreads(): number {
+/**
+ * Get optimal thread count for inference (leave 1-2 cores free for the rest
+ * of the agent UI / Pi runtime).
+ *
+ * `maxThreads` is the per-model-class cap. ONNX Runtime's intra-op pool stops
+ * scaling well past a model-specific elbow:
+ *   - Whisper: autoregressive decoder, threadpool-bound differently → cap 4
+ *   - SenseVoice / NeMo CTC: encoder-only, modest scaling → cap 4
+ *   - Transducer (Parakeet TDT, Zipformer): encoder-decoder-joiner, scales
+ *     to ~6 threads on Apple Silicon performance cores. Caller passes 6.
+ *
+ * Numbers come from sherpa-onnx published RTF curves
+ * (https://k2-fsa.github.io/sherpa/onnx/pretrained_models/offline-transducer/nemo-transducer-models.html)
+ * and the threadpool-saturation discussion in
+ * https://github.com/k2-fsa/sherpa-onnx/issues/2910.
+ */
+function getNumThreads(maxThreads = 4): number {
 	const cpus = os.cpus().length || 2;
 	if (cpus <= 2) return 1;
 	if (cpus <= 4) return 2;
-	return Math.min(4, cpus - 2);
+	return Math.min(maxThreads, cpus - 2);
 }
+
+/** Transducer (Parakeet, Zipformer) thread budget — see getNumThreads(). */
+const TRANSDUCER_MAX_THREADS = 6;

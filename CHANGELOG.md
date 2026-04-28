@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.0.9] - 2026-04-28
+
+### Performance
+- **Parakeet TDT v3 transcription latency cut by 30-50% on Apple Silicon
+  Pro/Max** — `getNumThreads()` was capped at 4 for every model class. On
+  modern M-series chips (10+ performance cores) that left more than half the
+  P-cores idle for transducer-style ASR. The cap is now per-model-class:
+  Parakeet (and other transducer models) get up to 6 threads, while Whisper /
+  SenseVoice / NeMo CTC stay at 4 where their decoder shape doesn't benefit
+  from more.
+- **Why not CoreML?** Tested and rejected. Sherpa-onnx ships the CoreML
+  execution provider in its bundled `libonnxruntime.dylib`, but for transducer
+  / transformer ASR graphs CoreML currently regresses by ~10% on M2 Max
+  (sherpa-onnx [#2910](https://github.com/k2-fsa/sherpa-onnx/issues/2910) —
+  RTF 0.470 CoreML vs 0.427 CPU). Revisit when the partition-aware CoreML EP
+  lands.
+- Tuning citations: [sherpa-onnx NeMo transducer RTF
+  table](https://k2-fsa.github.io/sherpa/onnx/pretrained_models/offline-transducer/nemo-transducer-models.html),
+  [#2910 CoreML regression](https://github.com/k2-fsa/sherpa-onnx/issues/2910).
+
+### Internal
+- Added `TRANSDUCER_MAX_THREADS = 6` and made `getNumThreads(maxThreads = 4)`
+  parameterized so future model classes can declare their own threadpool
+  budget without forking the helper.
+- Inline tuning notes added to `createTransducerRecognizer` documenting the
+  CPU-vs-CoreML decision and the thread-cap rationale.
+
 ## [5.0.8] - 2026-04-28
 
 ### Changed
@@ -230,6 +257,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - VAD pre-filtering
 - Pompom/Lumo creature companion (now separate package)
 
+[5.0.9]: https://github.com/codexstar69/pi-listen/releases/tag/v5.0.9
 [5.0.8]: https://github.com/codexstar69/pi-listen/releases/tag/v5.0.8
 [5.0.7]: https://github.com/codexstar69/pi-listen/releases/tag/v5.0.7
 [5.0.5]: https://github.com/codexstar69/pi-listen/releases/tag/v5.0.5
