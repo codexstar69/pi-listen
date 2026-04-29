@@ -31,6 +31,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 
 const TTS_RELEASE = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models";
 
@@ -90,6 +91,15 @@ export interface TtsLocalModelInfo {
 	 * `~/.pi/models/tts/<id>/` and returns that directory.
 	 */
 	archiveUrl: string;
+	/**
+	 * Optional SHA-256 hex digest of the archive bytes for integrity
+	 * verification. When set, ensureTtsModelInstalled() rejects a
+	 * download whose computed hash differs. v7.0.0 ships catalog entries
+	 * without hashes (we don't ship known-good values for sherpa-onnx
+	 * releases yet); the verification pipeline runs anyway and produces
+	 * a hash that can be pinned in v7.1+ to lock-in the bytes.
+	 */
+	archiveSha256?: string;
 	/** Sample rate (Hz) of generated audio. Drives WAV header on playback. */
 	sampleRate: number;
 }
@@ -282,6 +292,124 @@ function piper(
 	};
 }
 
+// ─── Smart default selection ─────────────────────────────────────────────────
+
+/**
+ * Recommend an initial TTS model based on the user's system locale.
+ *
+ * Returns ONE catalog entry id — the recommendation, not an installation
+ * decision. The caller (onboarding picker, settings panel) presents this
+ * as a pre-highlighted suggestion with disclosure of size and language
+ * coverage. The user always confirms before download starts.
+ *
+ * Mapping rules:
+ *   - English locale (en-*)        → kitten-nano-en-v0_2 (smallest, 25 MB)
+ *   - Single-language Piper match  → that Piper voice (~20 MB each)
+ *   - Multi-language locale that
+ *     covers Kokoro                → kokoro-int8-multi-lang-v1_0 (126 MB)
+ *   - Locale with no coverage      → kitten-nano-en-v0_2 + warn
+ *
+ * The single-Piper-match path is preferred over the multilingual Kokoro
+ * because Piper is 1/6 the size when only one language is needed. Kokoro
+ * is the right pick when the user reads multiple languages OR when no
+ * Piper voice exists for their locale.
+ */
+export interface SmartDefaultRecommendation {
+	modelId: string;
+	/** Why this model was picked, surfaceable in onboarding UI. */
+	reason: string;
+	/** True iff no model in the catalog actually covers `locale`. */
+	fallback: boolean;
+}
+
+/**
+ * Per-language single-Piper-voice mapping — only languages where the
+ * catalog has exactly one Piper voice for the language. Multi-region
+ * languages (en, pt) are intentionally NOT here — those route through
+ * either the en→kitten path or kokoro multilingual.
+ */
+const SINGLE_PIPER_BY_BASE_LANG: Readonly<Record<string, string>> = {
+	es: "piper-es_ES-davefx-medium-int8",
+	fr: "piper-fr_FR-siwis-medium-int8",
+	de: "piper-de_DE-thorsten-medium-int8",
+	hi: "piper-hi_IN-pratham-medium-int8",
+	zh: "piper-zh_CN-chaowen-medium-int8",
+	it: "piper-it_IT-paola-medium-int8",
+	ru: "piper-ru_RU-denis-medium-int8",
+	ar: "piper-ar_JO-kareem-medium-int8",
+	tr: "piper-tr_TR-fahrettin-medium-int8",
+	nl: "piper-nl_NL-pim-medium-int8",
+};
+
+export function recommendDefaultModel(systemLocale: string): SmartDefaultRecommendation {
+	if (!systemLocale || typeof systemLocale !== "string") {
+		return {
+			modelId: DEFAULT_TTS_MODEL,
+			reason: "No system locale detected — defaulting to the smallest English model.",
+			fallback: true,
+		};
+	}
+
+	// Normalize: lowercase first subtag, e.g. "en_US.UTF-8" → "en"
+	const base = systemLocale
+		.split(/[-_.]/)[0]!
+		.toLowerCase();
+
+	// English locales — Kitten Nano is the smallest viable English TTS
+	// at 25 MB, and we ship it as the catalog default for first-run
+	// experience reasons.
+	if (base === "en") {
+		return {
+			modelId: DEFAULT_TTS_MODEL,
+			reason: `English locale detected — recommending ${DEFAULT_TTS_MODEL} (25 MB, 8 voices).`,
+			fallback: false,
+		};
+	}
+
+	// Special-case Portuguese: catalog has Brazilian-only Piper. We pick
+	// pt-BR for any pt-* locale and surface the regional gap in the
+	// reason — region-strict matching at speak time will warn if the
+	// user explicitly types pt-PT.
+	if (base === "pt") {
+		return {
+			modelId: "piper-pt_BR-cadu-medium-int8",
+			reason: `Portuguese locale detected — recommending Brazilian Portuguese voice (${
+				systemLocale.toLowerCase().includes("br") ? "exact match" : "closest available"
+			}, 20 MB).`,
+			fallback: false,
+		};
+	}
+
+	// Single-language Piper match
+	const single = SINGLE_PIPER_BY_BASE_LANG[base];
+	if (single) {
+		return {
+			modelId: single,
+			reason: `${base.toUpperCase()} locale detected — recommending ${single} (~20 MB).`,
+			fallback: false,
+		};
+	}
+
+	// Languages covered only by Kokoro multilingual (ja, ko)
+	if (base === "ja" || base === "ko") {
+		return {
+			modelId: "kokoro-int8-multi-lang-v1_0",
+			reason: `${base.toUpperCase()} locale detected — recommending Kokoro multilingual (126 MB, ` +
+				`covers en/zh/ja/ko/es/fr/hi/it/pt in one model).`,
+			fallback: false,
+		};
+	}
+
+	// No coverage — fall back to English default with a warning the
+	// caller can surface verbatim.
+	return {
+		modelId: DEFAULT_TTS_MODEL,
+		reason: `Locale ${systemLocale} has no built-in TTS voice. Falling back to English (${DEFAULT_TTS_MODEL}). ` +
+			`Browse /voice-settings → Speak tab → Models for the full catalog.`,
+		fallback: true,
+	};
+}
+
 /** Look up a model by id; throws if unknown so callers fail loudly. */
 export function getTtsModel(id: string): TtsLocalModelInfo {
 	const m = TTS_LOCAL_MODELS.find(x => x.id === id);
@@ -409,19 +537,46 @@ export function getInstalledTtsModelDir(modelId: string): string {
 }
 
 export interface TtsInstallProgress {
+	/**
+	 * - "download" — fetching archive bytes (with phase totals)
+	 * - "extract" — running tar over the saved archive
+	 * - "verify" — moving extracted files to final dir
+	 * - "done" — install complete
+	 */
 	phase: "download" | "extract" | "verify" | "done";
 	bytes?: number;
 	totalBytes?: number;
 }
 
 /**
+ * Result returned alongside install completion — exposes the computed
+ * SHA-256 so callers (and v7.1+ catalog updates) can pin known-good hashes.
+ */
+export interface TtsInstallResult {
+	dir: string;
+	archiveSha256: string;
+}
+
+/**
  * Download and extract `modelId` if not already installed. Idempotent —
- * if already installed, resolves immediately. The download is streamed
- * directly to `tar -xj` so we never buffer the whole archive in memory.
+ * if already installed, resolves immediately.
+ *
+ * The flow is download-to-disk-then-extract, not streaming-to-tar:
+ *   1. Resume-aware fetch → write archive bytes to
+ *      `~/.pi/models/tts/<id>.partial.tar.bz2`. If the partial file
+ *      exists from a prior interrupted run, send `Range: bytes=N-` and
+ *      append. SHA-256 is computed across the full file by re-reading
+ *      it once on completion (cheap — ~200ms for 126 MB on M-series).
+ *   2. If the catalog entry has `archiveSha256`, compare against the
+ *      computed hash. Mismatch → reject + cleanup partial.
+ *   3. `tar -xj -f <archive> -C <stagingDir>` to extract.
+ *   4. Move staging contents to final `<modelDir>` via rename (atomic).
+ *   5. Delete the archive file.
  *
  * Errors:
- *   - "Network error: ..." on fetch failure
- *   - "Download failed: HTTP <status>" on non-2xx
+ *   - "Download failed: HTTP <status>" on non-2xx (and not 206/200 retry)
+ *   - "Network error: <message>" on fetch failure
+ *   - "Archive integrity check failed: ..." on SHA-256 mismatch
  *   - "tar exited with code N" on extraction failure
  *   - DOMException("AbortError") if signal fires
  */
@@ -431,105 +586,208 @@ export async function ensureTtsModelInstalled(
 		signal?: AbortSignal;
 		onProgress?: (info: TtsInstallProgress) => void;
 	} = {},
-): Promise<string> {
+): Promise<TtsInstallResult> {
 	const model = getTtsModel(modelId);
 	const dir = getTtsModelDir(modelId);
 
 	if (isTtsModelInstalled(modelId)) {
 		opts.onProgress?.({ phase: "done" });
-		return dir;
+		return { dir, archiveSha256: model.archiveSha256 ?? "" };
 	}
 	if (opts.signal?.aborted) throw makeAbortErr();
 
-	// Download to a temp file under tts/ then extract → atomic-ish:
-	// partial extracts go into a temp dir that we rename on success, so
-	// `isTtsModelInstalled` never sees a half-extracted state.
 	const ttsDir = getTtsModelsDir();
 	fs.mkdirSync(ttsDir, { recursive: true });
-	const stagingDir = `${dir}.staging-${process.pid}`;
-	fs.mkdirSync(stagingDir, { recursive: true });
+	const archivePath = path.join(ttsDir, `${modelId}.partial.tar.bz2`);
 
 	try {
-		opts.onProgress?.({ phase: "download" });
-		const res = await fetch(model.archiveUrl, { signal: opts.signal });
-		if (!res.ok || !res.body) {
-			throw new Error(`Download failed: HTTP ${res.status} from ${model.archiveUrl}`);
-		}
+		// Phase 1 — download archive bytes (with resume).
+		await downloadArchive(model.archiveUrl, archivePath, opts);
+		if (opts.signal?.aborted) throw makeAbortErr();
 
-		opts.onProgress?.({ phase: "extract", totalBytes: model.sizeBytes });
-		// Stream the archive directly into `tar -xj -C <stagingDir>`. This
-		// works on macOS, Linux, and Windows 10+ (which ships bsdtar).
-		// Using stdin keeps the archive bytes off disk — important for
-		// a 126 MB Kokoro download.
-		const tar = spawn("tar", ["-xj", "-C", stagingDir], {
-			stdio: ["pipe", "ignore", "pipe"],
-			...(opts.signal ? { signal: opts.signal } : {}),
-		});
-		let tarStderr = "";
-		tar.stderr?.on("data", (d: Buffer) => {
-			if (tarStderr.length < 1024) tarStderr += d.toString();
-		});
-
-		const tarExit = new Promise<void>((resolve, reject) => {
-			tar.on("error", (err: NodeJS.ErrnoException) => {
-				if (err.name === "AbortError" || opts.signal?.aborted) reject(makeAbortErr());
-				else reject(new Error(`tar failed to start: ${err.message}`));
-			});
-			tar.on("close", (code, sig) => {
-				if (code === 0) resolve();
-				else if (opts.signal?.aborted) reject(makeAbortErr());
-				else reject(new Error(`tar exited with code ${code}${sig ? ` (${sig})` : ""}: ${tarStderr.trim().slice(-200)}`));
-			});
-		});
-
-		// Pipe response body → tar stdin. The web ReadableStream needs to
-		// be drained chunk-by-chunk; we write each chunk to the tar pipe
-		// and surface progress.
-		let bytesSeen = 0;
-		const reader = res.body.getReader();
-		try {
-			while (true) {
-				if (opts.signal?.aborted) {
-					try { tar.kill("SIGTERM"); } catch {}
-					throw makeAbortErr();
-				}
-				const { value, done } = await reader.read();
-				if (done) break;
-				if (value) {
-					bytesSeen += value.byteLength;
-					opts.onProgress?.({ phase: "extract", bytes: bytesSeen, totalBytes: model.sizeBytes });
-					// Write to tar's stdin — backpressure-respecting via the
-					// fact that tar.stdin is a Writable; if it's full this
-					// returns false but our small chunk size means it
-					// rarely matters.
-					tar.stdin?.write(Buffer.from(value));
-				}
-			}
-		} finally {
-			try { reader.releaseLock(); } catch {}
-		}
-		tar.stdin?.end();
-		await tarExit;
-
-		// The archive's top-level directory differs per model (e.g.
-		// `vits-piper-en_US-lessac-medium-int8/`). Move its contents
-		// up one level so we end up with a flat `<dir>/tokens.txt` etc.
+		// Phase 2 — verify hash.
 		opts.onProgress?.({ phase: "verify" });
-		const stagingEntries = fs.readdirSync(stagingDir);
-		const innerDir = stagingEntries.length === 1 && fs.statSync(path.join(stagingDir, stagingEntries[0]!)).isDirectory()
-			? path.join(stagingDir, stagingEntries[0]!)
-			: stagingDir;
-		fs.renameSync(innerDir, dir);
+		const computedSha256 = await sha256OfFile(archivePath, opts.signal);
+		if (model.archiveSha256 && model.archiveSha256.toLowerCase() !== computedSha256.toLowerCase()) {
+			throw new Error(
+				`Archive integrity check failed for ${modelId}: ` +
+				`expected ${model.archiveSha256}, got ${computedSha256}. ` +
+				`Delete ${archivePath} and retry, or check for a corrupted upstream release.`,
+			);
+		}
+
+		// Phase 3 — extract.
+		opts.onProgress?.({ phase: "extract", totalBytes: model.sizeBytes });
+		const stagingDir = `${dir}.staging-${process.pid}`;
+		fs.mkdirSync(stagingDir, { recursive: true });
+		try {
+			await runTarExtract(archivePath, stagingDir, opts.signal);
+
+			// Phase 4 — move into final location. The archive's top-level
+			// directory differs per model (e.g.
+			// `vits-piper-en_US-lessac-medium-int8/`). Flatten to
+			// `<modelDir>/tokens.txt` etc.
+			const stagingEntries = fs.readdirSync(stagingDir);
+			const innerDir = stagingEntries.length === 1 && fs.statSync(path.join(stagingDir, stagingEntries[0]!)).isDirectory()
+				? path.join(stagingDir, stagingEntries[0]!)
+				: stagingDir;
+			// rename is atomic when innerDir and dir are on the same
+			// filesystem (~/.pi/models/tts/.staging is a sibling of dir).
+			fs.renameSync(innerDir, dir);
+		} finally {
+			try { fs.rmSync(stagingDir, { recursive: true, force: true }); } catch {}
+		}
+
+		// Phase 5 — clean up the archive file. Successful install means we
+		// no longer need the partial; resume is moot.
+		try { fs.unlinkSync(archivePath); } catch {}
+
 		opts.onProgress?.({ phase: "done" });
-		return dir;
+		return { dir, archiveSha256: computedSha256 };
 	} catch (err) {
-		// Best-effort cleanup of partial state.
-		try { fs.rmSync(stagingDir, { recursive: true, force: true }); } catch {}
+		// On failure, leave the partial archive file in place so the
+		// next attempt can resume. But clean up the destination dir if
+		// extraction created it.
 		try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
 		throw err;
-	} finally {
-		try { fs.rmSync(stagingDir, { recursive: true, force: true }); } catch {}
 	}
+}
+
+/**
+ * Download bytes to `archivePath` with `Range` resume.
+ *
+ * If the file already exists, we send `Range: bytes=<size>-` and the
+ * server is expected to respond with 206 Partial Content (we append) or
+ * 200 OK (server doesn't support range; we throw the file away and
+ * start over).
+ *
+ * Surfaces byte-count progress via `opts.onProgress`. The total byte
+ * count comes from `Content-Length` on the response — for 206 responses
+ * we add the existing partial size to the running counter so the user
+ * sees a continuous progress bar across resumed sessions.
+ */
+async function downloadArchive(
+	url: string,
+	archivePath: string,
+	opts: { signal?: AbortSignal; onProgress?: (info: TtsInstallProgress) => void },
+): Promise<void> {
+	let existingBytes = 0;
+	if (fs.existsSync(archivePath)) {
+		try { existingBytes = fs.statSync(archivePath).size; } catch {}
+	}
+
+	const headers: Record<string, string> = {};
+	if (existingBytes > 0) headers.Range = `bytes=${existingBytes}-`;
+
+	let res: Response;
+	try {
+		res = await fetch(url, { signal: opts.signal, headers });
+	} catch (err: any) {
+		if (err?.name === "AbortError") throw err;
+		throw new Error(`Network error: ${err?.message ?? String(err)}`);
+	}
+
+	let appendMode = false;
+	if (res.status === 206 && existingBytes > 0) {
+		appendMode = true;
+	} else if (res.status === 200) {
+		// Server ignored our Range — start over.
+		appendMode = false;
+		existingBytes = 0;
+	} else if (!res.ok) {
+		throw new Error(`Download failed: HTTP ${res.status} from ${url}`);
+	}
+
+	if (!res.body) throw new Error(`Download failed: empty body from ${url}`);
+
+	// Total = bytes already on disk + Content-Length of this response.
+	const contentLength = parseInt(res.headers.get("content-length") ?? "0", 10);
+	const totalBytes = existingBytes + (Number.isFinite(contentLength) ? contentLength : 0);
+
+	const sink = fs.createWriteStream(archivePath, { flags: appendMode ? "a" : "w" });
+	let bytesSeen = existingBytes;
+	opts.onProgress?.({ phase: "download", bytes: bytesSeen, totalBytes });
+
+	const reader = res.body.getReader();
+	try {
+		while (true) {
+			if (opts.signal?.aborted) throw makeAbortErr();
+			const { value, done } = await reader.read();
+			if (done) break;
+			if (value) {
+				bytesSeen += value.byteLength;
+				// Honor backpressure: if write returns false, await `drain`.
+				const ok = sink.write(Buffer.from(value));
+				if (!ok) await new Promise<void>(r => sink.once("drain", r));
+				opts.onProgress?.({ phase: "download", bytes: bytesSeen, totalBytes });
+			}
+		}
+	} finally {
+		try { reader.releaseLock(); } catch {}
+		// Drain and close the file. End() callback fires after the final
+		// flush. Errors during close are surfaced via `error` listener
+		// captured before the await.
+		await new Promise<void>((resolve, rej) => {
+			let settled = false;
+			const onError = (err: Error) => {
+				if (settled) return;
+				settled = true;
+				rej(err);
+			};
+			sink.once("error", onError);
+			sink.end(() => {
+				if (settled) return;
+				settled = true;
+				sink.off("error", onError);
+				resolve();
+			});
+		});
+	}
+}
+
+/** Compute the SHA-256 hex digest of `filePath`. Streams via fs.createReadStream. */
+async function sha256OfFile(filePath: string, signal?: AbortSignal): Promise<string> {
+	return new Promise((resolve, reject) => {
+		const hash = createHash("sha256");
+		const stream = fs.createReadStream(filePath);
+		const onAbort = () => {
+			stream.destroy();
+			reject(makeAbortErr());
+		};
+		signal?.addEventListener("abort", onAbort, { once: true });
+		stream.on("data", (chunk) => hash.update(chunk));
+		stream.on("end", () => {
+			signal?.removeEventListener("abort", onAbort);
+			resolve(hash.digest("hex"));
+		});
+		stream.on("error", (err) => {
+			signal?.removeEventListener("abort", onAbort);
+			reject(err);
+		});
+	});
+}
+
+/** Spawn `tar -xj -f <archive> -C <stagingDir>` and resolve on exit code 0. */
+async function runTarExtract(archivePath: string, stagingDir: string, signal?: AbortSignal): Promise<void> {
+	const tar = spawn("tar", ["-xj", "-f", archivePath, "-C", stagingDir], {
+		stdio: ["ignore", "ignore", "pipe"],
+		...(signal ? { signal } : {}),
+	});
+	let tarStderr = "";
+	tar.stderr?.on("data", (d: Buffer) => {
+		if (tarStderr.length < 1024) tarStderr += d.toString();
+	});
+	await new Promise<void>((resolve, reject) => {
+		tar.on("error", (err: NodeJS.ErrnoException) => {
+			if (err.name === "AbortError" || signal?.aborted) reject(makeAbortErr());
+			else reject(new Error(`tar failed to start: ${err.message}`));
+		});
+		tar.on("close", (code, sig) => {
+			if (code === 0) resolve();
+			else if (signal?.aborted) reject(makeAbortErr());
+			else reject(new Error(`tar exited with code ${code}${sig ? ` (${sig})` : ""}: ${tarStderr.trim().slice(-200)}`));
+		});
+	});
 }
 
 function makeAbortErr(): Error {

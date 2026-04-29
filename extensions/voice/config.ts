@@ -81,6 +81,12 @@ export interface VoiceConfig {
 	 * but ignored.
 	 */
 	ttsDeepgramStreaming?: boolean;
+	/**
+	 * Set to true after `tts-onboarding.maybeShowTtsOnboarding()` has
+	 * shown its first-run hint, so subsequent /voice-speak-toggle calls
+	 * don't re-spam the same notification. New in v7.0.0.
+	 */
+	ttsOnboardingShown?: boolean;
 }
 
 export interface LoadedVoiceConfig {
@@ -114,6 +120,7 @@ export const DEFAULT_CONFIG: VoiceConfig = {
 	ttsAutoSpeak: false,
 	ttsLanguage: undefined,
 	ttsDeepgramStreaming: false,
+	ttsOnboardingShown: false,
 	onboarding: {
 		completed: false,
 		schemaVersion: VOICE_CONFIG_VERSION,
@@ -199,6 +206,9 @@ function migrateConfig(rawVoice: any, source: VoiceConfigSource): VoiceConfig {
 		ttsDeepgramStreaming: typeof rawVoice.ttsDeepgramStreaming === "boolean"
 			? rawVoice.ttsDeepgramStreaming
 			: DEFAULT_CONFIG.ttsDeepgramStreaming,
+		ttsOnboardingShown: typeof rawVoice.ttsOnboardingShown === "boolean"
+			? rawVoice.ttsOnboardingShown
+			: false,
 		onboarding: normalizeOnboarding(rawVoice.onboarding, fallbackCompleted),
 	};
 }

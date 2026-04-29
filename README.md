@@ -12,14 +12,15 @@
 [![license](https://img.shields.io/npm/l/@codexstar/pi-listen.svg)](https://github.com/codexstar69/pi-listen/blob/main/LICENSE)
 [![author](https://img.shields.io/badge/author-@baanditeagle-1DA1F2?logo=x&logoColor=white)](https://x.com/baanditeagle)
 
-> **v6.0.0 — TTS! pi-listen now speaks back** — voice in + voice out in one
-> extension. Hold-to-talk STT unchanged; new `/voice-speak <text>` synthesizes
-> and plays via 12 local models (Kitten Nano 25 MB default, Piper per-language
-> voices, Kokoro multilingual) or Deepgram Aura (cloud, same `DEEPGRAM_API_KEY`
-> as STT). Region-strict language matching, sentence-aware chunking via
-> `Intl.Segmenter` (no more breaking on `Dr. Smith` / `v2.0` / URLs),
-> cross-platform audio playback with cooperative abort. Plus the cleaner
-> v5.1 settings panel grouped by model family. [Full changelog →](CHANGELOG.md)
+> **v7.0.0 — World-class TTS UX** — pick models from `/voice-settings` Speak
+> tab (no more JSON editing), auto-download on selection with progress, voice
+> picker for every backend, first-run onboarding with smart-default
+> recommendation by your system locale, and `ttsAutoSpeak: true` finally
+> works — auto-speaks the agent's responses with code-block stripping and
+> rate limiting. Diagnostic command `/voice-speak-info` shows everything.
+> Resume-on-interrupt downloads. Plus all v6 features (14 local models from
+> 25 MB Kitten Nano up, Deepgram Aura cloud, region-strict language matching,
+> sentence-aware chunking). [Full changelog →](CHANGELOG.md)
 
 ---
 

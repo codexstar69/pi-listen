@@ -1954,6 +1954,65 @@ export default function (pi: ExtensionAPI) {
 	// requires "@mariozechner/pi-coding-agent": ">=0.65.0", so a host without
 	// the new flow can't install this extension in the first place.
 
+	// ─── Auto-speak (TTS after assistant turn ends) ─────────────────────
+	//
+	// When ttsAutoSpeak is true AND ttsEnabled is true, subscribe to
+	// `turn_end` and pipe the assistant's response through speak() with
+	// the same text-filter and length-cap logic the manual command uses.
+	//
+	// The handler is always registered; it short-circuits when the flags
+	// are off. This way toggling `ttsAutoSpeak` via /voice-speak-toggle
+	// doesn't require a session restart.
+	//
+	// Rate limit: track the last auto-speak timestamp and skip if a new
+	// turn ends within ~3 seconds. Prevents the agent's rapid-fire
+	// short responses from queueing up unread audio.
+	let lastAutoSpeakAt = 0;
+	const AUTO_SPEAK_RATE_LIMIT_MS = 3000;
+
+	pi.on("turn_end", async (event, _evtCtx) => {
+		if (!config.ttsEnabled || !config.ttsAutoSpeak) return;
+		const message = event?.message;
+		if (!message || message.role !== "assistant") return;
+		// Don't auto-speak while STT is hot — feedback loop hazard.
+		if (voiceState === "recording" || voiceState === "finalizing") return;
+
+		// Rate limit: drop turn_end events that arrive within the cooldown.
+		const now = Date.now();
+		if (now - lastAutoSpeakAt < AUTO_SPEAK_RATE_LIMIT_MS) return;
+
+		// Extract text content. AssistantMessage.content is an array of
+		// TextContent | ThinkingContent | ToolCall. We only speak the
+		// plain text — thinking blocks are internal, tool calls are
+		// machine-readable.
+		const text = (message.content as any[])
+			.filter(c => c?.type === "text" && typeof c.text === "string")
+			.map(c => c.text as string)
+			.join(" ")
+			.trim();
+		if (!text) return;
+
+		const { prepareForSpeech } = await import("./voice/tts-text-filter");
+		const prepared = prepareForSpeech(text, {
+			maxChars: 2000,
+			stripCodeBlocks: true,
+			collapseLinks: true,
+		});
+		if (prepared.skipped) return;
+
+		lastAutoSpeakAt = now;
+		// runSpeak handles abort-on-active and the model-install-on-demand
+		// flow. We pass forceEnabled=false so it respects ttsEnabled (which
+		// we already checked above — extra safety for races where the flag
+		// flips between this check and runSpeak's own check).
+		try {
+			if (ctx) await runSpeak(ctx, prepared.text);
+		} catch {
+			// Auto-speak failures are non-blocking; the user already saw
+			// the agent's text response. Errors surface in /voice-speak-info.
+		}
+	});
+
 	// ─── /voice command ──────────────────────────────────────────────────────
 
 	pi.registerCommand("voice", {
@@ -2332,6 +2391,40 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
+		// Post-close: handle the TTS install action triggered by selecting
+		// a not-yet-installed model in the Speak tab Model picker. Runs
+		// ensureTtsModelInstalled with progress notifications.
+		if (result?.type === "tts-install" && result.modelId) {
+			const { ensureTtsModelInstalled, getTtsModel } = await import("./voice/tts-local-models");
+			const model = getTtsModel(result.modelId);
+			cmdCtx.ui.notify(`Installing TTS model ${model.name} (${model.size})…`, "info");
+			let lastPercent = -1;
+			try {
+				await ensureTtsModelInstalled(result.modelId, {
+					onProgress: (info) => {
+						if (info.phase === "download" && info.totalBytes && info.bytes !== undefined) {
+							const pct = Math.floor((info.bytes / info.totalBytes) * 100);
+							// Notify every 10% to avoid notification spam.
+							if (pct >= lastPercent + 10) {
+								lastPercent = pct;
+								cmdCtx.ui.notify(`Downloading ${model.name}… ${pct}%`, "info");
+							}
+						} else if (info.phase === "extract") {
+							cmdCtx.ui.notify(`Extracting ${model.name}…`, "info");
+						} else if (info.phase === "verify") {
+							cmdCtx.ui.notify(`Verifying ${model.name}…`, "info");
+						}
+					},
+				});
+				cmdCtx.ui.notify(`${model.name} installed and ready.`, "info");
+			} catch (err: any) {
+				if (err?.name !== "AbortError") {
+					cmdCtx.ui.notify(`Install failed: ${err?.message ?? err}`, "error");
+				}
+			}
+			return;
+		}
+
 		// Post-close: handle download action with full pre-checks + progress
 		if (result?.type === "download" && result.modelId) {
 			const model = LOCAL_MODELS.find(m => m.id === result.modelId);
@@ -2455,7 +2548,7 @@ export default function (pi: ExtensionAPI) {
 		return true;
 	}
 
-	async function runSpeak(cmdCtx: ExtensionCommandContext, text: string, opts: { forceEnabled?: boolean } = {}): Promise<void> {
+	async function runSpeak(cmdCtx: ExtensionCommandContext | ExtensionContext, text: string, opts: { forceEnabled?: boolean } = {}): Promise<void> {
 		// `forceEnabled` lets /voice-speak-test bypass the gate without
 		// mutating shared config. The previous mutate-snapshot-restore
 		// pattern raced against /voice-speak-toggle and could clobber the
@@ -2535,10 +2628,26 @@ export default function (pi: ExtensionAPI) {
 		description: "Toggle TTS on/off (master switch)",
 		handler: async (_args, cmdCtx) => {
 			ctx = cmdCtx;
-			config.ttsEnabled = !config.ttsEnabled;
+			const nowEnabling = !config.ttsEnabled;
+			config.ttsEnabled = nowEnabling;
 			saveConfig(config, config.scope === "project" ? "project" : "global", currentCwd);
-			if (!config.ttsEnabled) abortActiveSpeak();
-			cmdCtx.ui.notify(`TTS ${config.ttsEnabled ? "enabled" : "disabled"}.`, "info");
+			if (!nowEnabling) abortActiveSpeak();
+			cmdCtx.ui.notify(`TTS ${nowEnabling ? "enabled" : "disabled"}.`, "info");
+			// First-time enable → show onboarding hint with smart-default
+			// recommendation. Subsequent toggles are silent.
+			if (nowEnabling) {
+				try {
+					const { detectDevice } = await import("./voice/device");
+					const { maybeShowTtsOnboarding } = await import("./voice/tts-onboarding");
+					maybeShowTtsOnboarding({
+						ctx: cmdCtx,
+						config,
+						device: detectDevice(),
+						cwd: currentCwd,
+						saveConfig: (cfg, scope, cwd) => saveConfig(cfg, scope, cwd),
+					});
+				} catch { /* onboarding hint is best-effort */ }
+			}
 		},
 	});
 
@@ -2552,6 +2661,64 @@ export default function (pi: ExtensionAPI) {
 			// test's finally restored its snapshot).
 			await runSpeak(cmdCtx, "The quick brown fox jumps over the lazy dog.", { forceEnabled: true });
 		},
+	});
+
+	pi.registerCommand("voice-speak-info", {
+		description: "Show TTS configuration: backend, model, voice, install state",
+		handler: async (_args, cmdCtx) => {
+			ctx = cmdCtx;
+			const { getTtsModel, isTtsModelInstalled, TTS_LOCAL_MODELS } =
+				await import("./voice/tts-local-models");
+			const { DEEPGRAM_TTS_VOICES } = await import("./voice/tts-deepgram");
+			const { resolveDeepgramApiKey } = await import("./voice/deepgram");
+
+			const isLocal = (config.ttsBackend ?? "local") === "local";
+			const lines: string[] = ["TTS configuration:", ""];
+			lines.push(`  Enabled:      ${config.ttsEnabled ? "yes" : "no"}`);
+			lines.push(`  Backend:      ${isLocal ? "local (sherpa-onnx)" : "deepgram (cloud REST)"}`);
+			lines.push(`  Language:     ${config.ttsLanguage ?? config.language ?? "en"}`);
+			lines.push(`  Speed:        ${(config.ttsSpeed ?? 1.0).toFixed(2)}x`);
+			lines.push(`  Auto-speak:   ${config.ttsAutoSpeak ? "yes" : "no"}`);
+			lines.push("");
+
+			if (isLocal) {
+				const modelId = config.ttsLocalModel ?? "kitten-nano-en-v0_2";
+				let model;
+				try { model = getTtsModel(modelId); } catch { model = undefined; }
+				const installed = isTtsModelInstalled(modelId);
+				lines.push("  Local backend:");
+				lines.push(`    Model:      ${modelId}${model ? ` (${model.name}, ${model.size})` : " — unknown id"}`);
+				lines.push(`    Installed:  ${installed ? "yes" : "NO — first speak will download"}`);
+				if (model) {
+					const sid = typeof config.ttsLocalVoiceId === "number" ? config.ttsLocalVoiceId : model.defaultSid;
+					const voice = model.voices.find(v => v.sid === sid);
+					lines.push(`    Voice sid:  ${sid}${voice ? ` (${voice.name})` : ""}`);
+					lines.push(`    Languages:  ${model.languages.join(", ")}`);
+					lines.push(`    Sample rate: ${model.sampleRate} Hz`);
+				}
+				lines.push("");
+				lines.push(`  Catalog:      ${TTS_LOCAL_MODELS.length} models available — /voice-speak-models to browse`);
+			} else {
+				const voiceId = config.ttsDeepgramVoiceId ?? "aura-asteria-en";
+				const voice = DEEPGRAM_TTS_VOICES.find(v => v.id === voiceId);
+				const apiKey = resolveDeepgramApiKey(config);
+				lines.push("  Deepgram backend:");
+				lines.push(`    Voice:      ${voiceId}${voice ? ` (${voice.name})` : ""}`);
+				lines.push(`    API key:    ${apiKey ? `set (${apiKey.slice(0, 8)}…)` : "NOT SET — set DEEPGRAM_API_KEY"}`);
+				lines.push(`    Catalog:    ${DEEPGRAM_TTS_VOICES.length} Aura voices surfaced`);
+			}
+
+			lines.push("");
+			lines.push("  Commands: /voice-speak <text>  ·  /voice-speak-stop  ·  /voice-speak-toggle");
+			lines.push("            /voice-speak-test    ·  /voice-speak-models  ·  /voice-settings");
+			cmdCtx.ui.notify(lines.join("\n"), "info");
+		},
+	});
+
+	pi.registerCommand("voice-speak-models", {
+		description: "Browse and install TTS models (opens settings panel on Speak tab)",
+		// initialTab=3 → Speak tab (index 0=General, 1=Models, 2=Downloaded, 3=Speak, 4=Device)
+		handler: async (_args, cmdCtx) => openSettingsPanel(cmdCtx, 3),
 	});
 
 	// ─── /voice-settings — unified pi-listen settings panel ─────────────

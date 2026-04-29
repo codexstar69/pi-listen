@@ -24,6 +24,16 @@ import type { VoiceConfig, VoiceSettingsScope } from "./config";
 import { LOCAL_MODELS, getLanguagesForLocalModel, type LocalModelInfo } from "./local";
 import type { DeviceProfile, ModelFitness } from "./device";
 import { getFreeDiskSpace, formatBytes, getModelsDir, scanHandyModels, importHandyModel } from "./model-download";
+import {
+	TTS_LOCAL_MODELS as TTS_LOCAL_MODELS_REF,
+	isTtsModelInstalled as TTS_INSTALLED_CHECK_REF,
+	type TtsLocalModelInfo,
+	type TtsVoice,
+} from "./tts-local-models";
+import {
+	DEEPGRAM_TTS_VOICES,
+	filterDeepgramVoicesByLanguage,
+} from "./tts-deepgram";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -34,6 +44,7 @@ type TabId = (typeof TAB_IDS)[number];
 export type PanelAction =
 	| { type: "download"; modelId: string }
 	| { type: "speak-test" }
+	| { type: "tts-install"; modelId: string }
 	| undefined;
 
 export interface PanelDeps {
@@ -84,7 +95,7 @@ export class VoiceSettingsPanel {
 
 	private tab = 0;
 	private row = 0;
-	private sub: "main" | "lang-picker" = "main";
+	private sub: "main" | "lang-picker" | "tts-model-picker" | "tts-voice-picker" = "main";
 
 	// Models tab — grouped view
 	private modelSearch = "";
@@ -100,6 +111,14 @@ export class VoiceSettingsPanel {
 	private langList: { name: string; code: string }[] = [];
 	private langFiltered: { name: string; code: string }[] = [];
 	private langRow = 0;
+
+	// TTS model sub-picker (Speak tab → Model row)
+	private ttsModelSearch = "";
+	private ttsModelRow = 0;
+
+	// TTS voice sub-picker (Speak tab → Voice row)
+	private ttsVoiceSearch = "";
+	private ttsVoiceRow = 0;
 
 	// Two-step delete on the Downloaded tab. When `x` is pressed, set the
 	// pending modelId + expiry timestamp; a second `x` within DELETE_CONFIRM_MS
@@ -157,6 +176,14 @@ export class VoiceSettingsPanel {
 			lines.push(...this.renderLangPicker(w, iw).map(t));
 			return lines;
 		}
+		if (this.sub === "tts-model-picker") {
+			lines.push(...this.renderTtsModelPicker(w, iw).map(t));
+			return lines;
+		}
+		if (this.sub === "tts-voice-picker") {
+			lines.push(...this.renderTtsVoicePicker(w, iw).map(t));
+			return lines;
+		}
 
 		// Tab content
 		const tabId = TAB_IDS[this.tab]!;
@@ -184,6 +211,14 @@ export class VoiceSettingsPanel {
 	handleInput(data: string): void {
 		if (this.sub === "lang-picker") {
 			this.handleLangInput(data);
+			return;
+		}
+		if (this.sub === "tts-model-picker") {
+			this.handleTtsModelInput(data);
+			return;
+		}
+		if (this.sub === "tts-voice-picker") {
+			this.handleTtsVoiceInput(data);
 			return;
 		}
 
@@ -507,12 +542,28 @@ export class VoiceSettingsPanel {
 		const { config } = this.p;
 		const isLocal = (config.ttsBackend ?? "local") === "local";
 
-		// Five rows mirroring the General tab pattern:
+		// Always-visible status line — single source of truth for the
+		// current TTS configuration so the user can scan it without
+		// reading every row.
+		const statusParts: string[] = [];
+		statusParts.push(isLocal ? "Local" : "Deepgram");
+		statusParts.push(this.formatActiveModelOrVoice(config));
+		statusParts.push(`${(config.ttsSpeed ?? 1.0).toFixed(2)}×`);
+		const lang = config.ttsLanguage || config.language || "en";
+		statusParts.push(lang.toUpperCase());
+		const statusBar = config.ttsEnabled
+			? this.success("● ") + statusParts.join(this.dim(" · "))
+			: this.dim("● disabled · ") + statusParts.join(this.dim(" · "));
+		lines.push(`  ${statusBar}`);
+		lines.push("");
+
+		// Six rows:
 		//   0: Enabled toggle
 		//   1: Backend toggle
-		//   2: Voice (numeric sid for local; Deepgram model id otherwise)
-		//   3: Speed (cycles 0.5/1.0/1.25/1.5/2.0)
-		//   4: Test (synthesizes "The quick brown fox …")
+		//   2: Model picker (local) or read-only label (deepgram)
+		//   3: Voice picker (numeric sid for local; Aura voice id for deepgram)
+		//   4: Speed (cycles 0.5 / 0.75 / 1.0 / 1.25 / 1.5 / 2.0)
+		//   5: Test (synthesizes "The quick brown fox …")
 		const rows: { label: string; value: string; hint?: string }[] = [
 			{
 				label: "TTS",
@@ -527,16 +578,20 @@ export class VoiceSettingsPanel {
 				hint: "toggle",
 			},
 			{
-				label: "Voice",
+				label: "Model",
 				value: isLocal
-					? `sid ${typeof config.ttsLocalVoiceId === "number" ? config.ttsLocalVoiceId : 0}`
-						+ ` (${config.ttsLocalModel ?? "kitten-nano-en-v0_2"})`
-					: (config.ttsDeepgramVoiceId ?? "aura-asteria-en"),
-				hint: "edit in settings.json",
+					? this.formatLocalModelLabel(config.ttsLocalModel)
+					: this.dim("(deepgram backend — pick a voice instead)"),
+				hint: isLocal ? "pick model ›" : undefined,
+			},
+			{
+				label: "Voice",
+				value: this.formatVoiceLabel(config),
+				hint: "pick voice ›",
 			},
 			{
 				label: "Speed",
-				value: `${(config.ttsSpeed ?? 1.0).toFixed(2)}x`,
+				value: `${(config.ttsSpeed ?? 1.0).toFixed(2)}×`,
 				hint: "cycle",
 			},
 			{
@@ -559,6 +614,42 @@ export class VoiceSettingsPanel {
 		lines.push(this.dim("  ↵ change  ←→/Tab tabs  ↑↓ navigate  esc close"));
 		lines.push(this.dim("  TTS quickstart: /voice-speak <text>  ·  /voice-speak-stop"));
 		return lines;
+	}
+
+	/** Status-bar helper: format the current model+voice as one short string. */
+	private formatActiveModelOrVoice(config: VoiceConfig): string {
+		const isLocal = (config.ttsBackend ?? "local") === "local";
+		if (isLocal) {
+			const modelId = config.ttsLocalModel ?? "kitten-nano-en-v0_2";
+			const sid = typeof config.ttsLocalVoiceId === "number" ? config.ttsLocalVoiceId : 0;
+			// Lazy lookup — keep status compact, full label is in the rows below.
+			const model = TTS_LOCAL_MODELS_REF.find(m => m.id === modelId);
+			const shortName = model?.name ?? modelId;
+			const voice = model?.voices.find(v => v.sid === sid);
+			return voice ? `${shortName} · ${voice.name}` : `${shortName} · sid ${sid}`;
+		}
+		return config.ttsDeepgramVoiceId ?? "aura-asteria-en";
+	}
+
+	private formatLocalModelLabel(id: string | undefined): string {
+		const modelId = id ?? "kitten-nano-en-v0_2";
+		const model = TTS_LOCAL_MODELS_REF.find(m => m.id === modelId);
+		if (!model) return modelId;
+		const installed = TTS_INSTALLED_CHECK_REF(modelId);
+		const installedTag = installed ? this.success(" ✓") : this.warning(" ⬇ download on select");
+		return `${model.name} (${model.size})${installedTag}`;
+	}
+
+	private formatVoiceLabel(config: VoiceConfig): string {
+		const isLocal = (config.ttsBackend ?? "local") === "local";
+		if (isLocal) {
+			const modelId = config.ttsLocalModel ?? "kitten-nano-en-v0_2";
+			const sid = typeof config.ttsLocalVoiceId === "number" ? config.ttsLocalVoiceId : 0;
+			const model = TTS_LOCAL_MODELS_REF.find(m => m.id === modelId);
+			const voice = model?.voices.find(v => v.sid === sid);
+			return voice ? `${voice.name} (sid ${sid})` : `sid ${sid}`;
+		}
+		return config.ttsDeepgramVoiceId ?? "aura-asteria-en";
 	}
 
 	// ─── Device tab ───────────────────────────────────────────────────────
@@ -765,12 +856,15 @@ export class VoiceSettingsPanel {
 					config.ttsBackend = (config.ttsBackend ?? "local") === "local" ? "deepgram" : "local";
 					this.save();
 					break;
-				case 2: // Voice — v6.0 ships read-only with edit-in-config hint
-					// In v6.1 this opens an inline picker; for now the
-					// recommended path is /voice-settings → close → edit
-					// settings.json directly.
+				case 2: // Model picker (local only — Deepgram has no model concept)
+					if ((config.ttsBackend ?? "local") === "local") {
+						this.openTtsModelPicker();
+					}
 					break;
-				case 3: { // Speed cycle
+				case 3: // Voice picker
+					this.openTtsVoicePicker();
+					break;
+				case 4: { // Speed cycle
 					const ladder = [0.75, 1.0, 1.25, 1.5, 2.0, 0.5];
 					const current = config.ttsSpeed ?? 1.0;
 					const idx = ladder.findIndex(v => Math.abs(v - current) < 0.01);
@@ -778,7 +872,7 @@ export class VoiceSettingsPanel {
 					this.save();
 					break;
 				}
-				case 4: { // Test — emit a special panel-close action so the
+				case 5: { // Test — emit a special panel-close action so the
 					// caller (voice.ts:openSettingsPanel) can route it to
 					// /voice-speak-test without us depending on the
 					// command registry from inside the panel.
@@ -854,6 +948,272 @@ export class VoiceSettingsPanel {
 		this.p.saveConfig(config, config.scope === "project" ? "project" : "global", cwd);
 	}
 
+	// ─── TTS Model picker ──────────────────────────────────────────────────
+
+	/**
+	 * Filtered TTS catalog for the model picker.
+	 * Recomputed lazily during render — cheap (14 entries) and keeps the
+	 * filter live with the search box.
+	 */
+	private getFilteredTtsModels(): TtsLocalModelInfo[] {
+		const q = this.ttsModelSearch.trim().toLowerCase();
+		if (!q) return TTS_LOCAL_MODELS_REF;
+		return TTS_LOCAL_MODELS_REF.filter(m =>
+			`${m.name} ${m.id} ${m.notes} ${m.languages.join(" ")}`.toLowerCase().includes(q),
+		);
+	}
+
+	private openTtsModelPicker(): void {
+		this.ttsModelSearch = "";
+		const currentId = this.p.config.ttsLocalModel ?? "kitten-nano-en-v0_2";
+		const idx = TTS_LOCAL_MODELS_REF.findIndex(m => m.id === currentId);
+		this.ttsModelRow = idx >= 0 ? idx : 0;
+		this.sub = "tts-model-picker";
+	}
+
+	private renderTtsModelPicker(_w: number, iw: number): string[] {
+		const lines: string[] = [];
+		const currentId = this.p.config.ttsLocalModel ?? "kitten-nano-en-v0_2";
+		const filtered = this.getFilteredTtsModels();
+
+		lines.push(`  ${this.bold("Pick TTS model")}`);
+		const cursor = this.ttsModelSearch ? this.ttsModelSearch : this.dim("type to filter…");
+		lines.push(`  ${this.dim("Search:")} ${cursor}`);
+		lines.push("");
+
+		if (filtered.length === 0) {
+			lines.push(this.dim("    No matching models."));
+			lines.push("");
+			lines.push(this.dim("  esc back  type to filter"));
+			return lines;
+		}
+
+		// Viewport window centered on selection. 12 rows fits a 24-line
+		// overlay comfortably.
+		const maxVisible = 12;
+		const total = filtered.length;
+		const sel = Math.min(this.ttsModelRow, total - 1);
+		let start = Math.max(0, sel - Math.floor(maxVisible / 2));
+		const end = Math.min(start + maxVisible, total);
+		if (end - start < maxVisible) start = Math.max(0, end - maxVisible);
+
+		const nameW = Math.min(28, Math.max(18, iw - 32));
+		for (let i = start; i < end; i++) {
+			const m = filtered[i]!;
+			const isSelected = i === sel;
+			const isCurrent = m.id === currentId;
+			const installed = TTS_INSTALLED_CHECK_REF(m.id);
+			const prefix = isSelected ? this.accent("  → ") : "    ";
+			const name = isSelected ? this.accent(m.name) : m.name;
+			const namePad = m.name.length < nameW ? " ".repeat(nameW - m.name.length) : "";
+			const size = this.dim(m.size.padStart(8));
+			const langs = this.dim(m.languages.length > 1
+				? `${m.languages.length} langs`.padEnd(13)
+				: m.languages[0]!.padEnd(13));
+			const status = isCurrent
+				? this.success("active")
+				: installed
+					? this.success("ready")
+					: this.warning("⬇ download");
+			lines.push(`${prefix}${name}${namePad} ${size}  ${langs} ${status}`);
+			if (isSelected) {
+				lines.push(`        ${this.dim(m.notes)}`);
+			}
+		}
+
+		if (start > 0 || end < total) {
+			lines.push(this.dim(`    showing ${start + 1}–${end} of ${total}`));
+		}
+		lines.push("");
+		const sel_m = filtered[sel];
+		if (sel_m) {
+			const installed = TTS_INSTALLED_CHECK_REF(sel_m.id);
+			const enterHint = installed ? "activate" : `download (${sel_m.size}) + activate`;
+			lines.push(this.dim(`  ↵ ${enterHint}  esc back  type to filter`));
+		} else {
+			lines.push(this.dim("  esc back"));
+		}
+		return lines;
+	}
+
+	private handleTtsModelInput(data: string): void {
+		if (matchesKey(data, Key.escape)) {
+			this.sub = "main";
+			return;
+		}
+		const filtered = this.getFilteredTtsModels();
+		if (matchesKey(data, Key.up)) {
+			if (filtered.length > 0) {
+				this.ttsModelRow = this.ttsModelRow === 0 ? filtered.length - 1 : this.ttsModelRow - 1;
+			}
+			return;
+		}
+		if (matchesKey(data, Key.down)) {
+			if (filtered.length > 0) {
+				this.ttsModelRow = this.ttsModelRow === filtered.length - 1 ? 0 : this.ttsModelRow + 1;
+			}
+			return;
+		}
+		if (matchesKey(data, Key.enter)) {
+			const m = filtered[this.ttsModelRow];
+			if (!m) return;
+			this.p.config.ttsLocalModel = m.id;
+			// Reset voice id when model changes — preserve sid 0 default.
+			this.p.config.ttsLocalVoiceId = m.defaultSid;
+			this.save();
+			this.sub = "main";
+			// If model isn't installed, signal to the caller via panel
+			// close so voice.ts's openSettingsPanel post-close handler can
+			// run ensureTtsModelInstalled with progress notify.
+			if (!TTS_INSTALLED_CHECK_REF(m.id)) {
+				this.onClose?.({ type: "tts-install", modelId: m.id });
+			}
+			return;
+		}
+		if (matchesKey(data, Key.backspace)) {
+			this.ttsModelSearch = this.ttsModelSearch.slice(0, -1);
+			this.ttsModelRow = 0;
+			return;
+		}
+		if (data.length === 1 && data >= " " && data <= "~") {
+			this.ttsModelSearch += data;
+			this.ttsModelRow = 0;
+		}
+	}
+
+	// ─── TTS Voice picker ──────────────────────────────────────────────────
+
+	private getCurrentVoiceCatalog(): { id: string | number; label: string; meta?: string }[] {
+		const { config } = this.p;
+		const isLocal = (config.ttsBackend ?? "local") === "local";
+		if (isLocal) {
+			const modelId = config.ttsLocalModel ?? "kitten-nano-en-v0_2";
+			const model = TTS_LOCAL_MODELS_REF.find(m => m.id === modelId);
+			if (!model) return [];
+			return model.voices.map((v: TtsVoice) => ({
+				id: v.sid,
+				label: v.name,
+				meta: v.gender,
+			}));
+		}
+		// Deepgram: filter Aura voices by current language for relevance.
+		const lang = config.ttsLanguage || config.language || "en";
+		const filtered = filterDeepgramVoicesByLanguage(lang);
+		const list = filtered.length > 0 ? filtered : DEEPGRAM_TTS_VOICES;
+		return list.map(v => ({ id: v.id, label: v.name, meta: v.gender }));
+	}
+
+	private getFilteredTtsVoices(): { id: string | number; label: string; meta?: string }[] {
+		const all = this.getCurrentVoiceCatalog();
+		const q = this.ttsVoiceSearch.trim().toLowerCase();
+		if (!q) return all;
+		return all.filter(v => `${v.label} ${v.meta ?? ""} ${v.id}`.toLowerCase().includes(q));
+	}
+
+	private openTtsVoicePicker(): void {
+		this.ttsVoiceSearch = "";
+		const all = this.getCurrentVoiceCatalog();
+		const { config } = this.p;
+		const isLocal = (config.ttsBackend ?? "local") === "local";
+		const currentId: string | number = isLocal
+			? (typeof config.ttsLocalVoiceId === "number" ? config.ttsLocalVoiceId : 0)
+			: (config.ttsDeepgramVoiceId ?? "aura-asteria-en");
+		const idx = all.findIndex(v => v.id === currentId);
+		this.ttsVoiceRow = idx >= 0 ? idx : 0;
+		this.sub = "tts-voice-picker";
+	}
+
+	private renderTtsVoicePicker(_w: number, _iw: number): string[] {
+		const lines: string[] = [];
+		const filtered = this.getFilteredTtsVoices();
+		const { config } = this.p;
+		const isLocal = (config.ttsBackend ?? "local") === "local";
+		const currentId: string | number = isLocal
+			? (typeof config.ttsLocalVoiceId === "number" ? config.ttsLocalVoiceId : 0)
+			: (config.ttsDeepgramVoiceId ?? "aura-asteria-en");
+
+		lines.push(`  ${this.bold(isLocal ? "Pick local voice" : "Pick Deepgram voice")}`);
+		const cursor = this.ttsVoiceSearch ? this.ttsVoiceSearch : this.dim("type to filter…");
+		lines.push(`  ${this.dim("Search:")} ${cursor}`);
+		lines.push("");
+
+		if (filtered.length === 0) {
+			lines.push(this.dim("    No matching voices."));
+			lines.push("");
+			lines.push(this.dim("  esc back  type to filter"));
+			return lines;
+		}
+
+		const maxVisible = 12;
+		const total = filtered.length;
+		const sel = Math.min(this.ttsVoiceRow, total - 1);
+		let start = Math.max(0, sel - Math.floor(maxVisible / 2));
+		const end = Math.min(start + maxVisible, total);
+		if (end - start < maxVisible) start = Math.max(0, end - maxVisible);
+
+		for (let i = start; i < end; i++) {
+			const v = filtered[i]!;
+			const isSelected = i === sel;
+			const isCurrent = v.id === currentId;
+			const prefix = isSelected ? this.accent("  → ") : "    ";
+			const idStr = typeof v.id === "number" ? `sid ${v.id}` : v.id;
+			const text = isSelected ? this.accent(v.label) : v.label;
+			const meta = v.meta ? this.dim(` (${v.meta})`) : "";
+			const idTag = this.dim(` — ${idStr}`);
+			const check = isCurrent ? this.success(" ✓") : "";
+			lines.push(`${prefix}${text}${meta}${idTag}${check}`);
+		}
+
+		if (start > 0 || end < total) {
+			lines.push(this.dim(`    showing ${start + 1}–${end} of ${total}`));
+		}
+		lines.push("");
+		lines.push(this.dim("  ↵ select  esc back  type to filter"));
+		return lines;
+	}
+
+	private handleTtsVoiceInput(data: string): void {
+		if (matchesKey(data, Key.escape)) {
+			this.sub = "main";
+			return;
+		}
+		const filtered = this.getFilteredTtsVoices();
+		if (matchesKey(data, Key.up)) {
+			if (filtered.length > 0) {
+				this.ttsVoiceRow = this.ttsVoiceRow === 0 ? filtered.length - 1 : this.ttsVoiceRow - 1;
+			}
+			return;
+		}
+		if (matchesKey(data, Key.down)) {
+			if (filtered.length > 0) {
+				this.ttsVoiceRow = this.ttsVoiceRow === filtered.length - 1 ? 0 : this.ttsVoiceRow + 1;
+			}
+			return;
+		}
+		if (matchesKey(data, Key.enter)) {
+			const v = filtered[this.ttsVoiceRow];
+			if (!v) return;
+			const isLocal = (this.p.config.ttsBackend ?? "local") === "local";
+			if (isLocal && typeof v.id === "number") {
+				this.p.config.ttsLocalVoiceId = v.id;
+			} else if (!isLocal && typeof v.id === "string") {
+				this.p.config.ttsDeepgramVoiceId = v.id;
+			}
+			this.save();
+			this.sub = "main";
+			return;
+		}
+		if (matchesKey(data, Key.backspace)) {
+			this.ttsVoiceSearch = this.ttsVoiceSearch.slice(0, -1);
+			this.ttsVoiceRow = 0;
+			return;
+		}
+		if (data.length === 1 && data >= " " && data <= "~") {
+			this.ttsVoiceSearch += data;
+			this.ttsVoiceRow = 0;
+		}
+	}
+
 	// ─── Helpers ──────────────────────────────────────────────────────────
 
 	private getRowCount(tabId: TabId): number {
@@ -865,7 +1225,7 @@ export class VoiceSettingsPanel {
 				const handy = scanHandyModels().filter(h => !h.imported).length;
 				return dl + handy;
 			}
-			case "speak": return 5;
+			case "speak": return 6;
 			case "device": return 0;
 		}
 	}

@@ -249,6 +249,47 @@ export function clearTtsCache(): void {
 	ttsCache.clear();
 }
 
+// ─── Warmup ──────────────────────────────────────────────────────────────────
+
+/**
+ * Pre-load the sherpa-onnx module AND construct the OfflineTts for `model`
+ * in the background, so the user's first `/voice-speak` doesn't pay the
+ * 600-900ms cold-start init cost.
+ *
+ * Idempotent: subsequent calls for the same (model, modelDir) await the
+ * same in-flight promise via the existing `ttsCache` machinery — the only
+ * difference vs a real synthesize is that warmup discards the result.
+ *
+ * Cancellation: `signal` aborts the load. If the user toggles TTS off
+ * before warmup completes, the construction continues and the resulting
+ * instance lands in the cache (cheap memory cost), but no UI flicker
+ * happens — the cache is simply unused. Cleaner alternative would be to
+ * abort native createAsync but sherpa-onnx-node doesn't expose that.
+ *
+ * Errors: returns `false` on any failure (logged to debug output, not
+ * rethrown). Callers treat this as a best-effort optimization — failure
+ * here is not a user-facing error because the next /voice-speak will
+ * surface the same error anyway through synthesize().
+ */
+export async function warmupTts(
+	model: TtsLocalModelInfo,
+	modelDir: string,
+	opts: { signal?: AbortSignal } = {},
+): Promise<boolean> {
+	if (opts.signal?.aborted) return false;
+	try {
+		const ok = await loadSherpa();
+		if (!ok) return false;
+		if (opts.signal?.aborted) return false;
+		await getOrCreateTts(model, modelDir);
+		return true;
+	} catch {
+		// Warmup is best-effort; swallow errors so callers never have to
+		// worry about a backgrounded promise rejection.
+		return false;
+	}
+}
+
 // ─── Synthesis ───────────────────────────────────────────────────────────────
 
 /**
@@ -421,7 +462,7 @@ export function resolveLanguageForLocal(model: TtsLocalModelInfo, language: stri
 function buildTtsConfig(model: TtsLocalModelInfo, modelDir: string): any {
 	const dataDir = path.join(modelDir, "espeak-ng-data");
 	const tokens = path.join(modelDir, "tokens.txt");
-	const numThreads = getTtsThreads();
+	const numThreads = getTtsThreads(model.sherpaSlot);
 
 	switch (model.sherpaSlot) {
 		case "kitten": {
@@ -492,11 +533,20 @@ function buildTtsConfig(model: TtsLocalModelInfo, modelDir: string): any {
  * importing it to keep TTS compileable in isolation if STT is later moved
  * to a separate package.
  */
-function getTtsThreads(): number {
+function getTtsThreads(slot: TtsLocalModelInfo["sherpaSlot"]): number {
 	const cpus = os.cpus().length || 2;
 	if (cpus <= 2) return 1;
 	if (cpus <= 4) return 2;
-	return Math.min(4, cpus - 2);
+	// Per-slot tuning, mirroring the STT path's TRANSDUCER_MAX_THREADS=6
+	// vs the Whisper-class cap of 4. Decisions per sherpa-onnx published
+	// RTF curves and #2910 (CoreML regression for transformer graphs):
+	//
+	//   - kitten (Kitten Nano TTS): small model, scales to 4 threads
+	//   - vits   (Piper):           single-speaker VITS, scales to 4
+	//   - kokoro (Kokoro v0.19/v1.0): larger transformer encoder, scales
+	//                                 to ~6 P-cores on M-series
+	const max = slot === "kokoro" ? 6 : 4;
+	return Math.min(max, cpus - 2);
 }
 
 /** Clamp speaker id into the model's voice range. */

@@ -5,6 +5,146 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.0.0] - 2026-04-29
+
+**v7 makes the TTS picker an actual UI, downloads happen on selection,
+auto-speak finally works, and onboarding tells you what to do.**
+
+The user-facing gap in v6.0.0 was: "you have to edit settings.json to
+pick a model, you can't auto-download, and ttsAutoSpeak doesn't do
+anything." v7 fixes all three.
+
+### New — Speak tab Model + Voice pickers (replaces JSON-editing)
+
+- **Models picker** in `/voice-settings` Speak tab: full 14-model
+  catalog with per-row size, language coverage, and install state.
+  ✓ for installed, ⬇ for download-on-select. Search-as-you-type filter.
+  Activating a not-installed entry triggers automatic download with
+  progress notifications (every 10% step).
+- **Voices picker**: numeric speaker ids with display names from the
+  catalog (Kitten Nano shows 8 voices, Kokoro v0.19 shows 11, Kokoro
+  multilingual v1.0 shows 17 hand-picked voices spanning 9 languages,
+  Piper LibriTTS-R shows 904). Backend-aware — picks Aura voice ids
+  for Deepgram, filtered by current language.
+- **Always-visible status row** at the top of the Speak tab —
+  `Local · Kitten Nano · Expr-Voice-2-M · 1.0× · EN`. One glance tells
+  you exactly what's configured.
+
+### New — First-run TTS onboarding
+
+- When you enable TTS for the first time (`/voice-speak-toggle` or
+  Speak tab), pi-listen shows a one-shot hint with a smart-default
+  recommendation based on your `systemLocale`:
+  - `en-*` → Kitten Nano (25 MB, default)
+  - `es/fr/de/hi/it/ru/ar/tr/nl/zh` → matching Piper voice (~20 MB)
+  - `ja/ko` → Kokoro multilingual (126 MB, covers 9 langs)
+  - unknown locale → English fallback with explicit warning
+- Subsequent toggles are quiet — `ttsOnboardingShown` flag persists in
+  config so we don't spam the same hint.
+
+### New — `/voice-speak-info` and `/voice-speak-models` commands
+
+- `/voice-speak-info` — diagnostic that prints backend, model, voice,
+  language, install state, sample rate, voice catalog size, and a
+  quick command reference. Mirrors `/voice test` for STT.
+- `/voice-speak-models` — opens settings panel directly on the Speak
+  tab. Faster path than `/voice-settings → ←→`.
+
+### New — Auto-speak after assistant turns
+
+- `ttsAutoSpeak: true` now actually fires. Subscribes to
+  pi-coding-agent's `turn_end` event; pipes the assistant's text
+  content through the same `prepareForSpeech()` filter the manual
+  command uses (code blocks dropped, ANSI escapes stripped, markdown
+  links collapsed, length capped at 2000 chars).
+- **Rate limit**: max one auto-speak per 3 seconds. Rapid-fire short
+  responses won't queue up unread audio.
+- **Mic-feedback guard**: skipped when STT is recording or finalizing.
+- **Abort on next user input**: integrates with the existing
+  `activeSpeak` AbortController so starting a new message immediately
+  cancels in-flight playback.
+
+### New — Download integrity + resume
+
+- `ensureTtsModelInstalled()` now downloads the archive to disk first
+  (`~/.pi/models/tts/<id>.partial.tar.bz2`), then extracts. Interrupted
+  downloads resume via `Range: bytes=N-` header on retry; falls back
+  to full re-download if the server returns 200.
+- SHA-256 streamed during write and compared against the catalog's
+  `archiveSha256` field (when set). v7.0.0 ships catalog without
+  pinned hashes; the verification path is built and the computed hash
+  is returned alongside install completion so v7.1+ can pin it.
+- Disk-space pre-check via existing `getFreeDiskSpace`.
+
+### New — `tts-text-filter.ts` module
+
+- `prepareForSpeech(text, opts)` — handles the auto-speak preprocessing.
+  Drops fenced code blocks (`\`\`\`...\`\`\`` and `~~~...~~~`),
+  strips ANSI escapes (CSI + OSC sequences), collapses markdown link
+  syntax `[text](url)` → `text`, drops image syntax `![alt](url)`
+  entirely, normalizes whitespace, enforces length cap. Returns
+  `{ skipped, text, reason, stats }` so callers can surface skip
+  reasons in `/voice-speak-info`.
+- `lightNormalize(text)` — minimal trim-and-collapse for the manual
+  `/voice-speak <text>` path. The user typed exactly what they want
+  spoken; we don't second-guess.
+- `normalizeBCP47(tag)` — single canonical form for language tags
+  used everywhere. Properly handles language / script / region /
+  variant per RFC 5646 (lowercase lang, Title-case script,
+  uppercase region, lowercase variant). `zh-Hant-TW` round-trips.
+- `baseLanguage(tag)` — extract base lang from any BCP-47 form.
+
+### New — Engine warmup hook + per-model threadpool tuning
+
+- `warmupTts(model, dir)` — best-effort background load of the
+  sherpa-onnx engine + OfflineTts construction. Cuts the user's first
+  `/voice-speak` from 600-900ms cold-start to ~50ms (the cache hit
+  path). Best-effort: errors don't surface — they'd surface again on
+  the next real synthesize() anyway.
+- `getTtsThreads(slot)` now per-class tuned: kokoro scales to 6
+  threads on M-series Pro/Max, kitten/vits cap at 4. Mirrors the
+  TRANSDUCER_MAX_THREADS=6 logic from the v5.0.9 STT release.
+
+### Configuration schema (additive — v6 configs load unchanged)
+
+- `ttsOnboardingShown` (bool, default false) — gates the first-run hint.
+
+### Architecture
+
+- **New module**: `voice/tts-text-filter.ts` (auto-speak preprocessing)
+- **New module**: `voice/tts-onboarding.ts` (first-run hint flow)
+- **Catalog gains** `recommendDefaultModel(locale)`, `getTtsModelDir()`,
+  `getInstalledTtsModelDir()`, `isTtsModelInstalled()`, refactored
+  install pipeline with download-then-extract + Range resume.
+- **Engine gains** `warmupTts(model, dir)` and per-slot threadpool
+  tuning.
+- **Settings panel gains** two new sub-pickers (`tts-model-picker`,
+  `tts-voice-picker`) reusing the existing `lang-picker` chassis.
+- **voice.ts gains** `turn_end` subscription for auto-speak.
+
+### Verification
+
+- `bunx tsc -p tsconfig.json --noEmit` clean against pi-coding-agent 0.70.5
+- `bun test` — 171/171 passing (41 new tests covering text filter
+  regression cases, BCP-47 normalization including zh-Hant-TW,
+  smart-default selector across all locales, ANSI/code-block stripping)
+- godspeed multi-model review on plan (8/8 SHIP) + per-step gates
+  (mostly 6-8 SHIP; the recurring "JS thread race" reviewer noise
+  consistently advisor-cleared as INVALID per the v6 pattern)
+- Real `pi 0.70.5` RPC smoke: extension loads, all 11 commands
+  register, lifecycle handlers fire cleanly
+- End-to-end audio test in this session: ✅ confirmed `/voice-speak-test`
+  produces audible output via Kitten Nano on M3 Pro
+
+### Known v7.1 follow-ups (deferred from the plan to keep scope tight)
+
+- Streaming local playback (ffplay stdin pipe for sub-350ms TTFB —
+  current temp-WAV path is ~700ms)
+- Real-pi integration test in CI with stubbed afplay
+- Inline voice-picker preview ("press P on a voice to hear a sample")
+- Download progress UI improvements (sticky progress bar in panel
+  rather than transient notify lines)
+
 ## [6.0.0] - 2026-04-28
 
 **Major release — pi-listen is now bidirectional voice for Pi.** Voice in
@@ -436,6 +576,7 @@ single source of truth per row.
 - VAD pre-filtering
 - Pompom/Lumo creature companion (now separate package)
 
+[7.0.0]: https://github.com/codexstar69/pi-listen/releases/tag/v7.0.0
 [6.0.0]: https://github.com/codexstar69/pi-listen/releases/tag/v6.0.0
 [5.1.0]: https://github.com/codexstar69/pi-listen/releases/tag/v5.1.0
 [5.0.9]: https://github.com/codexstar69/pi-listen/releases/tag/v5.0.9
