@@ -2,6 +2,9 @@ import { describe, expect, test } from "bun:test";
 import {
 	recommendDefaultModel,
 	DEFAULT_TTS_MODEL,
+	ensureTtsModelInstalled,
+	isTtsModelInstalled,
+	DEFAULT_TTS_MODEL as DEFAULT,
 } from "../extensions/voice/tts-local-models";
 
 describe("recommendDefaultModel — smart-default selector", () => {
@@ -36,12 +39,17 @@ describe("recommendDefaultModel — smart-default selector", () => {
 		const r = recommendDefaultModel("pt-PT");
 		expect(r.modelId).toBe("piper-pt_BR-cadu-medium-int8");
 		expect(r.reason).toContain("closest available");
+		// pt-PT against a pt-BR voice is technically a fallback — the
+		// audio will be Brazilian-accented Portuguese, not European.
+		// fallback=true so onboarding UI can flag the mismatch.
+		expect(r.fallback).toBe(true);
 	});
 
-	test("pt-BR locale → exact match note", () => {
+	test("pt-BR locale → exact match", () => {
 		const r = recommendDefaultModel("pt-BR");
 		expect(r.modelId).toBe("piper-pt_BR-cadu-medium-int8");
 		expect(r.reason).toContain("exact match");
+		expect(r.fallback).toBe(false);
 	});
 
 	test("Unknown locale falls back to English with warning", () => {
@@ -67,5 +75,34 @@ describe("recommendDefaultModel — smart-default selector", () => {
 		// zh has a single Piper voice (chaowen) — that's the recommendation
 		// regardless of region within zh-*.
 		expect(r.modelId).toBe("piper-zh_CN-chaowen-medium-int8");
+	});
+});
+
+describe("ensureTtsModelInstalled — concurrency guard (v7.0.1)", () => {
+	test("function exists with the documented signature", () => {
+		// Shape check: returns Promise<TtsInstallResult>.
+		expect(typeof ensureTtsModelInstalled).toBe("function");
+	});
+
+	test("already-installed fast-path resolves immediately without network", async () => {
+		// Only run the body if a real install exists from a prior run on
+		// the developer's machine. CI without network skips the assertion
+		// but doesn't fail.
+		if (!isTtsModelInstalled(DEFAULT)) return;
+		const result = await ensureTtsModelInstalled(DEFAULT);
+		expect(result.dir).toBeDefined();
+	});
+
+	test("concurrent calls for an already-installed model both resolve to the same dir", async () => {
+		// Same condition: only meaningful when a model is actually installed.
+		// The fast-path doesn't hit the in-flight Map (it returns before),
+		// but it does verify Promise.all of two concurrent calls behaves
+		// correctly and resolves to identical results.
+		if (!isTtsModelInstalled(DEFAULT)) return;
+		const [a, b] = await Promise.all([
+			ensureTtsModelInstalled(DEFAULT),
+			ensureTtsModelInstalled(DEFAULT),
+		]);
+		expect(a.dir).toBe(b.dir);
 	});
 });

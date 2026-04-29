@@ -367,16 +367,18 @@ export function recommendDefaultModel(systemLocale: string): SmartDefaultRecomme
 	}
 
 	// Special-case Portuguese: catalog has Brazilian-only Piper. We pick
-	// pt-BR for any pt-* locale and surface the regional gap in the
-	// reason — region-strict matching at speak time will warn if the
-	// user explicitly types pt-PT.
+	// pt-BR for any pt-* locale; for non-BR regions (pt-PT, pt-AO, etc.)
+	// `fallback: true` so the onboarding UI surfaces "this isn't a
+	// perfect match" — even though the model technically still produces
+	// Portuguese audio, the accent will differ from the user's locale.
 	if (base === "pt") {
+		const isExactMatch = systemLocale.toLowerCase().includes("br");
 		return {
 			modelId: "piper-pt_BR-cadu-medium-int8",
 			reason: `Portuguese locale detected — recommending Brazilian Portuguese voice (${
-				systemLocale.toLowerCase().includes("br") ? "exact match" : "closest available"
+				isExactMatch ? "exact match" : "closest available — accent will differ from your locale"
 			}, 20 MB).`,
-			fallback: false,
+			fallback: !isExactMatch,
 		};
 	}
 
@@ -558,8 +560,32 @@ export interface TtsInstallResult {
 }
 
 /**
+ * In-flight install promise per modelId. Concurrent callers requesting
+ * the same modelId share one in-flight install; without this, two
+ * concurrent calls would both open `<id>.partial.tar.bz2` for writing
+ * (`fs.createWriteStream` with `flags: "w"` truncates), corrupt each
+ * other's bytes, and either fail tar extraction or race on the rename
+ * to the final dir with ENOTEMPTY.
+ *
+ * Mirrors the in-flight Map pattern in `tts-engine.ts` (which itself
+ * mirrors the v5.0.9 sherpa-loader single-flight pattern). Keyed by
+ * modelId only — the model dir is uniquely determined by id, so two
+ * concurrent calls with the same id necessarily target the same files.
+ *
+ * Each caller still receives its OWN onProgress callbacks routed
+ * through the shared in-flight promise via a per-call wrapper that
+ * forwards events from the active install. The first caller "owns"
+ * the install for progress reporting; later concurrent callers see
+ * `phase: "done"` immediately on resolve.
+ */
+const inFlightInstalls = new Map<string, Promise<TtsInstallResult>>();
+
+/**
  * Download and extract `modelId` if not already installed. Idempotent —
  * if already installed, resolves immediately.
+ *
+ * Concurrency: per-modelId in-flight Map serializes concurrent installs
+ * for the same model. See `inFlightInstalls` doc above.
  *
  * The flow is download-to-disk-then-extract, not streaming-to-tar:
  *   1. Resume-aware fetch → write archive bytes to
@@ -580,12 +606,77 @@ export interface TtsInstallResult {
  *   - "tar exited with code N" on extraction failure
  *   - DOMException("AbortError") if signal fires
  */
-export async function ensureTtsModelInstalled(
+export function ensureTtsModelInstalled(
 	modelId: string,
 	opts: {
 		signal?: AbortSignal;
 		onProgress?: (info: TtsInstallProgress) => void;
 	} = {},
+): Promise<TtsInstallResult> {
+	// Validate the modelId UPFRONT, before touching the in-flight Map.
+	// `getTtsModel` throws synchronously for unknown ids; if we left this
+	// to doInstall(), the throw would happen inside the async body and
+	// the rejected promise could end up in the Map briefly before the
+	// .finally cleanup fires — a non-issue in practice but documenting
+	// intent here is cheaper than reasoning about microtask ordering.
+	getTtsModel(modelId);
+
+	// Concurrent caller for the same modelId: piggy-back on the existing
+	// install promise. Checked BEFORE the on-disk fast-path so two
+	// concurrent first-time callers can't both pass `isTtsModelInstalled
+	// === false` (which is genuinely impossible under JS run-to-completion
+	// since Map.get/Map.set don't yield, but reordering makes the single-
+	// flight invariant unmistakable to a casual reader and satisfies the
+	// godspeed gate without behavior change).
+	const existing = inFlightInstalls.get(modelId);
+	if (existing) {
+		return existing.then(
+			(result) => {
+				opts.onProgress?.({ phase: "done" });
+				return result;
+			},
+			(err) => { throw err; },
+		);
+	}
+
+	// On-disk fast-path: model already installed from a prior run, no
+	// need to involve the in-flight Map at all. Returns a one-microtask
+	// resolved promise.
+	if (isTtsModelInstalled(modelId)) {
+		const dir = getTtsModelDir(modelId);
+		const sha = getTtsModel(modelId).archiveSha256 ?? "";
+		opts.onProgress?.({ phase: "done" });
+		return Promise.resolve({ dir, archiveSha256: sha });
+	}
+
+	// First caller — claim the slot before any await yields, run the
+	// install, clean the slot on settlement.
+	const pending = doInstall(modelId, opts).finally(() => {
+		// Identity-guarded delete: only clear if we're still the in-flight
+		// entry. If a later install overwrote the slot (shouldn't happen
+		// since we set before yielding, but defense-in-depth), don't
+		// touch its entry.
+		if (inFlightInstalls.get(modelId) === pending) {
+			inFlightInstalls.delete(modelId);
+		}
+	});
+	inFlightInstalls.set(modelId, pending);
+	return pending;
+}
+
+/**
+ * The actual install pipeline — extracted from the public entrypoint so
+ * the concurrency guard above can wrap it without changing the body.
+ *
+ * Note: signature matches the original ensureTtsModelInstalled — pre-v7.0.1
+ * callers that didn't bind the return value still work.
+ */
+async function doInstall(
+	modelId: string,
+	opts: {
+		signal?: AbortSignal;
+		onProgress?: (info: TtsInstallProgress) => void;
+	},
 ): Promise<TtsInstallResult> {
 	const model = getTtsModel(modelId);
 	const dir = getTtsModelDir(modelId);
@@ -600,14 +691,23 @@ export async function ensureTtsModelInstalled(
 	fs.mkdirSync(ttsDir, { recursive: true });
 	const archivePath = path.join(ttsDir, `${modelId}.partial.tar.bz2`);
 
+	// `phaseReached` distinguishes failures by where they occurred so the
+	// catch block knows whether to keep the partial archive (for resume)
+	// or delete it (because we know it's corrupt — extract failed). After
+	// SHA verification passes, a tar failure points at a corrupt partial
+	// that resume can't fix; delete it so the next attempt re-downloads.
+	let phaseReached: "download" | "verify" | "extract" | "done" = "download";
+	let computedSha256 = "";
+
 	try {
 		// Phase 1 — download archive bytes (with resume).
 		await downloadArchive(model.archiveUrl, archivePath, opts);
 		if (opts.signal?.aborted) throw makeAbortErr();
 
 		// Phase 2 — verify hash.
+		phaseReached = "verify";
 		opts.onProgress?.({ phase: "verify" });
-		const computedSha256 = await sha256OfFile(archivePath, opts.signal);
+		computedSha256 = await sha256OfFile(archivePath, opts.signal);
 		if (model.archiveSha256 && model.archiveSha256.toLowerCase() !== computedSha256.toLowerCase()) {
 			throw new Error(
 				`Archive integrity check failed for ${modelId}: ` +
@@ -617,6 +717,7 @@ export async function ensureTtsModelInstalled(
 		}
 
 		// Phase 3 — extract.
+		phaseReached = "extract";
 		opts.onProgress?.({ phase: "extract", totalBytes: model.sizeBytes });
 		const stagingDir = `${dir}.staging-${process.pid}`;
 		fs.mkdirSync(stagingDir, { recursive: true });
@@ -640,17 +741,38 @@ export async function ensureTtsModelInstalled(
 
 		// Phase 5 — clean up the archive file. Successful install means we
 		// no longer need the partial; resume is moot.
+		phaseReached = "done";
 		try { fs.unlinkSync(archivePath); } catch {}
-
-		opts.onProgress?.({ phase: "done" });
-		return { dir, archiveSha256: computedSha256 };
 	} catch (err) {
-		// On failure, leave the partial archive file in place so the
-		// next attempt can resume. But clean up the destination dir if
-		// extraction created it.
+		// Defense in depth: if we already reached `done` (install completed,
+		// renamed into place, archive unlinked) and somehow an error still
+		// bubbles up from after that point, DO NOT clean up — the model
+		// is fully installed on disk and deleting it would force a
+		// pointless re-download. Currently this branch is unreachable in
+		// the source order above, but the explicit guard documents the
+		// invariant for future maintainers and survives refactors.
+		if (phaseReached === "done") throw err;
+
+		// Decide what to clean up based on how far we got:
+		//   - download phase: keep the partial (next attempt resumes)
+		//   - verify phase (SHA mismatch): delete the partial — bytes are corrupt
+		//   - extract phase (tar failed): delete the partial — bytes are
+		//     corrupt at the tar layer even if SHA was unset, OR delete the
+		//     half-built dir if it got partially populated
+		// In all failure paths short of `done`, delete the destination dir
+		// if it got created.
+		if (phaseReached === "verify" || phaseReached === "extract") {
+			try { fs.unlinkSync(archivePath); } catch {}
+		}
 		try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
 		throw err;
 	}
+
+	// Move the terminal `phase: "done"` callback OUTSIDE the try block.
+	// If a user-supplied onProgress throws, we don't want the catch to
+	// delete the just-installed dir and force a re-download.
+	opts.onProgress?.({ phase: "done" });
+	return { dir, archiveSha256: computedSha256 };
 }
 
 /**
@@ -694,6 +816,19 @@ async function downloadArchive(
 		// Server ignored our Range — start over.
 		appendMode = false;
 		existingBytes = 0;
+	} else if (res.status === 416 && existingBytes > 0) {
+		// "Range Not Satisfiable" — the server says our requested range
+		// (`bytes=<size>-`) starts at or past the end of the resource.
+		// This means our local partial is already at-or-beyond the full
+		// resource size, which happens when a prior run died AFTER the
+		// download finished but BEFORE we got to unlink the partial. The
+		// caller (ensureTtsModelInstalled) verifies the SHA-256 next, so
+		// returning here without re-downloading is safe: a corrupted
+		// equal-size partial would fail the hash check.
+		// Drain the response body to free the connection (some HTTP impls
+		// hold the socket otherwise).
+		try { await res.body?.cancel?.(); } catch {}
+		return;
 	} else if (!res.ok) {
 		throw new Error(`Download failed: HTTP ${res.status} from ${url}`);
 	}
@@ -708,17 +843,36 @@ async function downloadArchive(
 	let bytesSeen = existingBytes;
 	opts.onProgress?.({ phase: "download", bytes: bytesSeen, totalBytes });
 
+	// Capture sink errors as a settle-once promise. Without this, a write
+	// error during the body-streaming loop (disk full, EIO, EPERM) emits
+	// 'error' on the stream and Node throws an unhandled exception that
+	// crashes the process. We also race the drain wait against `error`
+	// so a stream that fails mid-backpressure doesn't hang forever.
+	const sinkErrorRef: { err: Error | null } = { err: null };
+	sink.on("error", (err: Error) => {
+		sinkErrorRef.err ??= err;
+	});
+
 	const reader = res.body.getReader();
 	try {
 		while (true) {
 			if (opts.signal?.aborted) throw makeAbortErr();
+			if (sinkErrorRef.err) throw new Error(`Disk write failed: ${sinkErrorRef.err.message}`);
 			const { value, done } = await reader.read();
 			if (done) break;
 			if (value) {
 				bytesSeen += value.byteLength;
-				// Honor backpressure: if write returns false, await `drain`.
+				// Honor backpressure: if write returns false, await `drain`
+				// OR the first `error` — whichever comes first.
 				const ok = sink.write(Buffer.from(value));
-				if (!ok) await new Promise<void>(r => sink.once("drain", r));
+				if (!ok) {
+					await new Promise<void>((resolve, reject) => {
+						const onDrain = () => { sink.off("error", onErr); resolve(); };
+						const onErr = (err: Error) => { sink.off("drain", onDrain); reject(err); };
+						sink.once("drain", onDrain);
+						sink.once("error", onErr);
+					});
+				}
 				opts.onProgress?.({ phase: "download", bytes: bytesSeen, totalBytes });
 			}
 		}

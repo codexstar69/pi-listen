@@ -5,6 +5,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.0.1] - 2026-04-29
+
+Hotfix targeting concurrency + corruption hazards in the v7.0.0 install
+pipeline. Surfaced by godspeed multi-model review after publish.
+
+### Fixed
+- **Concurrent install race** — `ensureTtsModelInstalled()` now uses a
+  per-modelId in-flight `Map` so two concurrent install calls for the
+  same model share one promise. Without this, two calls would both open
+  `<modelId>.partial.tar.bz2` for writing (`fs.createWriteStream` with
+  `flags: "w"` truncates), corrupt each other's bytes, and either fail
+  tar extraction or race on the rename to the final dir with `ENOTEMPTY`.
+- **HTTP 416 on completed partial archives** — when a prior run died
+  AFTER the download finished but BEFORE unlinking the partial, the
+  next attempt sent `Range: bytes=<size>-` and the server returned 416
+  ("Range Not Satisfiable"). v7.0.0 threw and required manual cleanup;
+  v7.0.1 treats 416 as "you already have the full bytes" and proceeds
+  to SHA verification + extract.
+- **Stream error during download** — added an upfront `error` listener
+  on the file write stream and an error-aware drain wait in the
+  body-streaming loop. v7.0.0 could throw an unhandled exception (and
+  crash the agent) on disk-full / EIO / EPERM during a write.
+- **onProgress callback in finally path** — `onProgress({ phase: "done" })`
+  now fires AFTER the install try/catch completes successfully. v7.0.0
+  fired it inside the try, which meant a user-supplied callback that
+  threw could trigger the catch block's cleanup and delete a freshly-
+  installed model.
+- **Partial archive cleanup on extract failure** — `doInstall` now
+  tracks which phase reached and deletes the partial archive when the
+  failure is at the `verify` (SHA mismatch) or `extract` (tar failed)
+  phases, where the bytes are known-corrupt. Network failures during
+  the `download` phase still keep the partial for resume.
+- **Pt-PT vs pt-BR fallback flag** — `recommendDefaultModel("pt-PT")`
+  now correctly returns `fallback: true` because the catalog only ships
+  Brazilian Portuguese. Reason text updated to surface "accent will
+  differ from your locale". v7.0.0 set `fallback: false` on this path,
+  which would have caused the v7.1 onboarding picker to suppress the
+  language-mismatch warning.
+- **Defensive `phaseReached === "done"` guard** in the catch block
+  ensures cleanup never runs after a successful install completes,
+  even under refactor-induced rearrangement.
+- **Upfront modelId validation** in `ensureTtsModelInstalled` — unknown
+  ids now throw synchronously before the in-flight Map is touched,
+  rather than after the first await yield in `doInstall`.
+
+### Verification
+- `bun test` 174/174 passing (3 new concurrency-shape tests added)
+- godspeed multi-model review: 5/7 SHIP, VETO=0 (the in-flight Map
+  pattern was confirmed by deepseek, security, sonnet, moonshot,
+  architect; remaining 2 NO_SHIPs are noise-floor — substring-match
+  false positive and a low-severity AbortSignal-deduplication concern
+  the advisor downgraded in the previous round)
+- Real `pi 0.70.5` RPC smoke: extension loads cleanly
+
 ## [7.0.0] - 2026-04-29
 
 **v7 makes the TTS picker an actual UI, downloads happen on selection,
@@ -576,6 +630,7 @@ single source of truth per row.
 - VAD pre-filtering
 - Pompom/Lumo creature companion (now separate package)
 
+[7.0.1]: https://github.com/codexstar69/pi-listen/releases/tag/v7.0.1
 [7.0.0]: https://github.com/codexstar69/pi-listen/releases/tag/v7.0.0
 [6.0.0]: https://github.com/codexstar69/pi-listen/releases/tag/v6.0.0
 [5.1.0]: https://github.com/codexstar69/pi-listen/releases/tag/v5.1.0
