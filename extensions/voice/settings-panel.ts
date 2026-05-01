@@ -34,6 +34,36 @@ import {
 	DEEPGRAM_TTS_VOICES,
 	filterDeepgramVoicesByLanguage,
 } from "./tts-deepgram";
+import { PickerChassis, type PickerRow } from "./ui-picker";
+import { ICON } from "./ui-icons";
+import { localeLabel, formatRomanizedLabel } from "./ui-locale-labels";
+import { visualWidth, isPanelTooNarrow, widthTier } from "./ui-width";
+
+/**
+ * v7.1 — Build PickerChassis rows for the TTS Models picker, grouping
+ * the catalog into Recommended / Per-language / Multilingual sections.
+ * Rows are produced in a stable order; headings appear only when at
+ * least one model in the group is present (handled by the chassis at
+ * filter time, but we also skip empty groups upfront).
+ */
+function buildTtsModelPickerRows(catalog: ReadonlyArray<TtsLocalModelInfo>): PickerRow<TtsLocalModelInfo>[] {
+	const recommended = catalog.filter(m => m.preferred === true);
+	const perLanguage = catalog.filter(m => !m.preferred && m.tier === "edge");
+	const heavy = catalog.filter(m => m.tier !== "edge");
+	const out: PickerRow<TtsLocalModelInfo>[] = [];
+	const pushGroup = (heading: string, rows: TtsLocalModelInfo[]) => {
+		if (rows.length === 0) return;
+		out.push({ kind: "heading", label: heading });
+		for (const m of rows) {
+			const sk = `${m.name} ${m.id} ${m.notes} ${m.languages.join(" ")}`;
+			out.push({ kind: "data", value: m, searchKey: sk });
+		}
+	};
+	pushGroup("Recommended", recommended);
+	pushGroup("Per-language voices", perLanguage);
+	pushGroup("Multilingual / heavyweight", heavy);
+	return out;
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -112,9 +142,9 @@ export class VoiceSettingsPanel {
 	private langFiltered: { name: string; code: string }[] = [];
 	private langRow = 0;
 
-	// TTS model sub-picker (Speak tab → Model row)
-	private ttsModelSearch = "";
-	private ttsModelRow = 0;
+	// TTS model sub-picker (Speak tab → Model row).
+	// v7.1: backed by PickerChassis with v7.1 grouping (§3 + §7).
+	private ttsModelChassis: PickerChassis<TtsLocalModelInfo> | null = null;
 
 	// TTS voice sub-picker (Speak tab → Voice row)
 	private ttsVoiceSearch = "";
@@ -156,6 +186,19 @@ export class VoiceSettingsPanel {
 	// ─── Component interface ──────────────────────────────────────────────
 
 	render(width: number): string[] {
+		// v7.1 §10/§13 — hard block below 60 cols. The panel cannot
+		// degrade below tier 3 cleanly without per-component reflow
+		// logic that doubles picker chassis complexity. Below tier 3
+		// the user sees a single-line "resize" message and slash
+		// commands remain available (panel-less).
+		if (isPanelTooNarrow(width)) {
+			return [
+				`  ${this.bold("pi-listen")}`,
+				`  ${this.warning(`Terminal too narrow ${ICON.middot} resize to ${ICON.arrowRight} 60 cols`)}`,
+				`  ${this.dim("Slash commands still work: /voice-speak, /voice-models, /voice-settings")}`,
+			];
+		}
+
 		const w = Math.max(36, Math.min(width - 2, 80));
 		const iw = w - 4;
 		const t = (s: string) => truncateToWidth(s, w);
@@ -163,8 +206,14 @@ export class VoiceSettingsPanel {
 		const lines: string[] = [];
 		const { device } = this.p;
 
-		// Header: brand · device summary
+		// v7.1 §12 — two-row status header.
+		// Row 1: brand + device summary (existing).
+		// Row 2: at-a-glance system state — STT backend/model + TTS
+		// backend/model/voice + active language. Width-tier aware:
+		// at "mid" (60-79) the row is trimmed; at "wide" (≥80) it
+		// shows the full picture.
 		lines.push(t(`  ${this.bold("pi-listen")}  ${this.dim(this.p.formatDeviceSummary(device))}`));
+		lines.push(t("  " + this.renderStatusRow(widthTier(width) === "mid")));
 		lines.push(t(this.dim("  " + "─".repeat(Math.min(iw, 60)))));
 
 		// Tab bar — underline-style active indicator (no brackets noise)
@@ -302,6 +351,46 @@ export class VoiceSettingsPanel {
 	 */
 	invalidate(): void { /* render is uncached */ }
 
+	// ─── v7.1 §12 — Two-row status header ─────────────────────────────────
+
+	/**
+	 * Render the at-a-glance second header row showing current system
+	 * state. Format depends on width tier:
+	 *   wide (≥80): STT <on/off> · <stt-backend>/<stt-model> · TTS <on/off> · <tts-backend>/<tts-model>/<voice> · Lang <lang>
+	 *   mid (60-79): STT <on/off> · <stt-backend> · TTS <on/off> · <tts-backend> · <lang>
+	 * Each segment is dim-by-default, on/off badge tinted by state.
+	 */
+	private renderStatusRow(compact: boolean): string {
+		const { config } = this.p;
+		const sttOn = config.enabled === true;
+		const ttsOn = config.ttsEnabled === true;
+		const sttBackend = sttOn ? (config.backend === "deepgram" ? "Deepgram" : "Local") : "off";
+		const ttsBackend = ttsOn ? ((config.ttsBackend ?? "local") === "deepgram" ? "Deepgram" : "Local") : "off";
+		const lang = config.ttsLanguage || config.language || "en";
+		const sttBadge = sttOn ? this.success(`${ICON.bulletActive} STT`) : this.dim(`${ICON.bulletInactive} STT`);
+		const ttsBadge = ttsOn ? this.success(`${ICON.bulletActive} TTS`) : this.dim(`${ICON.bulletInactive} TTS`);
+		const sep = this.dim(`  ${ICON.middot}  `);
+		if (compact) {
+			return `${sttBadge} ${this.dim(sttBackend)}${sep}${ttsBadge} ${this.dim(ttsBackend)}${sep}${this.dim(`Lang ${lang}`)}`;
+		}
+		// wide tier — include model/voice details
+		const sttDetail = sttOn
+			? `${sttBackend}${config.backend === "local" && config.localModel ? `/${this.shortenId(config.localModel)}` : ""}`
+			: "off";
+		const ttsModelId = ttsOn && (config.ttsBackend ?? "local") === "local"
+			? this.shortenId(config.ttsLocalModel ?? "")
+			: ttsOn && (config.ttsBackend ?? "local") === "deepgram"
+				? this.shortenId(String(config.ttsDeepgramVoiceId ?? ""))
+				: "";
+		const ttsDetail = ttsOn ? `${ttsBackend}${ttsModelId ? `/${ttsModelId}` : ""}` : "off";
+		return `${sttBadge} ${this.dim(sttDetail)}${sep}${ttsBadge} ${this.dim(ttsDetail)}${sep}${this.dim(`Lang ${lang}`)}`;
+	}
+
+	private shortenId(id: string): string {
+		// Strip common prefixes for readable status row entries.
+		return id.replace(/^vits-piper-/, "piper-").replace(/-int8|-q8/, "").slice(0, 22);
+	}
+
 	// ─── Tab bar ──────────────────────────────────────────────────────────
 
 	private renderTabBar(): string {
@@ -357,14 +446,27 @@ export class VoiceSettingsPanel {
 				value: config.enabled ? this.success("Enabled") : this.error("Disabled"),
 				hint: "toggle",
 			},
+			{
+				// v7.1.3: STT auto-submit toggle. When ON, transcribed
+				// text is sent directly to the agent (turn triggered)
+				// instead of being placed in the editor for the user
+				// to press [enter].
+				label: "Auto-send",
+				value: config.autoSubmitOnSpeak === true
+					? this.success("ON — STT speaks the message immediately")
+					: this.dim("OFF — STT fills the editor (press ↵ to send)"),
+				hint: "toggle",
+			},
 		];
 
+		// v7.2 — left-bar cursor + dim non-selected (HIG deference).
 		const labelW = 12;
 		for (let i = 0; i < rows.length; i++) {
 			const r = rows[i]!;
-			const prefix = i === this.row ? this.accent("  → ") : "    ";
-			const label = r.label.padEnd(labelW);
-			const hint = (i === this.row && r.hint) ? this.dim(` [↵ ${r.hint}]`) : "";
+			const isSelected = i === this.row;
+			const prefix = isSelected ? `${this.accent(ICON.cursorBar)}  ` : `   `;
+			const label = isSelected ? r.label.padEnd(labelW) : this.dim(r.label.padEnd(labelW));
+			const hint = (isSelected && r.hint) ? this.dim(` [↵ ${r.hint}]`) : "";
 			lines.push(`${prefix}${label}${r.value}${hint}`);
 		}
 
@@ -431,7 +533,7 @@ export class VoiceSettingsPanel {
 			const isCurrent = m.id === currentId;
 			const isDl = downloadedMap.has(m.id);
 
-			const prefix = isSelected ? this.accent("  → ") : "    ";
+			const prefix = isSelected ? `${this.accent(ICON.cursorBar)}  ` : `   `;
 			const name = (isSelected ? this.accent(m.name) : m.name).padEnd(nameW + (isSelected ? 0 : 0));
 			const namePad = m.name.length < nameW ? " ".repeat(nameW - m.name.length) : "";
 			const size = this.dim(m.size.padStart(8));
@@ -498,7 +600,7 @@ export class VoiceSettingsPanel {
 					const isSelected = i === this.row;
 					const isCurrent = d.id === currentId;
 					const isDeletePending = d.id === this.deletePendingId;
-					const prefix = isSelected ? this.accent("  → ") : "    ";
+					const prefix = isSelected ? `${this.accent(ICON.cursorBar)}  ` : `   `;
 					const name = isSelected ? this.accent(d.name) : d.name;
 					const size = this.dim(` — ${d.sizeMB} MB`);
 					const status = isCurrent ? this.success(" active") : "";
@@ -518,7 +620,7 @@ export class VoiceSettingsPanel {
 					const h = handyNotImported[i]!;
 					const idx = dl.length + i;
 					const isSelected = idx === this.row;
-					const prefix = isSelected ? this.accent("  → ") : "    ";
+					const prefix = isSelected ? `${this.accent(ICON.cursorBar)}  ` : `   `;
 					const name = isSelected ? this.accent(h.name) : h.name;
 					const size = this.dim(` — ${h.sizeMB} MB`);
 					lines.push(`${prefix}${name}${size}${this.warning(" ↵ import")}`);
@@ -601,12 +703,14 @@ export class VoiceSettingsPanel {
 			},
 		];
 
+		// v7.2 — left-bar cursor + dim non-selected (HIG deference).
 		const labelW = 12;
 		for (let i = 0; i < rows.length; i++) {
 			const r = rows[i]!;
-			const prefix = i === this.row ? this.accent("  → ") : "    ";
-			const label = r.label.padEnd(labelW);
-			const hint = (i === this.row && r.hint) ? this.dim(` [↵ ${r.hint}]`) : "";
+			const isSelected = i === this.row;
+			const prefix = isSelected ? `${this.accent(ICON.cursorBar)}  ` : `   `;
+			const label = isSelected ? r.label.padEnd(labelW) : this.dim(r.label.padEnd(labelW));
+			const hint = (isSelected && r.hint) ? this.dim(` [↵ ${r.hint}]`) : "";
 			lines.push(`${prefix}${label}${r.value}${hint}`);
 		}
 
@@ -728,7 +832,7 @@ export class VoiceSettingsPanel {
 			const lang = this.langFiltered[i]!;
 			const isSelected = i === this.langRow;
 			const isCurrent = lang.code === currentCode;
-			const prefix = isSelected ? this.accent("  → ") : "    ";
+			const prefix = isSelected ? `${this.accent(ICON.cursorBar)}  ` : `   `;
 			const text = isSelected ? this.accent(`${lang.name} (${lang.code})`) : `${lang.name} (${lang.code})`;
 			const check = isCurrent ? this.success(" ✓") : "";
 			lines.push(`${prefix}${text}${check}`);
@@ -818,6 +922,10 @@ export class VoiceSettingsPanel {
 					break;
 				case 4: // Voice toggle
 					config.enabled = !config.enabled;
+					this.save();
+					break;
+				case 5: // v7.1.3: Auto-send STT toggle
+					config.autoSubmitOnSpeak = !(config.autoSubmitOnSpeak === true);
 					this.save();
 					break;
 			}
@@ -950,86 +1058,100 @@ export class VoiceSettingsPanel {
 
 	// ─── TTS Model picker ──────────────────────────────────────────────────
 
-	/**
-	 * Filtered TTS catalog for the model picker.
-	 * Recomputed lazily during render — cheap (14 entries) and keeps the
-	 * filter live with the search box.
-	 */
-	private getFilteredTtsModels(): TtsLocalModelInfo[] {
-		const q = this.ttsModelSearch.trim().toLowerCase();
-		if (!q) return TTS_LOCAL_MODELS_REF;
-		return TTS_LOCAL_MODELS_REF.filter(m =>
-			`${m.name} ${m.id} ${m.notes} ${m.languages.join(" ")}`.toLowerCase().includes(q),
-		);
+	/** Lazy chassis getter — created on first model picker open. */
+	private getTtsModelChassis(): PickerChassis<TtsLocalModelInfo> {
+		if (!this.ttsModelChassis) {
+			this.ttsModelChassis = new PickerChassis<TtsLocalModelInfo>();
+			this.ttsModelChassis.setRows(buildTtsModelPickerRows(TTS_LOCAL_MODELS_REF));
+		}
+		return this.ttsModelChassis;
 	}
 
 	private openTtsModelPicker(): void {
-		this.ttsModelSearch = "";
+		const chassis = this.getTtsModelChassis();
+		chassis.clearSearch();
 		const currentId = this.p.config.ttsLocalModel ?? "kitten-nano-en-v0_2";
-		const idx = TTS_LOCAL_MODELS_REF.findIndex(m => m.id === currentId);
-		this.ttsModelRow = idx >= 0 ? idx : 0;
+		const current = TTS_LOCAL_MODELS_REF.find(m => m.id === currentId);
+		if (current) chassis.selectValue(current);
 		this.sub = "tts-model-picker";
 	}
 
-	private renderTtsModelPicker(_w: number, iw: number): string[] {
+	private renderTtsModelPicker(w: number, iw: number): string[] {
 		const lines: string[] = [];
+		const chassis = this.getTtsModelChassis();
 		const currentId = this.p.config.ttsLocalModel ?? "kitten-nano-en-v0_2";
-		const filtered = this.getFilteredTtsModels();
 
 		lines.push(`  ${this.bold("Pick TTS model")}`);
-		const cursor = this.ttsModelSearch ? this.ttsModelSearch : this.dim("type to filter…");
+		const query = chassis.getQuery();
+		const cursor = query ? query : this.dim("type to filter…");
 		lines.push(`  ${this.dim("Search:")} ${cursor}`);
 		lines.push("");
 
-		if (filtered.length === 0) {
-			lines.push(this.dim("    No matching models."));
+		// v7.1: width-tier compact mode (§10 mid-tier 60..79 drops headings)
+		const compact = w < 80;
+		const view = chassis.view({ maxVisible: 12, compact });
+
+		if (view.kind === "empty") {
+			lines.push(this.dim(`    No matches for "${query}".`));
 			lines.push("");
-			lines.push(this.dim("  esc back  type to filter"));
+			lines.push(this.dim("  esc back  bksp clear search"));
 			return lines;
 		}
 
-		// Viewport window centered on selection. 12 rows fits a 24-line
-		// overlay comfortably.
-		const maxVisible = 12;
-		const total = filtered.length;
-		const sel = Math.min(this.ttsModelRow, total - 1);
-		let start = Math.max(0, sel - Math.floor(maxVisible / 2));
-		const end = Math.min(start + maxVisible, total);
-		if (end - start < maxVisible) start = Math.max(0, end - maxVisible);
-
 		const nameW = Math.min(28, Math.max(18, iw - 32));
-		for (let i = start; i < end; i++) {
-			const m = filtered[i]!;
-			const isSelected = i === sel;
+		const selectedValue = chassis.selected();
+		for (const r of view.rows) {
+			if (r.kind === "heading") {
+				// Compact mode never emits headings; in wide mode they
+				// render as a dim label with a leading chevron.
+				lines.push(`  ${this.dim(`${ICON.middot} ${r.label}`)}`);
+				continue;
+			}
+			const m = r.value;
+			const isSelected = m === selectedValue;
 			const isCurrent = m.id === currentId;
 			const installed = TTS_INSTALLED_CHECK_REF(m.id);
-			const prefix = isSelected ? this.accent("  → ") : "    ";
-			const name = isSelected ? this.accent(m.name) : m.name;
+			// v7.2 — selected row has a thin accent left bar; non-selected
+			// rows are dim. HIG "deference": chrome is subtle, content
+			// hierarchy comes through dim/full-saturation contrast.
+			const prefix = isSelected
+				? `${this.accent(ICON.cursorBar)}  `
+				: `   `;
+			const name = isSelected ? this.accent(m.name) : this.dim(m.name);
 			const namePad = m.name.length < nameW ? " ".repeat(nameW - m.name.length) : "";
 			const size = this.dim(m.size.padStart(8));
 			const langs = this.dim(m.languages.length > 1
 				? `${m.languages.length} langs`.padEnd(13)
 				: m.languages[0]!.padEnd(13));
-			const status = isCurrent
-				? this.success("active")
-				: installed
-					? this.success("ready")
-					: this.warning("⬇ download");
+			// v7.2 — colored-dot status badges. Replaces plain "active"/
+			// "ready"/"download" words with `● active` / `● ready` /
+			// `○ download` / `✗ broken` patterns. Charm/gum convention.
+			const status = m.incompatible
+				? this.warning(`${ICON.checkFail} broken`)
+				: isCurrent
+					? this.success(`${ICON.bulletActive} active`)
+					: installed
+						? this.success(`${ICON.bulletActive} ready`)
+						: this.warning(`${ICON.bulletInactive} download`);
 			lines.push(`${prefix}${name}${namePad} ${size}  ${langs} ${status}`);
 			if (isSelected) {
-				lines.push(`        ${this.dim(m.notes)}`);
+				if (m.incompatible) {
+					lines.push(`        ${this.warning(m.incompatible)}`);
+				} else {
+					lines.push(`        ${this.dim(m.notes)}`);
+				}
 			}
 		}
 
-		if (start > 0 || end < total) {
-			lines.push(this.dim(`    showing ${start + 1}–${end} of ${total}`));
+		if (view.viewportStart > 0 || view.viewportEnd < view.totalSelectable) {
+			lines.push(this.dim(`    showing ${view.viewportStart + 1}–${view.viewportEnd} of ${view.totalSelectable}`));
 		}
 		lines.push("");
-		const sel_m = filtered[sel];
+		const sel_m = selectedValue;
 		if (sel_m) {
 			const installed = TTS_INSTALLED_CHECK_REF(sel_m.id);
 			const enterHint = installed ? "activate" : `download (${sel_m.size}) + activate`;
-			lines.push(this.dim(`  ↵ ${enterHint}  esc back  type to filter`));
+			lines.push(this.dim(`  ${ICON.arrowRight} ${enterHint}  esc back  type to filter`));
 		} else {
 			lines.push(this.dim("  esc back"));
 		}
@@ -1037,26 +1159,27 @@ export class VoiceSettingsPanel {
 	}
 
 	private handleTtsModelInput(data: string): void {
+		const chassis = this.getTtsModelChassis();
 		if (matchesKey(data, Key.escape)) {
 			this.sub = "main";
 			return;
 		}
-		const filtered = this.getFilteredTtsModels();
 		if (matchesKey(data, Key.up)) {
-			if (filtered.length > 0) {
-				this.ttsModelRow = this.ttsModelRow === 0 ? filtered.length - 1 : this.ttsModelRow - 1;
-			}
+			chassis.moveUp();
 			return;
 		}
 		if (matchesKey(data, Key.down)) {
-			if (filtered.length > 0) {
-				this.ttsModelRow = this.ttsModelRow === filtered.length - 1 ? 0 : this.ttsModelRow + 1;
-			}
+			chassis.moveDown();
 			return;
 		}
 		if (matchesKey(data, Key.enter)) {
-			const m = filtered[this.ttsModelRow];
+			const m = chassis.selected();
 			if (!m) return;
+			// v7.1.2 — refuse to activate models flagged as incompatible
+			// with the installed sherpa-onnx runtime. The picker still
+			// lists them (so users can see future-fix candidates) but
+			// pressing enter on a broken model is a no-op.
+			if (m.incompatible) return;
 			this.p.config.ttsLocalModel = m.id;
 			// Reset voice id when model changes — preserve sid 0 default.
 			this.p.config.ttsLocalVoiceId = m.defaultSid;
@@ -1064,50 +1187,73 @@ export class VoiceSettingsPanel {
 			this.sub = "main";
 			// If model isn't installed, signal to the caller via panel
 			// close so voice.ts's openSettingsPanel post-close handler can
-			// run ensureTtsModelInstalled with progress notify.
+			// run ensureTtsModelInstalled (now via the v7.1 install widget).
 			if (!TTS_INSTALLED_CHECK_REF(m.id)) {
 				this.onClose?.({ type: "tts-install", modelId: m.id });
 			}
 			return;
 		}
 		if (matchesKey(data, Key.backspace)) {
-			this.ttsModelSearch = this.ttsModelSearch.slice(0, -1);
-			this.ttsModelRow = 0;
+			chassis.backspaceSearch();
 			return;
 		}
 		if (data.length === 1 && data >= " " && data <= "~") {
-			this.ttsModelSearch += data;
-			this.ttsModelRow = 0;
+			chassis.appendSearchChar(data);
 		}
 	}
 
 	// ─── TTS Voice picker ──────────────────────────────────────────────────
 
-	private getCurrentVoiceCatalog(): { id: string | number; label: string; meta?: string }[] {
+	/**
+	 * v7.1 — native-script language label for a voice picker row, or a
+	 * romanized fallback for ar/hi/unknown. Returns empty string when
+	 * no language tag is available (we don't show "Unknown"). The
+	 * gender word is intentionally NOT rendered here — the existing
+	 * `(male)`/`(female)` meta block already shows it.
+	 */
+	private formatVoiceNativeLabel(language: string | undefined, _gender: string | undefined): string {
+		if (!language) return "";
+		// BCP-47 base tag — drop region/script subtags. e.g. "zh-Hant-TW" → "zh".
+		const base = language.split("-")[0]!.toLowerCase();
+		const native = localeLabel(base);
+		if (native) {
+			// Only show if it fits in 8 visual columns — keeps the row tidy.
+			if (visualWidth(native.nativeName) <= 8) return native.nativeName;
+			return base.toUpperCase();
+		}
+		// Romanized fallback (ar / hi / unknown).
+		return formatRomanizedLabel(base, undefined);
+	}
+
+	private getCurrentVoiceCatalog(): { id: string | number; label: string; meta?: string; language?: string }[] {
 		const { config } = this.p;
 		const isLocal = (config.ttsBackend ?? "local") === "local";
 		if (isLocal) {
 			const modelId = config.ttsLocalModel ?? "kitten-nano-en-v0_2";
 			const model = TTS_LOCAL_MODELS_REF.find(m => m.id === modelId);
 			if (!model) return [];
+			// v7.1: thread the model's primary language so the picker
+			// can render native-script labels via `localeLabel()`.
+			const language = model.languages[0];
 			return model.voices.map((v: TtsVoice) => ({
 				id: v.sid,
 				label: v.name,
 				meta: v.gender,
+				language,
 			}));
 		}
 		// Deepgram: filter Aura voices by current language for relevance.
 		const lang = config.ttsLanguage || config.language || "en";
 		const filtered = filterDeepgramVoicesByLanguage(lang);
 		const list = filtered.length > 0 ? filtered : DEEPGRAM_TTS_VOICES;
-		return list.map(v => ({ id: v.id, label: v.name, meta: v.gender }));
+		return list.map(v => ({ id: v.id, label: v.name, meta: v.gender, language: v.language }));
 	}
 
-	private getFilteredTtsVoices(): { id: string | number; label: string; meta?: string }[] {
+	private getFilteredTtsVoices(): { id: string | number; label: string; meta?: string; language?: string }[] {
 		const all = this.getCurrentVoiceCatalog();
 		const q = this.ttsVoiceSearch.trim().toLowerCase();
 		if (!q) return all;
-		return all.filter(v => `${v.label} ${v.meta ?? ""} ${v.id}`.toLowerCase().includes(q));
+		return all.filter(v => `${v.label} ${v.meta ?? ""} ${v.id} ${v.language ?? ""}`.toLowerCase().includes(q));
 	}
 
 	private openTtsVoicePicker(): void {
@@ -1155,13 +1301,18 @@ export class VoiceSettingsPanel {
 			const v = filtered[i]!;
 			const isSelected = i === sel;
 			const isCurrent = v.id === currentId;
-			const prefix = isSelected ? this.accent("  → ") : "    ";
+			// v7.2: thin accent left bar + dim non-selected rows.
+			const prefix = isSelected ? `${this.accent(ICON.cursorBar)}  ` : `   `;
 			const idStr = typeof v.id === "number" ? `sid ${v.id}` : v.id;
-			const text = isSelected ? this.accent(v.label) : v.label;
+			const text = isSelected ? this.accent(v.label) : this.dim(v.label);
 			const meta = v.meta ? this.dim(` (${v.meta})`) : "";
-			const idTag = this.dim(` — ${idStr}`);
-			const check = isCurrent ? this.success(" ✓") : "";
-			lines.push(`${prefix}${text}${meta}${idTag}${check}`);
+			const idTag = this.dim(` ${ICON.middot} ${idStr}`);
+			const check = isCurrent ? this.success(` ${ICON.checkOk}`) : "";
+			// v7.1: append native-script language label when available
+			// (omits ar/hi per `ui-locale-labels.ts` to keep widths sane).
+			const langLabel = this.formatVoiceNativeLabel(v.language, v.meta);
+			const langSuffix = langLabel ? this.dim(`  ${ICON.bullet} ${langLabel}`) : "";
+			lines.push(`${prefix}${text}${meta}${idTag}${check}${langSuffix}`);
 		}
 
 		if (start > 0 || end < total) {
@@ -1218,7 +1369,7 @@ export class VoiceSettingsPanel {
 
 	private getRowCount(tabId: TabId): number {
 		switch (tabId) {
-			case "general": return 5;
+			case "general": return 6;
 			case "models": return this.modelSelectableIdx.length;
 			case "downloaded": {
 				const dl = this.getDownloaded().length;

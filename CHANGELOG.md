@@ -5,6 +5,350 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.2.0] - 2026-05-01
+
+World-class voice UX: end-to-end TTS streaming via stdin pipe, sub-cell
+audio waveforms in truecolor, floating-island chrome, plus a stack of
+lifecycle/correctness fixes shaken out by multi-model code review.
+
+### Visual language (new)
+
+- **Liquid Braille audio waveform** — sub-cell vertical bars (4 levels
+  × 2 columns per cell via braille U+2800-28FF) replace the chunky
+  `▁▂▃▄▅▆▇█` block bars. 8 effective vertical levels per cell, 2
+  audio samples per cell width — twice the density of v7.1.
+- **Aurora truecolor gradient** — Catppuccin-inspired ramp (lavender →
+  mauve → pink → peach) interpolated at runtime via 24-bit ANSI
+  escapes (`\x1b[38;2;R;G;Bm`). Loud peaks "burn" warmer; soft tails
+  stay cool. No theme dependency, falls back gracefully on legacy TTYs.
+- **Floating Island chrome** — 3-line bordered card with rounded
+  corners (`╭─╮│╰╯`), inline-titled top edge, optional inline footer.
+  Width-tight (36–48 cols). Borders ANSI-aware so right edge always
+  lands cleanly even with embedded color escapes.
+- **Breathing title** — slow aurora-stop cycle on the floating island
+  title (`Voice Input` / `Voice Mode`); 4-second sine, in phase with
+  the global `RenderTicker` so all widgets breathe together.
+- **Activity chip** — one-glance audio-level indicator next to the
+  timer: `▁ quiet` / `▃ voice` / `▅ active` / `▇ loud`, each with its
+  own aurora hue.
+- **Fade-in transition** — recording widget's wave amplitude scales
+  0→1 over 300ms so it grows out of the warmup state instead of
+  snapping in.
+- **Branded picker cursor** — selected rows show a thin accent left
+  bar (`│`) with full-saturation text; non-selected rows dim. HIG
+  "deference" — chrome subtle, content hierarchy via dim contrast.
+- **Status-dot badges** — `● ready` / `○ download` / `✗ broken`
+  colored-dot indicators replace the v7.1 plain-word labels.
+
+### TTS streaming (new)
+
+- **Long-lived stdin-piped player** — `ffplay -f s16le -ar <rate>
+  -ch_layout mono -i pipe:0` (preferred) / `paplay --raw --format=s16le`
+  (Linux fallback) / `sox` (last-resort, has CoreAudio underrun bug).
+  Drops file-write/open/start latency entirely.
+- **Async writePcm with serialized writeTail chain** — each write
+  awaits the previous one's drain (or stream tear-down) before the
+  next, no unbounded memory growth, no premature pipe close. Replaces
+  the broken multi-`once('drain')` listener pattern that resolved
+  prematurely.
+- **1 s silence padding before EOF** — compensates for sox/CoreAudio
+  closing the audio device on EOF and dropping ~25% of buffered audio.
+- **Pipelined synthesis** — chunk N+1 synthesizes while chunk N
+  plays, producing seamless multi-sentence output.
+- **Deepgram WebSocket TTS** — `wss://api.deepgram.com/v1/speak`
+  binary frames pipe straight into the same playback sink.
+  Sub-200 ms TTFA on good network. Toggle via `/voice-stream on`.
+
+### STT auto-submit (new)
+
+- **`/voice-autosubmit on/off`** — when enabled, transcribed text is
+  sent directly to the agent via `pi.sendUserMessage(text,
+  { deliverAs: "followUp" })` and the editor clears.
+- **`agentBusy` guard** — when the agent is mid-turn (especially
+  mid-retry), STT text stays in the editor and a notify surfaces
+  *"Agent is busy — voice text held in editor. Press [↵] to send when
+  ready."* — no `followUp` queue pile-up onto a failing turn.
+- **Editor preserves user edits** — `clearAfterSuccess` only clears
+  if the editor still contains exactly the dispatched text; if the
+  user typed something else while the send promise was pending, their
+  edits are preserved.
+
+### Lifecycle / correctness
+
+- **Hold-threshold 1200 ms → 700 ms** (configurable via
+  `voice.holdThresholdMs`, range 200–3000, slash command
+  `/voice-hold-delay <ms>`).
+- **Caller-signal cascade** — `runInstallWithWidget` accepts caller's
+  `AbortSignal`; `/voice-speak-stop` or TTS-disable now cancels
+  in-flight install downloads cleanly.
+- **Owner-checked `activeInstallWidgets.delete`** — stale finally
+  blocks can't evict a newer same-id widget.
+- **`sizeBytes ?? 0` guard** — prevents NaN in install progress when
+  catalog entry lacks the field.
+- **kokoro-multi-lang flagged incompatible** — int8 voices.bin
+  produces NaN samples per upstream issue #1923 (sherpa-onnx-node
+  1.12.29 + 1.13.0 both affected). Synthesize() refuses; smart-default
+  recommender skips it; picker shows `✗ broken` badge.
+- **Frozen-error tagging guard** — `__alreadyNotified` assignment is
+  try/catch wrapped (handles non-extensible / cross-realm errors).
+- **Unhandled-rejection safety** — donePromise + nextSynth prefetch
+  promises have shadow `.catch()` so cancel-without-await flows don't
+  surface as `UnhandledPromiseRejection`.
+
+### Text normalization
+
+- **Emoji + decoration stripping** — `\p{Extended_Pictographic}` +
+  dingbats (✓✗★) + arrows (→⇒) + box drawing + repeated punctuation
+  collapsed.
+- **Abbreviation expansion** — `Dr.` → "Doctor", `e.g.` → "for
+  example", `API/CLI/URL/HTTP/JSON/YAML/CSS/HTML` spelled or expanded
+  for engine-friendly pronunciation.
+- **Cardinal number expansion** — `100` → "one hundred", smart skip
+  for years, decimals, version strings, unit-suffixed values.
+
+### Catalog
+
+- **+3 Kokoro variants** — `kokoro-int8-multi-lang-v1_1` (140 MB,
+  upstream re-quantized), `kokoro-multi-lang-v1_0` (333 MB fp32, no
+  NaN risk), `kokoro-en-v0_19` (304 MB fp32, highest-quality English).
+
+### Tests
+
+- **+97 new tests** across 8 new test files. Total **271 tests
+  passing** (1 123 expect calls, 20 test files). Typecheck clean.
+
+### Changed
+
+- `sherpa-onnx-node` peer dep `^1.12.29` → `^1.13.0`.
+- `extensions/voice.ts` — wires Floating Island widgets, agentBusy,
+  ffplay streaming, Aurora gradient.
+- `extensions/voice/tts-playback.ts` — new `openPlaybackStream` /
+  `PlaybackStream` / `float32ToInt16` exports.
+- `extensions/voice/tts-deepgram.ts` — new `deepgramSpeakStreaming`.
+- 9 new files in `extensions/voice/` (ui-aura, ui-icons, ui-width,
+  ui-locale-labels, ui-picker, ui-widget-base, ui-render-ticker,
+  ui-help-overlay, tts-onboarding-overlay).
+
+### Documentation
+
+- `docs/v7.1.0-ui-plan.md` — the v5 architecture plan archived
+  in-tree (8 design-review iterations from Codex + Gemini).
+
+## [7.1.2] - 2026-04-29
+
+### Dependency
+
+- **Bumped `sherpa-onnx-node` from `^1.12.29` → `^1.13.0`** based on
+  Gemini deep-research findings: PRs #3362-#3365 in k2-fsa/sherpa-onnx
+  fix the `GenerationConfig`/`Generate` API for VITS / Kokoro / Matcha
+  / Kitten (the "Not implemented yet" path). 1.13.0 still ships the
+  napi_create_arraybuffer crash on `onProgress` (binding-thread bug —
+  needs `napi_threadsafe_function` upstream). Verified 1.13.0 fixes
+  GenerationConfig but does NOT resolve the kokoro multilingual NaN
+  issue (root cause: int8 quantization of `voices.bin` speaker
+  embeddings, per upstream issue #1923).
+
+
+
+Hotfix continuing the v7.1.1 install-time TTS surgery. Live testing
+on Pi (jiti-loaded extension under Node) surfaced three more failure
+modes that produce the same user symptom — silent or erroring TTS —
+each with a different root cause.
+
+### Fixed
+
+- **`sherpa.OfflineTts.createAsync is not a function` (jiti edition).**
+  v7.1.1 sniffed the namespace for `OfflineRecognizer` to pick the
+  ESM-vs-CJS shape. Pi's actual loader is **jiti**, which exposes
+  *stub* class constructors at the top level (so `OfflineTts` looks
+  like a function) but the real fully-populated module — including
+  static `createAsync` — lives on `.default`. v7.1.2 sniffs for
+  `OfflineTts.createAsync` directly: if it's on the namespace, use
+  the namespace (Bun); otherwise prefer `.default` when it carries
+  `createAsync`; final fallback is the namespace as-is so future
+  runtime variants degrade gracefully.
+- **`Failed to create OfflineTts. Check your config!` for kokoro and
+  kitten.** `tts-engine.ts` hardcoded `model.onnx` for kokoro and
+  `model.fp16.onnx` for kitten. The actual sherpa-onnx model archives
+  ship variant filenames depending on quantization (kokoro v1.0
+  multilingual ships `model.int8.onnx`, kitten ships
+  `model.fp16.onnx`). v7.1.2 introduces `findFirstOnnx(modelDir,
+  candidates)` which probes a priority list of likely filenames and
+  falls back to "any .onnx in the dir" — defends against future
+  quantization variants without code changes.
+- **Kokoro multilingual: silent playback on every voice.** The
+  picker, sherpa-onnx-node 1.12.29, and the kokoro v1.0
+  multilingual `voices.bin` combine to produce all-NaN samples for
+  every speaker id (sid 0..50, all 17 listed voices). The encoded
+  WAV plays as silence, so users see "Playing 19s" with no sound.
+  Fix is multi-pronged:
+  - **Catalog** — new `incompatible` field marks the model with a
+    one-line user-facing reason. Picker shows it with `✗ broken`
+    badge and surfaces the reason in the detail row.
+  - **`synthesize()`** — refuses incompatible models upfront with an
+    explicit error pointing at `/voice-speak-models`.
+  - **NaN detection** — synthesize also detects all-NaN samples
+    *after* generation (defends against future broken voices in
+    other models) and throws the same clear error.
+  - **Smart-default recommender** — skips kokoro for ja/ko locales
+    while flagged, falls back to English with `fallback: true` so
+    onboarding surfaces the situation honestly. Auto re-enables once
+    the `incompatible` flag is removed.
+  - **Picker activation guard** — pressing enter on an incompatible
+    model is a no-op so users can still see future-fix candidates
+    in the list without accidentally activating one.
+
+### Verified
+
+- Sweep across all installed models × all sids: `kitten-nano-en`
+  voices 0–7 all produce real audio (max amplitudes 0.40–0.80);
+  `piper-ru_RU-denis` produces audio; `kokoro-int8-multi-lang` 0/1/2/
+  …/50 all return NaN under sherpa-onnx-node 1.12.29 (confirmed in
+  fresh process, no engine-cache contamination).
+- 271 tests passing (smart-default ja/ko tests rewritten to expect
+  the English fallback while kokoro is flagged).
+- Typecheck clean. `bun publish --dry-run` packs cleanly.
+
+## [7.1.1] - 2026-04-29
+
+Hotfix immediately following v7.1.0 install testing.
+
+### Fixed
+
+- **`sherpa.OfflineTts.createAsync is not a function` on first
+  /voice-speak under Pi (Node)** — `sherpa-loader.ts` now normalizes
+  the synthetic ESM namespace returned by Node's `await import(...)`
+  for CommonJS modules. Under Bun, the namespace exposes
+  `OfflineTts` directly; under Node, the entire CJS `module.exports`
+  lives on `.default`. The loader now picks whichever shape carries
+  `OfflineRecognizer`, fixing TTS for everyone running pi-listen on
+  Pi's bundled Node runtime.
+- **`Not implemented yet. Only some models support this` from
+  sherpa-onnx during synthesis** — sherpa-onnx-node 1.12.29 ships two
+  bugs in the new `generateAsync({ generationConfig, onProgress })`
+  API: the GenerationConfig path throws "Not implemented yet" and the
+  onProgress callback variant crashes the process in
+  `napi_create_arraybuffer`. v7.1.1 falls back to the legacy
+  `generateAsync({ text, sid, speed })` path which is verified
+  end-to-end on macOS arm64 with kitten / vits / kokoro. Cost: we lose
+  intra-synthesis progress callbacks (synthesis is fast enough that
+  the missing UI signal is invisible) and the optional `silenceScale`
+  knob (sherpa default is reasonable).
+
+### Added
+
+- **`autoSubmitOnSpeak` config + `/voice-autosubmit` command** —
+  when ON, transcribed STT text is sent to the agent immediately
+  instead of just being placed in the editor. Defaults OFF so
+  existing users aren't surprised.
+- **TTS auto-speak default flipped to ON** — `ttsAutoSpeak` now
+  defaults to `true` so users hear agent responses out of the box
+  once TTS is enabled. Disable via `/voice-settings` or
+  `voice.ttsAutoSpeak = false` in `settings.json`.
+
+## [7.1.0] - 2026-04-29
+
+World-class Settings UI redesign. Plan reviewed and SHIP'd by Codex (v5)
++ Gemini (v5); implementation reviewed across 7 iterations until both
+reviewers + self-review converged on SHIP.
+
+### Added — UI foundation (`extensions/voice/ui-*`)
+
+- **`ui-widget-base.ts`** — `WidgetRegistry` + `BaseDisposableWidget`
+  with the lifecycle contract that survived 5 review iterations:
+  - `register(w)` synchronously disposes any same-key incumbent.
+  - `unregister(key, owner)` is owner-checked — only deletes the Map
+    entry if it currently points to `owner`.
+  - `disposeAll()` iterates a CLONED snapshot (so widget `dispose()`
+    can re-enter `unregister` safely) and wraps each call in
+    `try/catch`.
+  - `BaseDisposableWidget` enforces dispose ordering: idempotency
+    guard reads PRIOR state → set `disposed = true` → unsubscribe
+    ticker → `onDispose()` → clear slot → owner-checked unregister.
+  - `installWidgetKey(modelId)` per-model-id slot keys so concurrent
+    installs of different models coexist.
+- **`ui-render-ticker.ts`** — single shared 10 Hz frame coalescer.
+  Subscribers pass an explicit `TickerSubscriber { tick, dispose?, label? }`
+  object so ownership is unambiguous. Per-tick `try/catch` isolates
+  throwing subscribers; 3-throws-in-a-row auto-evicts and the
+  eviction `dispose()` is itself wrapped in `try/catch`.
+- **`ui-picker.ts`** — `PickerChassis<T>` with heading-aware nav,
+  search filtering that retains a heading only when at least one
+  child row matches, cursor restoration on search clear, compact
+  mode for narrow terminals.
+- **`ui-icons.ts`** — geometric Unicode glyph table (no emoji per the
+  v7.1 hard constraint).
+- **`ui-width.ts`** — `visualWidth()` handles surrogate pairs + EAW
+  Wide/Fullwidth code points; `truncateToVisualWidth()` never slices
+  a wide glyph; width tier helpers (wide/mid/narrow).
+- **`ui-locale-labels.ts`** — hand-curated native-script names for
+  12 languages; ar/hi intentionally omitted (RTL hazards + Devanagari
+  combining marks would need a grapheme segmenter that violates the
+  zero-dependency constraint).
+
+### Added — Widgets
+
+- **`tts-install-progress.ts`** — sticky download progress widget,
+  per-model-id key, progress bar with size/speed/ETA on wide
+  terminals (graceful trim on narrow), `[esc]`-cancellable.
+- **`tts-playback-indicator.ts`** — honest playback state (spinner +
+  state word). No fake amplitude meter (the v1 plan proposed a
+  `sin + random walk` meter; both reviewers flagged it as misleading
+  and v7.1 ships the honest version).
+- **`tts-onboarding-overlay.ts`** — rich first-run overlay with three
+  explicit actions (`[↵]` try / `[m]` pick another / `[esc]` skip).
+  All three actions persist `ttsOnboardingShown = true` BEFORE any
+  async work (§9 event-ordering contract).
+- **`ui-help-overlay.ts`** — keyboard / command reference. `F1` or
+  `/voice-help` opens it. `?` is intentionally NOT bound globally
+  (would block typing `?` in the editor).
+
+### Added — Settings panel integration
+
+- TTS Models picker uses `PickerChassis` with v7.1 grouping
+  (Recommended / Per-language / Multilingual heavyweight) and
+  width-tier compact mode.
+- Voice picker rows now show native-script language labels (`中文`,
+  `日本語`, `한국어`, etc.) when the language has a curated entry.
+- Two-row status header — at-a-glance system state (STT `●`/`○` +
+  backend, TTS `●`/`○` + backend, current language). Width-aware.
+- Hard block at <60 cols — single-line "terminal too narrow" message
+  pointing users at slash commands.
+
+### Added — voice.ts wiring
+
+- Per-session `WidgetRegistry` + `RenderTicker` (lazy init).
+- `voiceCleanup()` cancels in-flight install controllers FIRST so
+  downloads abort on session shutdown, then drains the registry,
+  then disposes the ticker.
+- `runInstallWithWidget()` replaces the v7.0.x notify-spam loop with
+  the sticky widget. Rethrows install failures (with
+  `__alreadyNotified` marker) so callers short-circuit instead of
+  proceeding with a missing model. Same contract on the headless
+  branch.
+- `[esc]` priority routing: install cancel (most-recent first) →
+  playback stop → fallthrough.
+- `F1` opens help overlay; `/voice-help` slash command.
+
+### Tests
+
+- **+97 new tests** across 8 new test files. Total: **271 tests
+  passing** (up from 174 in v7.0.1). Typecheck clean.
+
+### Changed
+
+- `extensions/voice/settings-panel.ts` — TTS Models picker via
+  chassis; voice picker emits native-script labels; two-row status
+  header; hard block at <60 cols.
+- `extensions/voice.ts` — wires the v7.1 widgets, [esc] routing,
+  F1 help, rich onboarding overlay; `voiceCleanup` aborts installs
+  before tearing down UI.
+- `package.json` — 7.0.1 → 7.1.0.
+
+### Documentation
+
+- `docs/v7.1.0-ui-plan.md` — the approved v5 plan archived in-tree.
+
 ## [7.0.1] - 2026-04-29
 
 Hotfix targeting concurrency + corruption hazards in the v7.0.0 install

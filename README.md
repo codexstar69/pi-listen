@@ -146,12 +146,40 @@ See your hardware profile (RAM, CPU, GPU), dependency status (sherpa-onnx runtim
 |---------|-------------|
 | `/voice-settings` | Settings panel — backend, models, language, scope, device |
 | `/voice-models` | Settings panel (Models tab) |
+| `/voice-speak <text>` | Speak text out loud (TTS) |
+| `/voice-speak-test` | Speak a sample sentence |
+| `/voice-speak-toggle` | Enable / disable TTS |
+| `/voice-autosubmit` `[on|off]` | Toggle: STT text auto-sent to the agent |
+| `/voice-speak-models` | Browse / install TTS voice models |
+| `/voice-speak-info` | Diagnose TTS state |
+| `/voice-help` | Keyboard + command reference (or press `F1`) |
 | `/voice test` | Full diagnostics — audio tool, mic, API key |
 | `/voice on` / `off` | Enable or disable voice |
 | `/voice dictate` | Continuous dictation (no key hold) |
 | `/voice stop` | Stop active recording or dictation |
 | `/voice history` | Recent transcriptions |
 | `/voice` | Toggle on/off |
+
+### v7.1 keyboard
+
+While in the settings panel:
+
+| Key | Action |
+|-----|--------|
+| `← →` | switch tab |
+| `↑ ↓` | navigate row (skips group headings) |
+| `↵` | select / activate |
+| `esc` | back to main / close panel |
+| `type` | filter (search) |
+| `bksp` | clear last search char |
+
+While an install widget or playback indicator is mounted (no overlay
+in front):
+
+| Key | Action |
+|-----|--------|
+| `esc` | cancel active install (most-recent first), then stop playback |
+| `F1` | open help overlay (always available) |
 
 ---
 

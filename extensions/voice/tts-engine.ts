@@ -340,12 +340,37 @@ export async function synthesize(opts: SynthesizeOpts): Promise<TtsAudio> {
 		const cached = await getOrCreateTts(model, modelDir);
 		if (aborted) throw makeAbortError();
 
-		// 5. Build the GenerationConfig.
-		const sherpa = getSherpaModule();
+		// v7.1.2 — refuse to use models we know are incompatible with
+		// the installed sherpa-onnx runtime. Prevents the user from
+		// hearing silence and wondering why; surfaces the incompat
+		// reason from the catalog so they can switch voices.
+		if (model.incompatible) {
+			throw new Error(
+				`TTS model ${model.id} is incompatible with the installed sherpa-onnx runtime: ${model.incompatible}`,
+			);
+		}
+
+		// 5. Compute generate() args.
+		// We use the LEGACY generateAsync({ text, sid, speed }) shape
+		// because it works on every sherpa-onnx-node release we've
+		// tested (1.12.29 + 1.13.0). Two upstream bugs informed this:
+		//   (a) generateAsync({ generationConfig }) threw
+		//       "Not implemented yet. Only some models support this"
+		//       on 1.12.29 (offline-tts-impl.h:Generate:38).
+		//       FIXED in 1.13.0 (PRs #3362-#3365 in k2-fsa/sherpa-onnx).
+		//   (b) generateAsync({ onProgress: cb }) crashes the Node
+		//       process in napi_create_arraybuffer when the callback
+		//       fires. Still broken on 1.13.0 — root cause is the
+		//       binding invoking JS from a background C++ thread
+		//       without napi_threadsafe_function.
+		// The legacy shape sidesteps both. Cost: we lose `silenceScale`
+		// (sherpa default is reasonable) and intra-synthesis progress
+		// callbacks (synthesis is fast enough — <1s for typical
+		// sentences — that the missing progress is invisible).
+		// Future: when bug (b) is fixed upstream, re-enable
+		// onProgress + GenerationConfig together for streaming UI.
 		const sid = clampSid(opts.sid ?? model.defaultSid, model);
 		const speed = clampSpeed(opts.speed ?? 1.0);
-		const silenceScale = clampNonNegative(opts.silenceScale ?? 0.2, 0, 5);
-		const generationConfig = new sherpa.GenerationConfig({ sid, speed, silenceScale });
 
 		// 6. Serialize generates against this CachedTts instance via the
 		// chain extension below — see the `generateChain` doc on CachedTts.
@@ -358,19 +383,24 @@ export async function synthesize(opts: SynthesizeOpts): Promise<TtsAudio> {
 
 		let audio: { samples: Float32Array; sampleRate?: number };
 		try {
-			audio = await cached.tts.generateAsync({
-				text,
-				generationConfig,
-				onProgress: (info: { samples: Float32Array; progress: number }) => {
-					opts.onProgress?.(info);
-					// Returning 0 / false signals sherpa-onnx-node to stop generating.
-					return aborted ? 0 : 1;
-				},
-			});
+			audio = await cached.tts.generateAsync({ text, sid, speed });
 		} finally {
 			// Always release the chain so subsequent synthesize() calls
 			// can proceed, even if generateAsync threw.
 			resolveOurTail();
+		}
+		// v7.1.2 — guard against silent NaN-sample playback. Some
+		// sherpa-onnx-node + voices.bin combinations (notably kokoro
+		// multilingual sid=0/1 with sherpa 1.12.29) "succeed" but
+		// return all-NaN audio. Encoded WAV plays as silence, so users
+		// see "Playing 19s" with no sound. Fail loudly instead.
+		if (audio.samples.length > 0 && Number.isNaN(audio.samples[0])) {
+			throw new Error(
+				`TTS synthesis returned NaN samples for ${model.id} sid=${sid}. ` +
+				`This voice is incompatible with the installed sherpa-onnx-node ` +
+				`runtime — pick a different voice via /voice-speak-models or ` +
+				`/voice-settings → Speak tab.`,
+			);
 		}
 		// If the run was aborted mid-generate, surface that to the caller
 		// rather than silently returning a partial buffer.
@@ -469,7 +499,7 @@ function buildTtsConfig(model: TtsLocalModelInfo, modelDir: string): any {
 			return {
 				model: {
 					kitten: {
-						model: path.join(modelDir, "model.fp16.onnx"),
+						model: findFirstOnnx(modelDir, ["model.fp16.onnx", "model.onnx"]),
 						voices: path.join(modelDir, "voices.bin"),
 						tokens,
 						dataDir,
@@ -504,11 +534,14 @@ function buildTtsConfig(model: TtsLocalModelInfo, modelDir: string): any {
 		case "kokoro": {
 			// Kokoro multilingual ships lexicon-* files for non-English languages;
 			// pass them comma-separated so the engine can handle code-switching.
+			// Filename varies between releases — int8 quantization (kokoro v1.0
+			// multilingual: `model.int8.onnx`) vs fp32 (`model.onnx`). Find
+			// whichever ships in this model dir.
 			const lexicon = findKokoroLexicons(modelDir);
 			return {
 				model: {
 					kokoro: {
-						model: path.join(modelDir, "model.onnx"),
+						model: findFirstOnnx(modelDir, ["model.int8.onnx", "model.onnx", "model.fp16.onnx"]),
 						voices: path.join(modelDir, "voices.bin"),
 						tokens,
 						dataDir,
@@ -561,11 +594,6 @@ function clampSpeed(speed: number): number {
 	return Math.max(0.5, Math.min(2.0, speed));
 }
 
-function clampNonNegative(v: number, lo: number, hi: number): number {
-	if (!Number.isFinite(v)) return lo;
-	return Math.max(lo, Math.min(hi, v));
-}
-
 /**
  * Locate the Piper VITS .onnx file inside the extracted model directory.
  * Piper archives include exactly one `.onnx` file at the top level (no
@@ -576,6 +604,29 @@ function findPiperOnnx(modelDir: string): string {
 	const entries = fs.readdirSync(modelDir);
 	const onnx = entries.find(e => e.endsWith(".onnx"));
 	if (!onnx) throw new Error(`No .onnx file found in Piper model directory: ${modelDir}`);
+	return path.join(modelDir, onnx);
+}
+
+/**
+ * Pick the first .onnx file present in `modelDir` matching one of the
+ * `candidates` (in priority order). Falls back to ANY .onnx file if no
+ * candidate is found — defends against future quantization variants
+ * (e.g. `model.q4.onnx`) without a code change.
+ *
+ * v7.1.2 fix: kitten + kokoro previously hardcoded `model.fp16.onnx`
+ * and `model.onnx` respectively. The actual sherpa-onnx model archives
+ * ship with different filenames per release (kokoro multilingual ships
+ * `model.int8.onnx`); the hardcoded path failed sherpa's
+ * "Failed to create OfflineTts. Check your config!" validation.
+ */
+function findFirstOnnx(modelDir: string, candidates: string[]): string {
+	for (const c of candidates) {
+		const p = path.join(modelDir, c);
+		if (fs.existsSync(p)) return p;
+	}
+	const entries = fs.readdirSync(modelDir);
+	const onnx = entries.find(e => e.endsWith(".onnx"));
+	if (!onnx) throw new Error(`No .onnx file found in model directory: ${modelDir}`);
 	return path.join(modelDir, onnx);
 }
 

@@ -28,6 +28,7 @@
 
 import type { VoiceConfig } from "./config";
 import { resolveDeepgramApiKey } from "./deepgram";
+import type { PlaybackStream } from "./tts-playback";
 
 // ─── Catalog ──────────────────────────────────────────────────────────────────
 
@@ -288,4 +289,144 @@ export function assertLanguageForDeepgram(voiceId: string, language: string): vo
 			`Pick a voice for ${language} via /voice-settings, or change ttsLanguage to ${voice.language}.`,
 		);
 	}
+}
+
+// ─── v7.1.3: Deepgram WebSocket streaming TTS ─────────────────────────────────
+
+/**
+ * Open a WebSocket connection to Deepgram's streaming TTS endpoint and
+ * pipe binary audio frames into a `PlaybackStream` sink as they arrive.
+ *
+ * Endpoint: `wss://api.deepgram.com/v1/speak?model=<voice>&encoding=linear16&sample_rate=<rate>`
+ * Auth:     `Authorization: Token <api-key>` request header
+ * Send:     JSON `{"type":"Speak","text":"..."}` then `{"type":"Flush"}`
+ * Receive:  Binary frames = raw 16-bit signed LE PCM (mono).
+ *           Text frames = control / metadata / errors.
+ *
+ * Resolves when the server signals end-of-stream (after Flush). Rejects
+ * on auth errors, network errors, or signal abort. The sink itself is
+ * NOT ended/cancelled by this function — the caller controls the sink
+ * lifecycle so multiple calls can stream into the same player.
+ *
+ * For sub-200ms time-to-first-audio (TTFB) the network path matters
+ * most. We send Flush immediately after the text so Deepgram starts
+ * emitting audio frames without waiting for more input.
+ */
+export interface DeepgramStreamingOpts {
+	readonly text: string;
+	readonly voiceId: string;
+	readonly config: VoiceConfig;
+	readonly sampleRate?: number;
+	readonly signal?: AbortSignal;
+	/** Sink to receive PCM frames as they arrive. Caller manages lifecycle. */
+	readonly sink: PlaybackStream;
+}
+
+export async function deepgramSpeakStreaming(opts: DeepgramStreamingOpts): Promise<void> {
+	const { text, voiceId, config, sink, signal } = opts;
+	const sampleRate = opts.sampleRate ?? DEEPGRAM_TTS_SAMPLE_RATE;
+
+	if (!text || typeof text !== "string") throw new Error(`Deepgram TTS text is required (got: ${text})`);
+	if (!voiceId || typeof voiceId !== "string") throw new Error(`Deepgram TTS voiceId is required (got: ${voiceId})`);
+	const apiKey = resolveDeepgramApiKey(config);
+	if (!apiKey) throw new Error("DEEPGRAM_API_KEY not set.");
+	if (signal?.aborted) throw makeAbortError();
+
+	const wsUrl = `wss://api.deepgram.com/v1/speak?model=${encodeURIComponent(voiceId)}` +
+		`&encoding=linear16&sample_rate=${sampleRate}`;
+
+	// Node 22 ships a built-in WebSocket. The 3rd-arg `headers` form is
+	// the ws-package extension; the global Node WebSocket accepts headers
+	// via `WebSocket.HEADERS_INIT` constructor 2nd arg. To stay
+	// compatible across Node versions we use the 3rd-arg shape that the
+	// `ws` package supports — that's already pulled in transitively.
+	let ws: any;
+	try {
+		// Try built-in (Node 22+ undici).
+		ws = new (globalThis as any).WebSocket(wsUrl, {
+			headers: { Authorization: `Token ${apiKey}` },
+		});
+	} catch {
+		// Fall back to ws package if the built-in rejects the headers form.
+		const { WebSocket } = await import("ws");
+		ws = new WebSocket(wsUrl, { headers: { Authorization: `Token ${apiKey}` } });
+	}
+	ws.binaryType = "arraybuffer";
+
+	return new Promise<void>((resolve, reject) => {
+		let settled = false;
+		const settle = (action: () => void) => {
+			if (settled) return;
+			settled = true;
+			action();
+		};
+		const onAbort = () => settle(() => {
+			try { ws.close(1000, "abort"); } catch {}
+			reject(makeAbortError());
+		});
+		signal?.addEventListener("abort", onAbort);
+
+		ws.addEventListener("open", () => {
+			try {
+				ws.send(JSON.stringify({ type: "Speak", text }));
+				// Flush tells Deepgram "no more text — emit audio + close".
+				ws.send(JSON.stringify({ type: "Flush" }));
+			} catch (err: any) {
+				settle(() => reject(new Error(`Deepgram WS send failed: ${err?.message ?? err}`)));
+			}
+		});
+		ws.addEventListener("message", (ev: any) => {
+			const data = ev?.data;
+			if (data instanceof ArrayBuffer) {
+				// Binary frame = raw int16 LE PCM. Pipe straight to sink.
+				// `sink.writePcm` returns a Promise (writeTail chain
+				// serializes internally; even fire-and-forget here
+				// preserves order). Catch on the returned promise so a
+				// late rejection (sink torn down mid-frame) doesn't
+				// crash with UnhandledPromiseRejection.
+				const i16 = new Int16Array(data);
+				try {
+					const p = sink.writePcm(i16);
+					if (p && typeof (p as Promise<void>).catch === "function") {
+						(p as Promise<void>).catch(() => { /* sink already errored, caller observes */ });
+					}
+				} catch { /* sync errors swallowed — sink handles state */ }
+			} else if (typeof data === "string") {
+				// Control frames: { "type": "Metadata" } / { "type": "Flushed" } / errors
+				try {
+					const msg = JSON.parse(data);
+					if (msg?.type === "Flushed" || msg?.type === "Final") {
+						// Server signals end of synthesis. Close and resolve.
+						try { ws.close(1000, "done"); } catch {}
+						settle(() => resolve());
+					} else if (msg?.type === "Error" || msg?.error) {
+						// godspeed glm finding: must close socket on error
+						// path or sustained errors leak FDs + abort listeners.
+						try { ws.close(1011, "error"); } catch {}
+						settle(() => reject(new Error(`Deepgram WS error: ${msg.error ?? data}`)));
+					}
+				} catch { /* ignore unparsable text frames */ }
+			}
+		});
+		ws.addEventListener("error", (ev: any) => {
+			// godspeed glm finding: close on error path to release the
+			// FD + abort listener. Without this, sustained errors leak.
+			try { ws.close(1011, "error"); } catch {}
+			settle(() => reject(new Error(`Deepgram WS error: ${ev?.message ?? "unknown"}`)));
+		});
+		ws.addEventListener("close", (ev: any) => {
+			signal?.removeEventListener("abort", onAbort);
+			// Server-initiated close after a successful stream resolves
+			// the promise; abort/error paths already settled above.
+			if (ev?.code === 1000) settle(() => resolve());
+			else settle(() => reject(new Error(`Deepgram WS closed: code=${ev?.code} reason=${ev?.reason ?? ""}`)));
+		});
+	});
+}
+
+function makeAbortError(): Error {
+	if (typeof DOMException === "function") return new DOMException("Deepgram TTS aborted", "AbortError");
+	const e = new Error("Deepgram TTS aborted");
+	(e as any).name = "AbortError";
+	return e;
 }

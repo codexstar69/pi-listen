@@ -23,9 +23,11 @@
 
 import type { VoiceConfig } from "./config";
 import { synthesize, type TtsAudio } from "./tts-engine";
+import { openPlaybackStream, float32ToInt16, type PlaybackStream } from "./tts-playback";
 import { getTtsModel, type TtsLocalModelInfo } from "./tts-local-models";
 import {
 	deepgramSpeak,
+	deepgramSpeakStreaming,
 	DEFAULT_DEEPGRAM_TTS_VOICE,
 	DEEPGRAM_TTS_SAMPLE_RATE,
 	assertLanguageForDeepgram,
@@ -88,9 +90,31 @@ export async function speak(opts: SpeakOpts): Promise<void> {
 
 	const playAudio = opts.playAudio ?? play;
 
-	for (const chunk of chunks) {
-		if (signal?.aborted) throw makeAbortError();
-		const audio = await synthesizeChunk({
+	// v7.1.3 — pipelined synth + true streaming playback when sox/paplay
+	// is available. Two layers:
+	//
+	// (1) Pipeline: while chunk N plays, synthesize chunk N+1 in parallel
+	//     so the gap between sentences disappears.
+	// (2) Stream: when a streaming-capable player is on PATH (sox / paplay
+	//     / Linux), open a long-lived player process and pipe int16 PCM
+	//     bytes directly. Drops file-write/open/start latency. Falls back
+	//     to file-based per-chunk playback when no streaming player is
+	//     available (Windows, or systems without sox).
+	//
+	// Cancellation: if the signal aborts mid-pipeline, the in-flight synth
+	// promise is left to settle naturally and the streaming sink is
+	// cancelled (kills sox + drops buffered audio). A throwing synth
+	// (broken model + sid) cancels the stream and propagates.
+	// godspeed runtime/gemini-3.1-pro VETO fix: when we kick off
+	// `nextSynth = synthOne(...)` and the loop later exits via abort
+	// or an unrelated throw, the prefetched promise can reject after
+	// no one is awaiting it → unhandledRejection crashes the Pi
+	// process. Attach a safety `.catch()` that lives until the next
+	// loop iteration's `await` consumes the (rejected) promise. The
+	// awaiter still observes the rejection because the catch is on a
+	// SHADOW promise — `synthOne()` itself returns the original.
+	const synthOne = (chunk: string) => {
+		const p = synthesizeChunk({
 			chunk,
 			backend,
 			config,
@@ -98,14 +122,111 @@ export async function speak(opts: SpeakOpts): Promise<void> {
 			signal,
 			resolveModelDir: opts.resolveModelDir,
 		});
-		if (signal?.aborted) throw makeAbortError();
-		await playAudio({ source: audio, signal });
-		// Re-check after each playback completes — playAudio can resolve
-		// successfully even when an abort fired *during* the very last
-		// sample (per its documented "code === 0 wins" contract). Without
-		// this check the loop would advance into the next chunk's
-		// synthesis after the user already pressed Escape.
-		if (signal?.aborted) throw makeAbortError();
+		// Shadow .catch — swallows so an orphaned promise never
+		// surfaces as UnhandledPromiseRejection. The original `p` is
+		// returned so the actual awaiter sees the rejection.
+		p.catch(() => { /* see comment above */ });
+		return p;
+	};
+
+	// Discover the audio sample rate for the streaming player. Local
+	// engine returns it on the first synth result; for Deepgram we
+	// know it's the buildDeepgramSpeakUrl rate. We open the stream
+	// AFTER the first synth so we have a definitive rate to pass.
+	let stream: PlaybackStream | null = null;
+
+	const cleanupStream = () => {
+		if (stream) {
+			try { stream.cancel(); } catch { /* already cancelled */ }
+			stream = null;
+		}
+	};
+
+	// v7.1.3 — Deepgram WebSocket streaming TTS. When the user enables
+	// `ttsDeepgramStreaming` AND we have a local stream sink, bypass the
+	// REST/file-based chunk loop entirely: open the sink once, send each
+	// chunk's text directly to Deepgram's WS, and let the binary frames
+	// flow into the sink as they arrive. Sub-200ms TTFA in good network
+	// conditions vs ~1-2s for REST/file path.
+	if (backend === "deepgram" && config.ttsDeepgramStreaming === true) {
+		const dgSampleRate = 24000;
+		const sink = openPlaybackStream({ sampleRate: dgSampleRate, signal });
+		if (sink) {
+			try {
+				const voiceId = config.ttsDeepgramVoiceId || "aura-asteria-en";
+				for (const chunk of chunks) {
+					if (signal?.aborted) throw makeAbortError();
+					await deepgramSpeakStreaming({
+						text: chunk,
+						voiceId,
+						config,
+						sampleRate: dgSampleRate,
+						signal,
+						sink,
+					});
+				}
+				await sink.end();
+				await sink.done();
+				return;
+			} catch (err) {
+				try { sink.cancel(); } catch {}
+				throw err;
+			}
+		}
+		// No streaming player available — fall through to REST/file path.
+	}
+
+	try {
+		let nextSynth: ReturnType<typeof synthOne> | null = null;
+		for (let i = 0; i < chunks.length; i++) {
+			if (signal?.aborted) throw makeAbortError();
+			// First iteration synthesizes inline; subsequent iterations use
+			// the prefetched audio from the previous iteration.
+			const audio = await (nextSynth ?? synthOne(chunks[i]!));
+			nextSynth = null;
+			if (signal?.aborted) throw makeAbortError();
+
+			// Streaming path: open the sink lazily on first chunk so we
+			// have the actual sample rate. PCM-yielding chunks (local
+			// `{ samples, sampleRate }`) are write-and-go; pre-encoded
+			// WAV chunks (Deepgram REST) cannot stream and fall through.
+			if ("samples" in audio && audio.sampleRate) {
+				if (stream === null && i === 0) {
+					stream = openPlaybackStream({ sampleRate: audio.sampleRate, signal });
+				}
+				if (stream) {
+					// Kick off NEXT chunk's synth BEFORE awaiting the
+					// write — synthesis runs in parallel with stdin
+					// write/drain. writePcm returns a promise that
+					// resolves once the byte queue is accepted (or
+					// drained on backpressure).
+					if (i + 1 < chunks.length) nextSynth = synthOne(chunks[i + 1]!);
+					await stream.writePcm(float32ToInt16(audio.samples));
+					continue;
+				}
+			}
+
+			// Non-streaming fallback (Windows, missing sox, or WAV chunks):
+			// file-per-chunk playback. Pipeline next synth while playing.
+			if (i + 1 < chunks.length) {
+				nextSynth = synthOne(chunks[i + 1]!);
+			}
+			await playAudio({ source: audio, signal });
+			if (signal?.aborted) throw makeAbortError();
+		}
+
+		// Streaming path: tell the player no more PCM is coming and wait
+		// for it to drain. end() awaits all queued writes + appends a
+		// silence tail before signaling EOF (compensates for sox closing
+		// the audio device on EOF and dropping ~1s of buffered audio).
+		if (stream) {
+			await stream.end();
+			await stream.done();
+			stream = null;
+		}
+	} catch (err) {
+		cleanupStream();
+		throw err;
 	}
 }
 

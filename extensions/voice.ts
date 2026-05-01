@@ -63,7 +63,7 @@ import type {
 	ExtensionContext,
 	ExtensionCommandContext,
 } from "@mariozechner/pi-coding-agent";
-import { isKeyRelease, isKeyRepeat, matchesKey, type KeyId } from "@mariozechner/pi-tui";
+import { isKeyRelease, isKeyRepeat, matchesKey, Key, type KeyId } from "@mariozechner/pi-tui";
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
@@ -79,6 +79,10 @@ import {
 	type VoiceSettingsScope,
 } from "./voice/config";
 import { finalizeOnboardingConfig, runVoiceOnboarding, pickLanguage, languageDisplayName, modelForLanguage } from "./voice/onboarding";
+import { makeWidgetRegistry, type WidgetRegistry } from "./voice/ui-widget-base";
+import { makeRenderTicker, type RenderTicker } from "./voice/ui-render-ticker";
+import { TtsInstallProgressWidget } from "./voice/tts-install-progress";
+import { TtsPlaybackIndicator } from "./voice/tts-playback-indicator";
 import { buildDeepgramWsUrl, resolveDeepgramApiKey, SAMPLE_RATE, CHANNELS } from "./voice/deepgram";
 import {
 	startLocalSession, stopLocalSession, abortLocalSession,
@@ -108,8 +112,13 @@ const STREAM_FINALIZE_TIMEOUT_MS = 2500;
 // Hold-to-talk timing — Apple-style deliberate hold detection
 // The goal: typing normally should NEVER accidentally trigger voice.
 // Only a clearly intentional long press activates it.
-const HOLD_THRESHOLD_MS = 1200;   // Must hold for 1.2s before voice activates
-                                   // (Apple Caps Lock uses ~1s — we use slightly more to be safe)
+// v7.1.3 — hold threshold is configurable via `voice.holdThresholdMs`.
+// Default lowered from 1200ms → 700ms for snappier hold-to-talk activation.
+// Apple Caps Lock uses ~1s; modern push-to-talk apps tend to use 500-800ms.
+// 700ms strikes a balance: too short risks accidental activation while typing
+// (a single tap on the spacebar at the end of a word is ~80ms), too long
+// feels laggy. Users can dial higher via /voice-hold-delay or settings.json.
+const HOLD_THRESHOLD_DEFAULT_MS = 700;
 const RELEASE_DETECT_MS = 500;    // Gap in key-repeat that means "released" (non-Kitty)
                                    // macOS default InitialKeyRepeat is ~375ms, so 500ms
                                    // ensures the first repeat arrives before we decide "tap"
@@ -633,6 +642,33 @@ export default function (pi: ExtensionAPI) {
 	let statusTimer: ReturnType<typeof setInterval> | null = null;
 	let terminalInputUnsub: (() => void) | null = null;
 
+	// ─── v7.1 Settings UI: widget registry + render ticker (per session) ──
+	// Created lazily on first use (session_start) and torn down in
+	// voiceCleanup. Owns all DisposableWidget instances for the session.
+	let widgetRegistry: WidgetRegistry | null = null;
+	let renderTicker: RenderTicker | null = null;
+	function getOrInitVoiceUi(): { registry: WidgetRegistry; ticker: RenderTicker } {
+		if (!widgetRegistry) widgetRegistry = makeWidgetRegistry();
+		if (!renderTicker) renderTicker = makeRenderTicker();
+		return { registry: widgetRegistry, ticker: renderTicker };
+	}
+	/** Currently-mounted install widgets keyed by modelId — for [esc] routing. */
+	const activeInstallWidgets = new Map<string, TtsInstallProgressWidget>();
+	/** Currently-mounted playback indicator (one at a time) for [esc] routing. */
+	let activePlaybackIndicator: TtsPlaybackIndicator | null = null;
+
+	/**
+	 * v7.1.3 — read the active hold-threshold (ms) from config with bounds.
+	 * Outside [200, 3000] falls back to the default (700ms). Bounds chosen
+	 * so a typo can't make the experience completely broken: 200ms is
+	 * effectively single-tap, 3000ms is "RSI-friendly slow press."
+	 */
+	function getHoldThresholdMs(): number {
+		const v = (config as any).holdThresholdMs;
+		if (typeof v === "number" && Number.isFinite(v) && v >= 200 && v <= 3000) return v;
+		return HOLD_THRESHOLD_DEFAULT_MS;
+	}
+
 	// ─── Toggle Shortcut (resolved once at startup, used everywhere) ──────
 	const resolvedToggleShortcut = loadGlobalToggleShortcut();
 	const toggleShortcutLabel = resolvedToggleShortcut
@@ -801,6 +837,23 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function voiceCleanup() {
+		// v7.1: cancel in-flight installs FIRST so their AbortControllers
+		// fire before we drop UI state. Without this, a session_shutdown
+		// during a download would leave the network/disk work running
+		// after the widget slot is cleared (Codex v6 finding #3).
+		for (const w of Array.from(activeInstallWidgets.values())) {
+			try { w.cancel(); } catch (err) { voiceDebug("install widget cancel threw during voiceCleanup", String(err)); }
+		}
+		activeInstallWidgets.clear();
+		// Stop any active playback the same way.
+		try { activePlaybackIndicator?.stop(); } catch (err) { voiceDebug("playback stop threw during voiceCleanup", String(err)); }
+		activePlaybackIndicator = null;
+		// Drain registry — each widget self-clears its slot via dispose().
+		try { widgetRegistry?.disposeAll(); } catch (err) { voiceDebug("widgetRegistry.disposeAll threw", String(err)); }
+		try { renderTicker?.dispose(); } catch (err) { voiceDebug("renderTicker.dispose threw", String(err)); }
+		widgetRegistry = null;
+		renderTicker = null;
+
 		if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
 		cancelDelayedStop();
 		clearWarmupWidget();
@@ -857,31 +910,67 @@ export default function (pi: ExtensionAPI) {
 	// ─── Minimal Voice Indicators ──────────────────────────────────────
 
 	function getRecordDot(): string {
-		const phase = (Math.sin(Date.now() / 600) + 1) / 2;
-		if (phase > 0.65) return "●";
-		if (phase > 0.35) return "◉";
-		return "○";
+		// v7.2 — soft pulse between full and dim. Two-state instead of
+		// three-state (cleaner, more like a breathing LED indicator
+		// than the v7.0 multi-glyph approach).
+		const phase = (Math.sin(Date.now() / 700) + 1) / 2;
+		return phase > 0.5 ? "●" : "○";
 	}
 
 	function buildMiniWave(level: number): string {
+		// Legacy block-bar wave — retained for compatibility with any
+		// caller that still uses it. New code should use buildAuroraWave.
 		const bars = "▁▂▃▄▅▆▇█";
 		const len = 12;
 		let out = "";
 		const t = Date.now() / 1000;
-		const energy = Math.pow(level, 0.7); // Boost low levels
+		const energy = Math.pow(level, 0.7);
 		for (let i = 0; i < len; i++) {
 			const pos = i / len;
-			// Multi-frequency sine for organic movement
 			const wave1 = Math.sin(t * 4.5 + i * 0.9) * 0.35;
 			const wave2 = Math.sin(t * 7.2 + i * 1.4 + 2.0) * 0.15;
-			// Center emphasis — bars in the middle are taller
 			const center = 1.0 - Math.abs(pos - 0.5) * 1.2;
-			const base = 0.15 + energy * 0.85; // Always show some movement
+			const base = 0.15 + energy * 0.85;
 			const value = Math.max(0, Math.min(1, (wave1 + wave2 + 0.5) * base * center));
 			const idx = Math.min(bars.length - 1, Math.round(value * (bars.length - 1)));
 			out += bars[idx];
 		}
 		return out;
+	}
+
+	/**
+	 * v7.2 world-class — Liquid Braille audio waveform with truecolor
+	 * Aurora gradient. Per Gemini design recommendation:
+	 *   - 8 effective vertical levels per CELL (4 dots × 2 columns) via
+	 *     braille — vs 8 levels per cell with block-bars.
+	 *   - 2 audio samples per cell width — 2× density of block-bar wave.
+	 *   - Per-cell color picks an aurora stop based on local peak;
+	 *     loud peaks "burn" into hot peach/red, soft tails stay cool
+	 *     lavender. RGB interpolated at runtime.
+	 * Output is `cells` cells wide rendered as a single string with
+	 * inline ANSI 24-bit escapes; ends with a reset. Caller-side
+	 * width math should use `cells` not the byte-length of the result.
+	 */
+	function buildAuroraWave(level: number, cells = 16): string {
+		// Generate 2*cells audio "samples" via multi-frequency sine
+		// + the live RMS energy. Same organic motion as the legacy
+		// wave but at higher density.
+		const samples = 2 * cells;
+		const t = Date.now() / 1000;
+		const energy = Math.pow(level, 0.7);
+		const arr: number[] = [];
+		for (let i = 0; i < samples; i++) {
+			const pos = i / samples;
+			const wave1 = Math.sin(t * 4.5 + i * 0.45) * 0.35;
+			const wave2 = Math.sin(t * 7.2 + i * 0.7 + 2.0) * 0.15;
+			const center = 1.0 - Math.abs(pos - 0.5) * 1.0;
+			const base = 0.10 + energy * 0.90;
+			const value = Math.max(0, Math.min(1, (wave1 + wave2 + 0.5) * base * center));
+			arr.push(value);
+		}
+		// Lazy-import to keep voice.ts hot path fast on cold start.
+		const { liquidBraille, auroraColor } = require("./voice/ui-aura") as typeof import("./voice/ui-aura");
+		return liquidBraille(arr, auroraColor);
 	}
 
 	// ─── Warmup Widget ──────────────────────────────────────────────────
@@ -893,17 +982,50 @@ export default function (pi: ExtensionAPI) {
 		const renderWarmup = () => {
 			if (!ctx?.hasUI) return;
 			const elapsed = Date.now() - startTime;
-			const progress = Math.min(elapsed / HOLD_THRESHOLD_MS, 1);
+			const progress = Math.min(elapsed / getHoldThresholdMs(), 1);
 
 			ctx.ui.setWidget("voice-recording", (_tui, theme) => {
 				return {
 					invalidate() {},
 					render(width: number): string[] {
-						const meterLen = Math.max(4, Math.min(12, Math.floor(width * 0.15)));
-						const filled = Math.round(progress * meterLen);
-						const meter = "█".repeat(filled) + "░".repeat(meterLen - filled);
-						const hint = progress < 1 ? "hold…" : "ready!";
-						return [` ${theme.fg("accent", "🎤")} ${theme.fg("accent", meter)} ${theme.fg("dim", hint)}`];
+						// v7.2 world-class — Same Floating Island chrome
+						// as the active recording widget, with the
+						// progress bar inside. Establishes visual
+						// continuity between warmup → recording (same
+						// island, content shifts, no jump).
+						const { island, auroraColor, titleBreathe } = require("./voice/ui-aura") as typeof import("./voice/ui-aura");
+						const dim = (s: string) => theme.fg("dim", s);
+						const muted = (s: string) => theme.fg("muted", s);
+						const accent = (s: string) => theme.fg("accent", s);
+						const islandW = Math.max(36, Math.min(46, width - 2));
+
+						// Aurora gradient progress: ▰ filled / ▱ empty
+						// with truecolor across the filled portion.
+						const innerW = islandW - 2;
+						const fixedW = 3 /* " ○ " */ + 1 /* trail */;
+						const meterCells = Math.max(12, innerW - fixedW);
+						const filled = Math.round(progress * meterCells);
+						let bar = "";
+						for (let i = 0; i < meterCells; i++) {
+							if (i < filled) {
+								// Color stop based on position along filled portion.
+								const t = filled === 0 ? 0 : i / Math.max(1, meterCells - 1);
+								bar += auroraColor(t) + "▰";
+							} else {
+								bar += dim("▱");
+							}
+						}
+						bar += "\x1b[0m";
+
+						const dot = progress < 1 ? muted("○") : accent("●");
+						const content = ` ${dot} ${bar} `;
+						// Breathing title — same aurora-cycle as recording widget
+						// so the warmup → recording transition feels seamless.
+						const titleStyled = titleBreathe(Date.now()) + "\x1b[1mVoice Mode\x1b[0m";
+						const footer = progress < 1
+							? dim("hold to record")
+							: accent("ready");
+						return island({ width: islandW, title: titleStyled, content, footer, dim });
 					},
 				};
 			}, { placement: "belowEditor" });
@@ -937,14 +1059,48 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.setWidget("voice-recording", (_tui, theme) => {
 			return {
 				invalidate() {},
-				render(_width: number): string[] {
-					const elapsed = Math.round((Date.now() - recordingStart) / 1000);
+				render(width: number): string[] {
+					// v7.2 world-class — Floating Island + Liquid Braille +
+					// Aurora gradient + breathing title + activity chip
+					// + 300 ms fade-in transition from warmup.
+					const { island, titleBreathe, activityTag } = require("./voice/ui-aura") as typeof import("./voice/ui-aura");
+					const now = Date.now();
+					const elapsed = (now - recordingStart) / 1000;
 					const mins = Math.floor(elapsed / 60);
 					const secs = elapsed % 60;
-					const timeStr = mins > 0 ? `${mins}:${String(secs).padStart(2, "0")}` : `${secs}s`;
-					const wave = buildMiniWave(audioLevelSmoothed);
+					const timeStr = mins > 0
+						? `${mins}:${String(Math.floor(secs)).padStart(2, "0")}`
+						: `${secs.toFixed(1)}s`;
+					const dim = (s: string) => theme.fg("dim", s);
+					const muted = (s: string) => theme.fg("muted", s);
+					const accent = (s: string) => theme.fg("accent", s);
+
+					// Activity chip — one-glance "is sound coming in?"
+					const chip = activityTag(audioLevelSmoothed, dim);
+					const chipPlain = chip.replace(/\x1b\[[\d;]*[A-Za-z]/g, "");
+
+					// Compact 36-48 cols. Reserved cells:
+					//   " ● "(3) + wave + " · TIME "(timer+4) + "  CHIP "(chip+3) + " "(1)
+					const islandW = Math.max(36, Math.min(48, width - 2));
+					const innerW = islandW - 2;
+					const fixedW = 3 + (4 + timeStr.length) + (3 + chipPlain.length) + 1;
+					const waveCells = Math.max(8, innerW - fixedW);
+
+					// Fade-in over first 300 ms — wave amplitude
+					// scales 0→1 so the recording widget grows out
+					// of warmup rather than snapping in.
+					const sinceStart = Math.max(0, now - recordingStart);
+					const fade = Math.min(1, sinceStart / 300);
+
 					const dot = theme.fg("error", getRecordDot());
-					return [` ${dot} ${theme.fg("accent", wave)} ${theme.fg("muted", timeStr)} ${theme.fg("dim", "⌴ release")}`];
+					const wave = buildAuroraWave(audioLevelSmoothed * fade, waveCells);
+
+					// Breathing title — slow aurora-color cycle.
+					const titleStyled = titleBreathe(now) + "\x1b[1mVoice Input\x1b[0m";
+
+					const content = ` ${dot} ${wave} ${dim("·")} ${muted(timeStr)}  ${chip} `;
+					const footerStyled = `${dim("release")} ${accent("↑")}`;
+					return island({ width: islandW, title: titleStyled, content, footer: footerStyled, dim });
 				},
 			};
 		}, { placement: "belowEditor" });
@@ -984,6 +1140,8 @@ export default function (pi: ExtensionAPI) {
 		if (_startingRecording) return false; // Prevent overlapping starts during corruption guard sleep
 		_startingRecording = true;
 
+		abortActiveSpeak();
+
 		try {
 		// ── SESSION CORRUPTION GUARD ──
 		// If we're still finalizing from a previous recording, abort it first.
@@ -1017,6 +1175,7 @@ export default function (pi: ExtensionAPI) {
 
 	// ── Pre-recording: start capturing audio during warmup so we don't miss words ──
 	function startPreRecording() {
+		abortActiveSpeak();
 		if (preRecordingSession) return; // Already started
 		if (config.backend === "local") return;      // No pre-recording for local batch mode
 		if (!resolveDeepgramApiKey(config)) return; // No key — skip silently
@@ -1094,19 +1253,104 @@ export default function (pi: ExtensionAPI) {
 				if (ctx?.hasUI) {
 					const prefix = editorTextBeforeVoice ? editorTextBeforeVoice + " " : "";
 					const isLocal = config.backend === "local";
+					const finalText = prefix + fullText;
 
 					if (isLocal) {
 						// Local backend (batch mode): no interim transcripts were sent to the editor,
 						// so we must always insert the final text. This is the ONLY place it arrives.
-						ctx.ui.setEditorText(prefix + fullText);
+						ctx.ui.setEditorText(finalText);
 					} else {
 						// Streaming backend: interim transcripts already updated the editor live.
 						// Only set final text if the editor still has content (user didn't hit Enter).
 						const currentEditorText = ctx.ui.getEditorText?.() ?? "";
 						if (currentEditorText.trim()) {
-							ctx.ui.setEditorText(prefix + fullText);
+							ctx.ui.setEditorText(finalText);
 						}
 					}
+
+					// v7.1.1 — auto-submit on STT (config.autoSubmitOnSpeak).
+					// When enabled, the transcribed text is sent to the
+					// agent immediately instead of sitting in the editor
+					// waiting for [enter]. Defaults OFF; user toggles via
+					// /voice-autosubmit or settings panel.
+					if (config.autoSubmitOnSpeak === true && finalText.trim().length > 0) {
+						// v7.2.3 — if the agent is currently mid-turn
+						// (especially mid-retry), DON'T auto-submit.
+						// followUp queueing during a retry pile-up
+						// makes the agent look like it's "looping" —
+						// each queued message gets processed only
+						// after the broken turn finishes. Better UX:
+						// keep transcribed text in the editor, notify
+						// the user, and let them press [enter]
+						// manually when ready.
+						if (agentBusy) {
+							voiceDebug("autoSubmitOnSpeak: agent busy — leaving text in editor");
+							try {
+								ctx.ui.notify(
+									"Agent is busy — voice text held in editor. Press [↵] to send when ready.",
+									"info",
+								);
+							} catch { /* notify may fail silently */ }
+							// Skip dispatch but DON'T early-return —
+							// the rest of the onDone handler still
+							// needs to run state cleanup
+							// (resetHoldState / setVoiceState("idle")).
+						} else {
+						// `sendUserMessage` lives on the `pi` ExtensionAPI
+						// surface, NOT on `ctx`. Always triggers a turn.
+						// `deliverAs: "followUp"` queues mid-stream
+						// messages instead of throwing "Agent is already
+						// processing".
+						//
+						// v7.2.2 (godspeed architect finding) — only
+						// clear the editor AFTER send confirms. If
+						// send rejects synchronously OR returns a
+						// rejected Promise, the user's dictated text
+						// stays visible so they can re-send.
+						const send = (pi as any).sendUserMessage as ((text: string, opts?: any) => unknown) | undefined;
+						if (typeof send === "function") {
+							voiceDebug("autoSubmitOnSpeak: dispatching", { len: finalText.length });
+							// godspeed architect finding — only clear if the
+							// editor STILL contains exactly the dispatched
+							// transcript. If the user typed more chars or
+							// edited it while send was pending, leave their
+							// edits alone.
+							const dispatchedText = finalText;
+							const clearAfterSuccess = () => {
+								try {
+									const cur = ctx?.ui.getEditorText?.() ?? "";
+									if (cur === dispatchedText) {
+										ctx?.ui.setEditorText("");
+									}
+								} catch { /* ui may be gone */ }
+								editorTextBeforeVoice = "";
+							};
+							try {
+								const r = send(finalText, { deliverAs: "followUp" });
+								if (r && typeof (r as Promise<unknown>).then === "function") {
+									(r as Promise<unknown>).then(clearAfterSuccess).catch((err) => {
+										voiceDebug("autoSubmitOnSpeak: sendUserMessage rejected", String(err));
+										// Editor stays populated — user can re-press [enter].
+									});
+								} else {
+									// Sync return (or undefined) — assume success.
+									clearAfterSuccess();
+								}
+							} catch (err) {
+								voiceDebug("autoSubmitOnSpeak: sendUserMessage threw sync", String(err));
+								// Editor stays populated.
+							}
+						} else {
+							voiceDebug("autoSubmitOnSpeak: pi.sendUserMessage not available on this Pi version");
+							ctx.ui.notify(
+								"Auto-submit ON but unavailable on this Pi version (need pi.sendUserMessage). " +
+								"Press [enter] to send, or update Pi.",
+								"warning",
+							);
+						}
+						} // end else (agent not busy)
+					}
+
 					const elapsed = ((Date.now() - recordingStart) / 1000).toFixed(1);
 					addToHistory(fullText, parseFloat(elapsed));
 				}
@@ -1342,6 +1586,34 @@ export default function (pi: ExtensionAPI) {
 		terminalInputUnsub = ctx.ui.onTerminalInput((data: string) => {
 			if (!config.enabled) return undefined;
 
+			// v7.1 §4 — escape priority routing for v7.1 widgets. When
+			// no overlay (panel/help/picker) is in front (those run
+			// inside ctx.ui.custom() and consume their own input), the
+			// fallthrough order is: install widget → playback indicator
+			// → editor. Most recent install wins precedence.
+			if (matchesKey(data, Key.escape)) {
+				if (activeInstallWidgets.size > 0) {
+					// Most recent install — Maps preserve insertion order.
+					const ids = Array.from(activeInstallWidgets.keys());
+					const lastId = ids[ids.length - 1]!;
+					const w = activeInstallWidgets.get(lastId);
+					if (w) { w.cancel(); return { consume: true }; }
+				}
+				if (activePlaybackIndicator) {
+					activePlaybackIndicator.stop();
+					return { consume: true };
+				}
+			}
+
+			// v7.1 §11 — F1 always opens help, regardless of context.
+			// `?` is intentionally NOT bound here because the user is
+			// in the editor and ? is a literal character. Help is
+			// reachable by F1 or /voice-help instead.
+			if (matchesKey(data, Key.f1) && ctx?.hasUI) {
+				openHelpOverlay(ctx as unknown as ExtensionCommandContext).catch(() => {});
+				return { consume: true };
+			}
+
 			// ── Track non-space keypresses for typing cooldown ──
 			// If user was just typing (non-space key within TYPING_COOLDOWN_MS),
 			// don't let space holds activate voice — they're just typing.
@@ -1460,7 +1732,7 @@ export default function (pi: ExtensionAPI) {
 							startPreRecording();
 
 							const alreadyElapsed = now - (spaceDownTime || now);
-							const remaining = Math.max(0, HOLD_THRESHOLD_MS - alreadyElapsed);
+							const remaining = Math.max(0, getHoldThresholdMs() - alreadyElapsed);
 
 							holdActivationTimer = setTimeout(() => {
 								holdActivationTimer = null;
@@ -1600,7 +1872,7 @@ export default function (pi: ExtensionAPI) {
 								spacePressCount = 0;
 								holdConfirmed = false;
 							}
-						}, HOLD_THRESHOLD_MS);
+						}, getHoldThresholdMs());
 
 						return { consume: true };
 					}
@@ -1628,7 +1900,7 @@ export default function (pi: ExtensionAPI) {
 							startPreRecording();
 
 							const alreadyElapsed = now - spaceDownTime;
-							const remaining = Math.max(0, HOLD_THRESHOLD_MS - alreadyElapsed);
+							const remaining = Math.max(0, getHoldThresholdMs() - alreadyElapsed);
 
 							holdActivationTimer = setTimeout(() => {
 								holdActivationTimer = null;
@@ -1843,6 +2115,13 @@ export default function (pi: ExtensionAPI) {
 		config = loaded.config;
 		configSource = loaded.source;
 
+		// v7.1.3 — version banner emitted to debug log on every session
+		// start. Lets users / support verify which extension build is
+		// actually loaded after a `pi install .` (path-installed
+		// extensions cache modules across `pi install` reinstalls — only
+		// a fresh `pi` process picks up source changes).
+		voiceDebug("pi-listen v7.1.3 loaded", { reason });
+
 		// Migration / setup runs on EVERY session_start, regardless of reason.
 		// Only the first-run notification is gated on isStartup.
 		if (config.onboarding.completed) {
@@ -1970,12 +2249,21 @@ export default function (pi: ExtensionAPI) {
 	let lastAutoSpeakAt = 0;
 	const AUTO_SPEAK_RATE_LIMIT_MS = 3000;
 
+	// v7.2.3 — track agent busy state so autoSubmit can skip dispatch
+	// when the agent is mid-turn (and especially mid-retry). Otherwise
+	// holding space during a "Retrying (n/3) in Xs..." cycle queues
+	// followUp messages that pile onto the failing turn — feels like
+	// the voice extension is "looping" because the agent never recovers.
+	let agentBusy = false;
+	pi.on("agent_start", async () => { agentBusy = true; });
+	pi.on("agent_end", async () => { agentBusy = false; });
+
 	pi.on("turn_end", async (event, _evtCtx) => {
 		if (!config.ttsEnabled || !config.ttsAutoSpeak) return;
 		const message = event?.message;
 		if (!message || message.role !== "assistant") return;
 		// Don't auto-speak while STT is hot — feedback loop hazard.
-		if (voiceState === "recording" || voiceState === "finalizing") return;
+		if (voiceState === "warmup" || voiceState === "recording" || voiceState === "finalizing") return;
 
 		// Rate limit: drop turn_end events that arrive within the cooldown.
 		const now = Date.now();
@@ -2155,7 +2443,7 @@ export default function (pi: ExtensionAPI) {
 				lines.push("  Config:");
 				lines.push(`    language:          ${config.language}`);
 				lines.push(`    onboarding:        ${config.onboarding.completed ? "complete" : "incomplete"}`);
-				lines.push(`    hold threshold:    ${HOLD_THRESHOLD_MS}ms`);
+				lines.push(`    hold threshold:    ${getHoldThresholdMs()}ms`);
 				lines.push(`    toggle shortcut:   ${resolvedToggleShortcut}`);
 				lines.push(`    kitty protocol:    ${kittyReleaseDetected ? "detected" : "not detected"}`);
 				lines.push(`    state:             ${voiceState}`);
@@ -2330,6 +2618,31 @@ export default function (pi: ExtensionAPI) {
 		handler: async (_args, cmdCtx) => openSettingsPanel(cmdCtx),
 	});
 
+	// ─── /voice-help → v7.1 §11 keyboard / command reference ────────────────
+
+	pi.registerCommand("voice-help", {
+		description: "Show pi-listen keyboard + command reference",
+		handler: async (_args, cmdCtx) => openHelpOverlay(cmdCtx),
+	});
+
+	async function openHelpOverlay(cmdCtx: ExtensionCommandContext): Promise<void> {
+		if (!cmdCtx.hasUI) {
+			cmdCtx.ui.notify(
+				"pi-listen: hold space=record · /voice-speak <text> · /voice-settings · /voice-help",
+				"info",
+			);
+			return;
+		}
+		const { HelpOverlay } = await import("./voice/ui-help-overlay");
+		await cmdCtx.ui.custom<void>(
+			(_tui, theme, _kb, done) => new HelpOverlay({ theme }, done),
+			{
+				overlay: true,
+				overlayOptions: { width: "70%", minWidth: 60, maxHeight: "80%", anchor: "center" },
+			},
+		);
+	}
+
 	// ─── Settings panel (shared handler) ────────────────────────────────────
 
 	async function openSettingsPanel(cmdCtx: ExtensionCommandContext, initialTab?: number) {
@@ -2392,36 +2705,20 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		// Post-close: handle the TTS install action triggered by selecting
-		// a not-yet-installed model in the Speak tab Model picker. Runs
-		// ensureTtsModelInstalled with progress notifications.
+		// a not-yet-installed model in the Speak tab Model picker.
+		// v7.1: surfaces progress through the new sticky install widget
+		// (`tts-install-progress.ts`) keyed by modelId so concurrent
+		// installs of different models coexist without slot collision.
 		if (result?.type === "tts-install" && result.modelId) {
 			const { ensureTtsModelInstalled, getTtsModel } = await import("./voice/tts-local-models");
 			const model = getTtsModel(result.modelId);
-			cmdCtx.ui.notify(`Installing TTS model ${model.name} (${model.size})…`, "info");
-			let lastPercent = -1;
+			// runInstallWithWidget rethrows on failure (Codex v6 #2) so
+			// callers like runSpeak can short-circuit. This call site is
+			// terminal — no further work — so swallow the rethrow after
+			// notifications were already emitted by the helper itself.
 			try {
-				await ensureTtsModelInstalled(result.modelId, {
-					onProgress: (info) => {
-						if (info.phase === "download" && info.totalBytes && info.bytes !== undefined) {
-							const pct = Math.floor((info.bytes / info.totalBytes) * 100);
-							// Notify every 10% to avoid notification spam.
-							if (pct >= lastPercent + 10) {
-								lastPercent = pct;
-								cmdCtx.ui.notify(`Downloading ${model.name}… ${pct}%`, "info");
-							}
-						} else if (info.phase === "extract") {
-							cmdCtx.ui.notify(`Extracting ${model.name}…`, "info");
-						} else if (info.phase === "verify") {
-							cmdCtx.ui.notify(`Verifying ${model.name}…`, "info");
-						}
-					},
-				});
-				cmdCtx.ui.notify(`${model.name} installed and ready.`, "info");
-			} catch (err: any) {
-				if (err?.name !== "AbortError") {
-					cmdCtx.ui.notify(`Install failed: ${err?.message ?? err}`, "error");
-				}
-			}
+				await runInstallWithWidget(cmdCtx, model.id, model.name, model.sizeBytes ?? 0, ensureTtsModelInstalled);
+			} catch { /* notify already emitted in runInstallWithWidget */ }
 			return;
 		}
 
@@ -2548,6 +2845,123 @@ export default function (pi: ExtensionAPI) {
 		return true;
 	}
 
+	/**
+	 * v7.1: run an install with the new sticky `TtsInstallProgressWidget`.
+	 * Replaces the v7.0.x notify-spam loop. Mounts a per-model-id slot
+	 * (`installWidgetKey(modelId)`) so two concurrent installs for
+	 * different models coexist without clobbering. The widget owns its
+	 * own AbortController (currently abort-only via cancel()); the
+	 * existing in-flight Map in `ensureTtsModelInstalled` serializes
+	 * same-id calls.
+	 */
+	async function runInstallWithWidget(
+		cmdCtx: ExtensionCommandContext | ExtensionContext,
+		modelId: string,
+		modelName: string,
+		totalBytesEstimate: number,
+		ensureTtsModelInstalled: (
+			id: string,
+			opts: { signal?: AbortSignal; onProgress?: (info: any) => void },
+		) => Promise<unknown>,
+		// godspeed architect finding: accept caller signal so
+		// /voice-speak-stop or TTS-disable propagates into the install.
+		// Caller's signal cascades: aborting it triggers our own
+		// AbortController and tears down the widget cleanly.
+		callerSignal?: AbortSignal,
+	): Promise<void> {
+		if (!cmdCtx.hasUI) {
+			// Headless / scripted mode — fall back to a single notify so
+			// users running pi without a TUI still get progress feedback.
+			cmdCtx.ui.notify(`Installing ${modelName}…`, "info");
+			try {
+				await ensureTtsModelInstalled(modelId, {});
+				cmdCtx.ui.notify(`${modelName} ready.`, "info");
+			} catch (err: any) {
+				// Codex v6.5: rethrow so callers like runSpeak short-
+				// circuit instead of proceeding with a model that
+				// isn't installed. Match the TUI branch's
+				// `__alreadyNotified` contract so the outer catch
+				// doesn't emit a duplicate notify.
+				if (err?.name === "AbortError") {
+					cmdCtx.ui.notify(`Install cancelled: ${modelName}`, "warning");
+				} else {
+					cmdCtx.ui.notify(`Install failed: ${err?.message ?? err}`, "error");
+				}
+				if (err && typeof err === "object") {
+					try { (err as any).__alreadyNotified = true; } catch { /* frozen errors */ }
+				}
+				throw err;
+			}
+			return;
+		}
+
+		const { registry, ticker } = getOrInitVoiceUi();
+		const controller = new AbortController();
+		// Cascade caller signal → controller. If runSpeak's activeSpeak
+		// signal aborts (user runs /voice-speak-stop or disables TTS),
+		// the install cancels too. Listener removed in finally.
+		let callerAbortListener: (() => void) | null = null;
+		if (callerSignal) {
+			if (callerSignal.aborted) {
+				try { controller.abort(); } catch {}
+			} else {
+				callerAbortListener = () => { try { controller.abort(); } catch {} };
+				callerSignal.addEventListener("abort", callerAbortListener);
+			}
+		}
+		const widget = new TtsInstallProgressWidget({
+			ui: cmdCtx.ui,
+			modelId,
+			modelName,
+			totalBytesEstimate,
+			registry,
+			ticker,
+			controller,
+		});
+		activeInstallWidgets.set(modelId, widget);
+		try {
+			await ensureTtsModelInstalled(modelId, {
+				signal: controller.signal,
+				onProgress: (info) => widget.onProgress(info),
+			});
+			// Widget self-disposes on phase=done; if ensure resolved
+			// without firing done (very unlikely), make sure cleanup
+			// runs anyway.
+			widget.dispose();
+			cmdCtx.ui.notify(`${modelName} ready.`, "info");
+		} catch (err: any) {
+			widget.dispose();
+			// Codex v6 finding #2: rethrow so the caller (e.g. runSpeak)
+			// can short-circuit instead of proceeding into speak() with
+			// a model that isn't installed. We notify once here with the
+			// install context; the rethrown error will be caught by the
+			// caller's outer try/catch but tagged with `__alreadyNotified`
+			// so the caller can skip its generic notify.
+			if (err?.name === "AbortError") {
+				cmdCtx.ui.notify(`Install cancelled: ${modelName}`, "warning");
+			} else {
+				cmdCtx.ui.notify(`Install failed: ${err?.message ?? err}`, "error");
+			}
+			if (err && typeof err === "object") {
+				try { (err as any).__alreadyNotified = true; } catch { /* frozen errors */ }
+			}
+			throw err;
+		} finally {
+			// Codex v6 finding #4: owner-checked delete so an older
+			// finally cannot evict a newer same-id widget. (The
+			// in-flight Map in ensureTtsModelInstalled already serializes
+			// same-id installs, but the side-table here doesn't piggy-
+			// back on that guarantee — defensive owner check.)
+			if (activeInstallWidgets.get(modelId) === widget) {
+				activeInstallWidgets.delete(modelId);
+			}
+			// Always remove the caller-signal listener.
+			if (callerAbortListener && callerSignal) {
+				try { callerSignal.removeEventListener("abort", callerAbortListener); } catch {}
+			}
+		}
+	}
+
 	async function runSpeak(cmdCtx: ExtensionCommandContext | ExtensionContext, text: string, opts: { forceEnabled?: boolean } = {}): Promise<void> {
 		// `forceEnabled` lets /voice-speak-test bypass the gate without
 		// mutating shared config. The previous mutate-snapshot-restore
@@ -2570,30 +2984,64 @@ export default function (pi: ExtensionAPI) {
 
 		try {
 			const { speak } = await import("./voice/speak");
-			const { getInstalledTtsModelDir, ensureTtsModelInstalled } = await import("./voice/tts-local-models");
+			const { getInstalledTtsModelDir, ensureTtsModelInstalled, getTtsModel } = await import("./voice/tts-local-models");
 
 			// On the local backend, fetch the model on-demand if missing.
-			// Deepgram backend skips this branch entirely.
+			// Deepgram backend skips this branch entirely. v7.1: surface
+			// progress through the sticky install widget instead of the
+			// v7.0.x notify-spam loop.
 			if ((config.ttsBackend ?? "local") === "local") {
 				const modelId = config.ttsLocalModel || "kitten-nano-en-v0_2";
 				try {
 					getInstalledTtsModelDir(modelId);
 				} catch {
-					cmdCtx.ui.notify(`Downloading TTS model ${modelId}…`, "info");
-					await ensureTtsModelInstalled(modelId, { signal: controller.signal });
-					cmdCtx.ui.notify(`TTS model ${modelId} ready.`, "info");
+					const model = getTtsModel(modelId);
+					await runInstallWithWidget(cmdCtx, modelId, model.name, model.sizeBytes ?? 0, ensureTtsModelInstalled, controller.signal);
 				}
 			}
 
-			await speak({
-				text,
-				config,
-				signal: controller.signal,
-				resolveModelDir: (id) => getInstalledTtsModelDir(id),
-			});
+			// v7.1: mount the honest playback indicator (§6 of plan).
+			// Spinner + state word with no fake amplitude meter. Until
+			// `speak()` exposes a phase callback (v7.2), the indicator
+			// stays on "playing" for the whole synth+play cycle —
+			// honest because audio IS in flight throughout. Disposed
+			// in finally regardless of success/abort/error. Tracked
+			// on `activePlaybackIndicator` so the [esc] router can
+			// stop playback when no install widget owns escape.
+			let indicator: TtsPlaybackIndicator | null = null;
+			if (cmdCtx.hasUI) {
+				const { registry, ticker } = getOrInitVoiceUi();
+				indicator = new TtsPlaybackIndicator({
+					ui: cmdCtx.ui,
+					registry,
+					ticker,
+					onStop: () => abortActiveSpeak(),
+				});
+				indicator.setState("playing");
+				activePlaybackIndicator = indicator;
+			}
+			try {
+				await speak({
+					text,
+					config,
+					signal: controller.signal,
+					resolveModelDir: (id) => getInstalledTtsModelDir(id),
+				});
+			} finally {
+				indicator?.setState("idle"); // self-disposes
+				// Owner-checked clear, mirroring runInstallWithWidget's
+				// Codex v6 #4 fix.
+				if (activePlaybackIndicator === indicator) activePlaybackIndicator = null;
+			}
 		} catch (err: any) {
 			if (err?.name === "AbortError") return;
-			cmdCtx.ui.notify(`Speak failed: ${err?.message ?? err}`, "error");
+			// If the install widget already notified the user with a
+			// scoped message ("Install failed: <model>"), don't emit a
+			// duplicate generic "Speak failed:" notify. The install
+			// widget's notify is more informative for that path.
+			if (!err?.__alreadyNotified) {
+				cmdCtx.ui.notify(`Speak failed: ${err?.message ?? err}`, "error");
+			}
 		} finally {
 			if (activeSpeak === controller) activeSpeak = null;
 		}
@@ -2609,6 +3057,64 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			await runSpeak(cmdCtx, text);
+		},
+	});
+
+	// v7.1.3 — toggle Deepgram WebSocket streaming TTS (cloud backend).
+	// When ON, /voice-speak uses wss://api.deepgram.com/v1/speak so audio
+	// frames stream into the local player as they arrive (sub-200ms
+	// TTFA in good network conditions). When OFF, the REST `/v1/speak`
+	// path returns a complete WAV.
+	pi.registerCommand("voice-stream", {
+		description: "Toggle Deepgram WebSocket streaming TTS (cloud)",
+		handler: async (args, cmdCtx) => {
+			ctx = cmdCtx;
+			const trimmed = (args || "").trim().toLowerCase();
+			let next: boolean;
+			if (trimmed === "on") next = true;
+			else if (trimmed === "off") next = false;
+			else next = !(config.ttsDeepgramStreaming === true);
+			config.ttsDeepgramStreaming = next;
+			saveConfig(config, config.scope === "project" ? "project" : "global", currentCwd);
+			cmdCtx.ui.notify(`Deepgram WebSocket streaming TTS: ${next ? "ON" : "OFF"}`, "info");
+		},
+	});
+
+	// v7.1.3 — tune the hold-to-talk activation delay.
+	pi.registerCommand("voice-hold-delay", {
+		description: "Set hold-to-talk delay in ms (200-3000, default 700)",
+		handler: async (args, cmdCtx) => {
+			ctx = cmdCtx;
+			const trimmed = (args || "").trim();
+			if (!trimmed) {
+				cmdCtx.ui.notify(`Hold delay: ${getHoldThresholdMs()}ms (default 700)`, "info");
+				return;
+			}
+			const ms = parseInt(trimmed, 10);
+			if (!Number.isFinite(ms) || ms < 200 || ms > 3000) {
+				cmdCtx.ui.notify(`Invalid value: ${trimmed}. Must be 200-3000 ms.`, "warning");
+				return;
+			}
+			(config as any).holdThresholdMs = ms;
+			saveConfig(config, config.scope === "project" ? "project" : "global", currentCwd);
+			cmdCtx.ui.notify(`Hold delay set to ${ms}ms.`, "info");
+		},
+	});
+
+	// v7.1.1 — toggle auto-submit on STT (sends transcribed text
+	// directly to the agent instead of just placing it in the editor).
+	pi.registerCommand("voice-autosubmit", {
+		description: "Toggle auto-submit on STT — sends spoken text to the agent immediately",
+		handler: async (args, cmdCtx) => {
+			ctx = cmdCtx;
+			const trimmed = (args || "").trim().toLowerCase();
+			let next: boolean;
+			if (trimmed === "on") next = true;
+			else if (trimmed === "off") next = false;
+			else next = !(config.autoSubmitOnSpeak === true);
+			config.autoSubmitOnSpeak = next;
+			saveConfig(config, config.scope === "project" ? "project" : "global", currentCwd);
+			cmdCtx.ui.notify(`Auto-submit on speak: ${next ? "ON" : "OFF"}`, "info");
 		},
 	});
 
@@ -2633,9 +3139,40 @@ export default function (pi: ExtensionAPI) {
 			saveConfig(config, config.scope === "project" ? "project" : "global", currentCwd);
 			if (!nowEnabling) abortActiveSpeak();
 			cmdCtx.ui.notify(`TTS ${nowEnabling ? "enabled" : "disabled"}.`, "info");
-			// First-time enable → show onboarding hint with smart-default
-			// recommendation. Subsequent toggles are silent.
-			if (nowEnabling) {
+			// First-time enable → v7.1 §9 rich onboarding overlay with
+			// three explicit actions (try / pick model / skip).
+			// Subsequent toggles are silent.
+			if (nowEnabling && !(config as any).ttsOnboardingShown && cmdCtx.hasUI) {
+				try {
+					const { detectDevice } = await import("./voice/device");
+					const { TtsOnboardingOverlay } = await import("./voice/tts-onboarding-overlay");
+					const device = detectDevice();
+					// §9: persist `ttsOnboardingShown = true` BEFORE any
+					// async work so a failed install/cancel never re-prompts.
+					(config as any).ttsOnboardingShown = true;
+					saveConfig(config, config.scope === "project" ? "project" : "global", currentCwd);
+
+					const result = await cmdCtx.ui.custom<import("./voice/tts-onboarding-overlay").OnboardingResult>(
+						(_tui, theme, _kb, done) => {
+							return new TtsOnboardingOverlay({ systemLocale: device.systemLocale, theme }, done);
+						},
+						{
+							overlay: true,
+							overlayOptions: { width: "70%", minWidth: 60, maxHeight: "60%", anchor: "center" },
+						},
+					);
+					if (result?.kind === "test") {
+						await runSpeak(cmdCtx, "The quick brown fox jumps over the lazy dog.", { forceEnabled: true });
+					} else if (result?.kind === "pickModel") {
+						// Open the settings panel directly on the Speak tab.
+						// Tab order is general/models/downloaded/speak/device → idx 3.
+						await openSettingsPanel(cmdCtx, 3);
+					}
+				} catch (err) {
+					voiceDebug("onboarding overlay threw", String(err));
+				}
+			} else if (nowEnabling && !cmdCtx.hasUI) {
+				// Headless mode — fall back to the v7.0 notify-based hint.
 				try {
 					const { detectDevice } = await import("./voice/device");
 					const { maybeShowTtsOnboarding } = await import("./voice/tts-onboarding");

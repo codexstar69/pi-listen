@@ -26,7 +26,7 @@
  *     the player but leaves cleanup to that finally.
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -171,6 +171,315 @@ export async function play(opts: PlayOpts): Promise<void> {
 	} finally {
 		cleanup();
 	}
+}
+
+// ─── v7.1.3 streaming playback ─────────────────────────────────────────────────
+
+/**
+ * Streaming playback sink. Synthesis writes PCM as it produces samples;
+ * the sink pipes them to a long-lived audio process (`sox` / `paplay`)
+ * so audio starts playing the moment the first chunk arrives. Drops
+ * file-write/open/start latency vs the file-based `play()` path.
+ *
+ * Supported writes: `Int16Array` mono samples at the configured
+ * `sampleRate`. Float32 inputs must be int16-converted by the caller —
+ * keeps this layer narrow and avoids per-write float→int conversions
+ * if the source already has int16 (e.g. Deepgram WS TTS).
+ *
+ * Lifecycle: `end()` flushes any buffered writes, then sends EOF to the
+ * player and resolves `done()` when playback finishes. `cancel()`
+ * kills the player immediately. Both are idempotent.
+ *
+ * Backpressure: `writePcm` returns a Promise that resolves once the
+ * data is accepted by Node's writable stream (immediately if the
+ * write returns true, or on `'drain'` if it returns false). Callers
+ * MUST await it to avoid unbounded memory growth and the "many
+ * once('drain')" race where multiple listeners fire on a single
+ * drain event before all writes have actually been buffered.
+ */
+export interface PlaybackStream {
+	writePcm(int16: Int16Array): Promise<void>;
+	end(): Promise<void>;
+	cancel(): void;
+	done(): Promise<void>;
+}
+
+export interface OpenPlaybackStreamOpts {
+	sampleRate: number;
+	signal?: AbortSignal;
+}
+
+/**
+ * Open a streaming playback sink. Returns `null` when no streaming-capable
+ * player is found on PATH — the caller should fall back to the file-based
+ * `play()` path. Player priority: `sox` (preferred — works on macOS via
+ * homebrew, Linux via apt/yum, ships with most pi-listen STT installs) →
+ * `paplay` (Linux PulseAudio) → null.
+ *
+ * Windows is intentionally unsupported here — PowerShell SoundPlayer
+ * can't accept piped PCM. Windows users get the file-based fallback.
+ */
+export function openPlaybackStream(opts: OpenPlaybackStreamOpts): PlaybackStream | null {
+	const { sampleRate, signal } = opts;
+	if (signal?.aborted) return null;
+	if (process.platform === "win32") return null;
+
+	const player = pickStreamingPlayer(sampleRate);
+	if (!player) return null;
+
+	let cancelled = false;
+	let ended = false;
+
+	const proc: ChildProcess = spawn(player.cmd, player.args, {
+		stdio: ["pipe", "ignore", "pipe"],
+		...(signal ? { signal } : {}),
+	});
+
+	// v7.1.3 diagnostic: append every byte-count + lifecycle event to a
+	// stable log path so production truncation issues can be diagnosed
+	// without re-running with PI_VOICE_DEBUG. Best-effort — silently
+	// drops if /tmp isn't writable.
+	const diagLog = (s: string) => {
+		try {
+			const fs2 = require("node:fs") as typeof import("node:fs");
+			fs2.appendFileSync("/tmp/pi-listen-stream.log", `[${new Date().toISOString()}] ${s}\n`);
+		} catch { /* best-effort */ }
+	};
+	diagLog(`opened ${player.cmd} sampleRate=${sampleRate} pid=${proc.pid}`);
+	let totalBytesAccepted = 0;
+	let totalWrites = 0;
+
+	let stderr = "";
+	const STDERR_CAP = 2048;
+	proc.stderr?.on("data", (d: Buffer) => {
+		if (stderr.length >= STDERR_CAP) return;
+		const headroom = STDERR_CAP - stderr.length;
+		const text = d.toString();
+		stderr += text.length > headroom ? text.slice(0, headroom) : text;
+	});
+
+	// Defensive: attach an internal handler to the donePromise so a
+	// cancel-then-not-await flow (caller throws before reaching
+	// `await stream.done()`) doesn't surface as an UnhandledPromiseRejection.
+	// The caller-facing `done()` returns the same promise; awaiters still
+	// see the rejection. (godspeed runtime/gemini-3.1-pro finding.)
+	const donePromise = attachSafetyCatch(new Promise<void>((resolve, reject) => {
+		let settled = false;
+		const settle = (action: () => void) => {
+			if (settled) return;
+			settled = true;
+			action();
+		};
+		proc.on("error", (err: NodeJS.ErrnoException) => {
+			settle(() => {
+				if (err.name === "AbortError" || signal?.aborted || cancelled) {
+					reject(makeAbortError());
+				} else {
+					reject(new Error(`Streaming player ${player.cmd} failed: ${err.message}`));
+				}
+			});
+		});
+		proc.on("close", (code, sig) => {
+			diagLog(`proc.close code=${code} sig=${sig} cancelled=${cancelled} aborted=${signal?.aborted}`);
+			settle(() => {
+				if (cancelled || signal?.aborted) {
+					reject(makeAbortError());
+				} else if (code === 0) {
+					resolve();
+				} else if (sig) {
+					reject(new Error(`Streaming player ${player.cmd} terminated by ${sig}`));
+				} else {
+					const tail = stderr.trim().slice(-200);
+					reject(new Error(`Streaming player ${player.cmd} exited with code ${code}${tail ? ` (${tail})` : ""}`));
+				}
+			});
+		});
+		// EPIPE if player exits before we finish writing — common when the
+		// user aborts; settled by 'close' above.
+		proc.stdin?.on("error", () => {});
+	}));
+
+	// Serialize writes via a chained promise. Each writePcm awaits the
+	// previous write's drain (if backpressured) before issuing the next
+	// stdin.write(). This is the only correct backpressure pattern for
+	// `once('drain')` — multiple listeners on the same event all fire
+	// simultaneously on the first drain, so Promise.all on independent
+	// drain promises resolves prematurely.
+	let writeTail: Promise<void> = Promise.resolve();
+
+	// v7.1.3 — chunked write to avoid sox-with-large-stdin-burst bug.
+	// When we pour a multi-MB Float32→Int16 PCM blob into sox stdin in
+	// one go, sox/CoreAudio appears to underrun mid-playback (consuming
+	// only the first ~64KB OS pipe buffer, exiting cleanly with code 0
+	// at ~1.5s in regardless of how much we queued). Splitting into
+	// CHUNK_BYTES-sized writes keeps sox fed in real time without
+	// overflowing — one chunk of audio per ~250ms of playback at
+	// 24kHz mono int16.
+	const CHUNK_BYTES = 12_000;     // ~250ms @ 24kHz, ~270ms @ 22kHz
+
+	const writeOne = async (view: Uint8Array): Promise<void> => {
+		if (!proc.stdin || proc.stdin.destroyed) {
+			diagLog(`writeOne: stdin destroyed, dropping ${view.byteLength} bytes`);
+			return;
+		}
+		totalWrites++;
+		totalBytesAccepted += view.byteLength;
+		diagLog(`writeOne[${totalWrites}]: ${view.byteLength} bytes (total ${totalBytesAccepted})`);
+
+		// Slice-and-write loop with backpressure awareness.
+		for (let off = 0; off < view.byteLength; off += CHUNK_BYTES) {
+			if (!proc.stdin || proc.stdin.destroyed) {
+				diagLog(`writeOne: stdin destroyed mid-chunk at offset ${off}`);
+				return;
+			}
+			const slice = view.subarray(off, Math.min(off + CHUNK_BYTES, view.byteLength));
+			const ok = proc.stdin.write(slice);
+			if (!ok) {
+				await new Promise<void>((res) => {
+					const stdin = proc.stdin!;
+					const cleanup = () => {
+						stdin.off("drain", onDrain);
+						stdin.off("close", onClose);
+						stdin.off("error", onError);
+					};
+					const onDrain = () => { cleanup(); res(); };
+					const onClose = () => { cleanup(); res(); };
+					const onError = () => { cleanup(); res(); };
+					stdin.once("drain", onDrain);
+					stdin.once("close", onClose);
+					stdin.once("error", onError);
+				});
+			}
+		}
+	};
+
+	return {
+		writePcm(int16: Int16Array): Promise<void> {
+			if (cancelled || ended) return Promise.resolve();
+			const view = new Uint8Array(int16.buffer, int16.byteOffset, int16.byteLength);
+			// Chain: caller can either await this OR fire-and-forget; if
+			// they fire-and-forget, end() awaits the same tail.
+			writeTail = writeTail.then(() => writeOne(view)).catch(() => { /* EPIPE ok */ });
+			return writeTail;
+		},
+		async end(): Promise<void> {
+			if (ended) return;
+			ended = true;
+			diagLog(`end() called — awaiting ${totalWrites} writes (${totalBytesAccepted} bytes)`);
+			// Drain all pending writes before signaling EOF.
+			try { await writeTail; } catch { /* swallowed */ }
+			// Sox closes the audio device immediately on EOF, dropping
+			// any audio still in the OS hardware buffer (~1-2s on macOS
+			// CoreAudio). Append a tail of silence so the trailing real
+			// audio is fully flushed before sox tears down the device.
+			// 1.0 sec at sampleRate samples = sampleRate * 2 bytes.
+			const SILENCE_TAIL_SECS = 1;
+			const silence = new Int16Array(sampleRate * SILENCE_TAIL_SECS);
+			try {
+				await writeOne(new Uint8Array(silence.buffer, silence.byteOffset, silence.byteLength));
+			} catch { /* EPIPE ok */ }
+			diagLog(`end() — silence tail written, calling stdin.end()`);
+			try { proc.stdin?.end(); } catch { /* already closed */ }
+		},
+		cancel(): void {
+			if (cancelled) return;
+			cancelled = true;
+			diagLog(`cancel() called after ${totalWrites} writes (${totalBytesAccepted} bytes)`);
+			try { proc.stdin?.destroy(); } catch {}
+			try { proc.kill("SIGTERM"); } catch {}
+		},
+		done(): Promise<void> {
+			return donePromise;
+		},
+	};
+}
+
+/** Internal: prevent unhandled rejection when the caller never awaits done(). */
+function attachSafetyCatch<T>(p: Promise<T>): Promise<T> {
+	p.catch(() => { /* swallow — real awaiters see the rejection */ });
+	return p;
+}
+
+interface StreamingPlayerSpec { cmd: string; args: string[]; }
+
+function pickStreamingPlayer(sampleRate: number): StreamingPlayerSpec | null {
+	// v7.1.3 — ffplay is the most-reliable streaming PCM consumer on
+	// macOS: it's designed for real-time piped audio and doesn't suffer
+	// the sox-with-CoreAudio underrun where sox exits cleanly after
+	// playing only the first ~1.5s of a multi-MB stdin write. Prefer
+	// ffplay when present; fall back to paplay (Linux) or sox.
+	if (binaryAvailable("ffplay")) {
+		return {
+			cmd: "ffplay",
+			args: [
+				"-nodisp",            // no video window
+				"-autoexit",          // exit when input EOFs
+				"-loglevel", "quiet",
+				"-f", "s16le",
+				"-ar", String(sampleRate),
+				"-ch_layout", "mono", // ffmpeg 8+ uses ch_layout instead of -ac
+				"-i", "pipe:0",
+			],
+		};
+	}
+	// paplay (Linux PulseAudio / PipeWire-pulse): pipe PCM via stdin.
+	if (process.platform === "linux" && binaryAvailable("paplay")) {
+		return {
+			cmd: "paplay",
+			args: [
+				"--raw",
+				`--rate=${sampleRate}`,
+				"--format=s16le",
+				"--channels=1",
+				"--client-name=pi-listen",
+			],
+		};
+	}
+	// sox last-resort: cross-platform but has the macOS CoreAudio
+	// underrun issue noted above. Used when ffplay/paplay missing.
+	if (binaryAvailable("sox")) {
+		return {
+			cmd: "sox",
+			args: [
+				"-t", "raw",
+				"-r", String(sampleRate),
+				"-e", "signed-integer",
+				"-b", "16",
+				"-c", "1",
+				"-q",
+				"-",
+				"-d",
+			],
+		};
+	}
+	return null;
+}
+
+const _binaryCache = new Map<string, boolean>();
+function binaryAvailable(cmd: string): boolean {
+	const cached = _binaryCache.get(cmd);
+	if (cached !== undefined) return cached;
+	try {
+		const r = spawnSync(cmd, ["--version"], { stdio: "ignore" });
+		const ok = r.status === 0 || r.status === 1; // some tools return 1 for --version
+		_binaryCache.set(cmd, ok);
+		return ok;
+	} catch {
+		_binaryCache.set(cmd, false);
+		return false;
+	}
+}
+
+/** Helper — convert Float32 [-1, 1] PCM to Int16 with NaN guard + clamp. */
+export function float32ToInt16(samples: Float32Array): Int16Array {
+	const out = new Int16Array(samples.length);
+	for (let i = 0; i < samples.length; i++) {
+		const raw = samples[i]!;
+		const finite = Number.isFinite(raw) ? raw : 0;
+		const s = Math.max(-1, Math.min(1, finite));
+		out[i] = s < 0 ? Math.round(s * 0x8000) : Math.round(s * 0x7fff);
+	}
+	return out;
 }
 
 // ─── Player selection ─────────────────────────────────────────────────────────

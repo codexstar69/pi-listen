@@ -173,7 +173,42 @@ export function prepareForSpeech(input: string, opts: PrepareForSpeechOpts = {})
 	//     "use `useState`" → "use useState".
 	text = text.replace(/`([^`\n]+)`/g, "$1");
 
-	// 12. Collapse whitespace runs. Keep paragraph breaks (double newline)
+	// 11a. v7.1.3 — text normalization (TN). Compact local TTS engines
+	//      (Kitten/Piper) read raw "Dr." as letters and bare numbers
+	//      digit-by-digit. Expand the highest-value patterns:
+	//      - common English abbreviations / titles
+	//      - bare cardinal numbers up to a few digits
+	//      Locale-aware long-form (Microsoft Recognizers-Text style)
+	//      is out of scope; this is the deterministic ~30-pattern pass
+	//      that catches 80% of CLI assistant output gripes.
+	text = expandAbbreviations(text);
+	text = expandSimpleNumbers(text);
+
+	// 12. v7.1.3 — strip emojis and pictographs. The TTS engines either
+	//     read them as literal "smiling face with smiling eyes" (espeak
+	//     fallback) or skip+space+resume in a way that breaks prosody.
+	//     Using Unicode property `Extended_Pictographic` covers the
+	//     full emoji set including skin-tone variants. Variation
+	//     Selector-16 (U+FE0F) often follows pictographs to force emoji
+	//     presentation; remove it too.
+	text = text.replace(/[\p{Extended_Pictographic}\u{FE0F}\u{200D}]/gu, "");
+
+	// 13. Strip leftover decorative chars that have no spoken equivalent:
+	//     - U+2500-257F box drawing
+	//     - U+2580-259F block elements
+	//     - U+25A0-25FF geometric shapes
+	//     - U+2600-26FF misc symbols (✓✗★, weather, etc.)
+	//     - U+2700-27BF dingbats (✂✈✏…)
+	//     - U+2190-21FF arrows (→←↑↓⇒)
+	//     - U+2300-23FF technical (⌘⌥⏎)
+	text = text.replace(/[←-⇿⌀-⏿─-╿▀-▟■-◿☀-⛿✀-➿]/g, "");
+
+	// 14. Collapse runs of repeated punctuation. "!!!" / "..." / "???"
+	//     read as comically long pauses. Reduce to a single mark.
+	text = text.replace(/([!?.])\1{2,}/g, "$1");
+	text = text.replace(/-{3,}/g, " ");
+
+	// 15. Collapse whitespace runs. Keep paragraph breaks (double newline)
 	//     because the segmenter uses them; everything else becomes a
 	//     single space.
 	text = text.replace(/[ \t]+/g, " ");
@@ -196,6 +231,91 @@ export function prepareForSpeech(input: string, opts: PrepareForSpeechOpts = {})
 	}
 
 	return { skipped: false, text, stats };
+}
+
+// ─── Text normalization helpers (v7.1.3) ──────────────────────────────────────
+
+/**
+ * Common English abbreviations, in regex+replacement form. Word-boundary
+ * matched so "Dr." → "Doctor" but "Dropout" stays unchanged. Order matters:
+ * longer patterns must precede prefixes that would partially match them.
+ */
+const ABBREV_RULES: ReadonlyArray<readonly [RegExp, string]> = [
+	[/\bDr\./g, "Doctor"],
+	[/\bMr\./g, "Mister"],
+	[/\bMrs\./g, "Misses"],
+	[/\bMs\./g, "Miss"],
+	[/\bSt\./g, "Saint"],
+	[/\bProf\./g, "Professor"],
+	[/\bSr\./g, "Senior"],
+	[/\bJr\./g, "Junior"],
+	[/\bvs\./g, "versus"],
+	[/\bi\.e\./gi, "that is"],
+	[/\be\.g\./gi, "for example"],
+	[/\betc\./gi, "et cetera"],
+	[/\bapprox\./gi, "approximately"],
+	[/\bvol\./gi, "volume"],
+	[/\bch\./gi, "chapter"],
+	[/\bp\.s\./gi, "P S"],
+	[/\bU\.S\./g, "U S"],
+	[/\bU\.K\./g, "U K"],
+	[/\bE\.U\./g, "E U"],
+	// CLI / dev terms commonly read poorly
+	[/\bAPI\b/g, "A P I"],
+	[/\bCLI\b/g, "C L I"],
+	[/\bURL\b/g, "U R L"],
+	[/\bHTTP\b/g, "H T T P"],
+	[/\bHTTPS\b/g, "H T T P S"],
+	[/\bSQL\b/g, "S Q L"],
+	[/\bJSON\b/g, "JAY-son"],
+	[/\bYAML\b/g, "YAH-mul"],
+	[/\bCSS\b/g, "C S S"],
+	[/\bHTML\b/g, "H T M L"],
+];
+
+export function expandAbbreviations(text: string): string {
+	let out = text;
+	for (const [re, rep] of ABBREV_RULES) out = out.replace(re, rep);
+	return out;
+}
+
+const ONES = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"];
+const TEENS = ["ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"];
+const TENS = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"];
+
+function numberToWords(n: number): string {
+	if (n < 0 || n > 9_999_999 || !Number.isInteger(n)) return String(n);
+	if (n === 0) return "zero";
+	const parts: string[] = [];
+	if (n >= 1_000_000) { parts.push(numberToWords(Math.floor(n / 1_000_000)), "million"); n %= 1_000_000; }
+	if (n >= 1_000) { parts.push(numberToWords(Math.floor(n / 1_000)), "thousand"); n %= 1_000; }
+	if (n >= 100) { parts.push(ONES[Math.floor(n / 100)]!, "hundred"); n %= 100; }
+	if (n >= 20) { parts.push(TENS[Math.floor(n / 10)]!); n %= 10; if (n > 0) parts[parts.length - 1] += "-" + ONES[n]!; n = 0; }
+	if (n >= 10) parts.push(TEENS[n - 10]!);
+	else if (n > 0) parts.push(ONES[n]!);
+	return parts.join(" ");
+}
+
+/**
+ * Expand bare cardinal numbers (1..9_999_999) to words. Skips:
+ *   - numbers attached to letters (`v2`, `5k`, `100ms`) — version/unit
+ *     suffixes read fine as-is
+ *   - decimals (`3.14`) — engines handle these reasonably
+ *   - years between 1900-2099 (left as digits — engines say "twenty
+ *     twenty-six" naturally for `2026`)
+ *   - hex-like tokens (`0xFF`)
+ */
+export function expandSimpleNumbers(text: string): string {
+	// Negative lookbehind: reject digits that are part of a version/decimal
+	// (`v1.2`, `3.14`) or a word (`v2`, `5k`).
+	// Negative lookahead: reject digits followed by a word char (`100ms`)
+	// or by `.<digit>` (decimal/version) but ALLOW sentence-ending `.`.
+	return text.replace(/(?<![\w.])(\d{1,7})(?![\w]|\.\d)/g, (match, digits: string) => {
+		const n = parseInt(digits, 10);
+		// Years pass through unchanged — TTS engines handle them well.
+		if (digits.length === 4 && n >= 1900 && n <= 2099) return match;
+		return numberToWords(n);
+	});
 }
 
 /**

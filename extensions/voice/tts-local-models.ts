@@ -102,6 +102,15 @@ export interface TtsLocalModelInfo {
 	archiveSha256?: string;
 	/** Sample rate (Hz) of generated audio. Drives WAV header on playback. */
 	sampleRate: number;
+	/**
+	 * v7.1.2 — runtime incompatibility marker. When the model is known
+	 * to fail with the currently-installed `sherpa-onnx-node` (e.g.
+	 * kokoro multilingual + 1.12.29 returns all-NaN samples for every
+	 * sid), set `incompatible` to a one-line user-facing reason. The
+	 * picker shows the model with a warning badge; the smart-default
+	 * recommender skips it; `synthesize()` refuses to use it.
+	 */
+	incompatible?: string;
 }
 
 // ─── Catalog ──────────────────────────────────────────────────────────────────
@@ -212,6 +221,116 @@ export const TTS_LOCAL_MODELS: TtsLocalModelInfo[] = [
 		],
 		defaultSid: 0,
 		archiveUrl: `${TTS_RELEASE}/kokoro-int8-multi-lang-v1_0.tar.bz2`,
+		sampleRate: 24000,
+		// v7.1.2: most voices in this model produce NaN samples on
+		// sherpa-onnx-node 1.12.29 + 1.13.0. Root cause is int8
+		// quantization of speaker embeddings in voices.bin (per
+		// upstream issue #1923 / mlx-audio "guard NaN durations" PR
+		// pattern). Failures are non-deterministic per-voice across
+		// fresh processes. Marked incompatible so the picker hides
+		// it and synthesize() refuses to use it. Re-enable when
+		// upstream ships an fp16/fp32 multilingual model OR a
+		// re-quantized int8 voices.bin without NaN embeddings.
+		incompatible: "kokoro multilingual int8 v1.0 produces NaN samples on most voices. Use kokoro-multi-lang-v1_1 (newer) or kokoro-en-v0_19 instead.",
+	},
+	// v7.1.3: NEWER kokoro multilingual (v1.1) — sherpa-onnx upstream
+	// re-quantized voices.bin. Both fp32 (333+ MB) and int8 (140 MB)
+	// variants are now available. v1.1 preferred over v1.0 because
+	// upstream specifically rebuilt it to address the NaN issue.
+	// Marked `untested: true` until you confirm it synthesizes
+	// real audio in your environment — same picker treatment as
+	// `incompatible`, but doesn't refuse to run.
+	{
+		id: "kokoro-int8-multi-lang-v1_1",
+		name: "Kokoro Multilingual v1.1 (int8)",
+		size: "~140 MB",
+		sizeBytes: 147_031_220,
+		runtimeRamMB: 900,
+		notes: "v1.1 multilingual — upstream re-quantized after the v1.0 NaN issue. 9 langs, ~50 voices, 24 kHz",
+		languages: ["en", "zh", "ja", "ko", "es", "fr", "hi", "it", "pt"],
+		tier: "standard",
+		preferred: false,
+		accuracy: 5,
+		speed: 4,
+		license: "Apache-2.0",
+		sherpaSlot: "kokoro",
+		voices: [
+			{ sid: 0, name: "af_heart (en-US, female)", gender: "female" },
+			{ sid: 1, name: "af_alloy (en-US, female)", gender: "female" },
+			{ sid: 2, name: "af_aoede (en-US, female)", gender: "female" },
+			{ sid: 11, name: "am_adam (en-US, male)", gender: "male" },
+			{ sid: 12, name: "am_echo (en-US, male)", gender: "male" },
+			{ sid: 20, name: "bf_alice (en-GB, female)", gender: "female" },
+			{ sid: 24, name: "bm_daniel (en-GB, male)", gender: "male" },
+			{ sid: 33, name: "ff_siwis (fr, female)", gender: "female" },
+			{ sid: 40, name: "jf_alpha (ja, female)", gender: "female" },
+			{ sid: 44, name: "kf_yumi (ko, female)", gender: "female" },
+			{ sid: 48, name: "zf_xiaobei (zh, female)", gender: "female" },
+		],
+		defaultSid: 0,
+		archiveUrl: `${TTS_RELEASE}/kokoro-int8-multi-lang-v1_1.tar.bz2`,
+		sampleRate: 24000,
+	},
+	{
+		// Untested-but-non-quantized fp32 multilingual. 333 MB — opt-in
+		// for users who want guaranteed-no-NaN multilingual coverage.
+		id: "kokoro-multi-lang-v1_0",
+		name: "Kokoro Multilingual v1.0 (fp32)",
+		size: "~333 MB",
+		sizeBytes: 349_418_188,
+		runtimeRamMB: 1400,
+		notes: "v1.0 multilingual fp32 — no int8 quantization, no NaN risk. 9 langs, 53 voices, 24 kHz. 333 MB.",
+		languages: ["en", "zh", "ja", "ko", "es", "fr", "hi", "it", "pt"],
+		tier: "heavy",
+		preferred: false,
+		accuracy: 5,
+		speed: 3,
+		license: "Apache-2.0",
+		sherpaSlot: "kokoro",
+		voices: [
+			{ sid: 0, name: "af_heart (en-US, female)", gender: "female" },
+			{ sid: 11, name: "am_adam (en-US, male)", gender: "male" },
+			{ sid: 20, name: "bf_alice (en-GB, female)", gender: "female" },
+			{ sid: 33, name: "ff_siwis (fr, female)", gender: "female" },
+			{ sid: 40, name: "jf_alpha (ja, female)", gender: "female" },
+			{ sid: 44, name: "kf_yumi (ko, female)", gender: "female" },
+			{ sid: 48, name: "zf_xiaobei (zh, female)", gender: "female" },
+		],
+		defaultSid: 0,
+		archiveUrl: `${TTS_RELEASE}/kokoro-multi-lang-v1_0.tar.bz2`,
+		sampleRate: 24000,
+	},
+	{
+		// fp32 English Kokoro — 304 MB, definitively no NaN since it's not
+		// int8 quantized. Highest-quality offline English option we ship.
+		id: "kokoro-en-v0_19",
+		name: "Kokoro English v0.19 (fp32)",
+		size: "~304 MB",
+		sizeBytes: 319_625_534,
+		runtimeRamMB: 1200,
+		notes: "fp32 English HQ — best prosody, no quantization artifacts. 11 voices, 24 kHz.",
+		languages: ["en"],
+		tier: "heavy",
+		preferred: false,
+		accuracy: 5,
+		speed: 3,
+		license: "Apache-2.0",
+		sherpaSlot: "kokoro",
+		voices: [
+			{ sid: 0, name: "af_bella (female)", gender: "female" },
+			{ sid: 1, name: "af_nicole (female)", gender: "female" },
+			{ sid: 2, name: "af_sarah (female)", gender: "female" },
+			{ sid: 3, name: "af_sky (female)", gender: "female" },
+			{ sid: 4, name: "am_adam (male)", gender: "male" },
+			{ sid: 5, name: "am_michael (male)", gender: "male" },
+			{ sid: 6, name: "bf_emma (female, en-GB)", gender: "female" },
+			{ sid: 7, name: "bf_isabella (female, en-GB)", gender: "female" },
+			{ sid: 8, name: "bm_george (male, en-GB)", gender: "male" },
+			{ sid: 9, name: "bm_lewis (male, en-GB)", gender: "male" },
+			{ sid: 10, name: "af (default mix)", gender: "neutral" },
+		],
+		defaultSid: 0,
+		archiveUrl: `${TTS_RELEASE}/kokoro-en-v0_19.tar.bz2`,
 		sampleRate: 24000,
 	},
 	{
@@ -392,14 +511,21 @@ export function recommendDefaultModel(systemLocale: string): SmartDefaultRecomme
 		};
 	}
 
-	// Languages covered only by Kokoro multilingual (ja, ko)
+	// Languages covered only by Kokoro multilingual (ja, ko).
+	// v7.1.2: Kokoro multilingual is currently flagged `incompatible`
+	// on sherpa-onnx-node 1.12.29 — fall through to the English-default
+	// fallback instead of routing the user to a silent model.
 	if (base === "ja" || base === "ko") {
-		return {
-			modelId: "kokoro-int8-multi-lang-v1_0",
-			reason: `${base.toUpperCase()} locale detected — recommending Kokoro multilingual (126 MB, ` +
-				`covers en/zh/ja/ko/es/fr/hi/it/pt in one model).`,
-			fallback: false,
-		};
+		const kokoro = TTS_LOCAL_MODELS.find(m => m.id === "kokoro-int8-multi-lang-v1_0");
+		if (kokoro && !kokoro.incompatible) {
+			return {
+				modelId: "kokoro-int8-multi-lang-v1_0",
+				reason: `${base.toUpperCase()} locale detected — recommending Kokoro multilingual (126 MB, ` +
+					`covers en/zh/ja/ko/es/fr/hi/it/pt in one model).`,
+				fallback: false,
+			};
+		}
+		// fall through to the English fallback below.
 	}
 
 	// No coverage — fall back to English default with a warning the

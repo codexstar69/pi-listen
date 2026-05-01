@@ -1,6 +1,6 @@
 {
   "name": "@codexstar/pi-listen",
-  "version": "7.0.1",
+  "version": "7.2.0",
   "description": "Voice in + voice out for Pi CLI — hold-to-talk STT (Deepgram or 19 offline models) plus TTS (Kitten Nano, Piper, Kokoro, or Deepgram Aura)",
   "type": "module",
   "keywords": [
@@ -69,6 +69,6 @@
     "package.json"
   ],
   "optionalDependencies": {
-    "sherpa-onnx-node": "^1.12.29"
+    "sherpa-onnx-node": "^1.13.0"
   }
 }

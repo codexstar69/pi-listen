@@ -74,7 +74,30 @@ async function doLoadSherpa(): Promise<boolean> {
 		// The native .node binary uses $ORIGIN/@loader_path to find sibling .so/.dylib files,
 		// so library resolution works without env var manipulation.
 
-		sherpaModule = await import("sherpa-onnx-node");
+		// CJS-vs-ESM interop. sherpa-onnx-node ships as CommonJS with
+		// `module.exports = { OfflineTts, OfflineRecognizer, ... }`.
+		// Three runtimes return three different shapes:
+		//
+		//   - Bun: namespace exposes all symbols at top-level (works directly).
+		//   - Node native: top-level is empty, full module on `.default`.
+		//   - jiti (Pi's loader): top-level has STUB classes (e.g.
+		//     `OfflineTts` is a function) but their static methods (like
+		//     `OfflineTts.createAsync`) are MISSING. The real, fully-
+		//     populated module sits on `.default`. This is the failure
+		//     mode reported as "sherpa.OfflineTts.createAsync is not a
+		//     function" on first /voice-speak.
+		//
+		// We sniff for `createAsync` specifically because that's the
+		// thing the TTS engine needs. If the top-level OfflineTts has
+		// it, the namespace is fully-populated (Bun); otherwise prefer
+		// `.default` when it carries createAsync; final fallback is the
+		// namespace as-is so future runtime variants degrade gracefully.
+		const ns = await import("sherpa-onnx-node");
+		const top = ns as any;
+		const def = (ns as any).default;
+		const topHasCreateAsync = typeof top?.OfflineTts?.createAsync === "function";
+		const defHasCreateAsync = typeof def?.OfflineTts?.createAsync === "function";
+		sherpaModule = topHasCreateAsync ? top : (defHasCreateAsync ? def : top);
 		sherpaInitialized = true;
 		return true;
 	} catch (err: any) {

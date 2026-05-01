@@ -25,14 +25,21 @@ describe("recommendDefaultModel — smart-default selector", () => {
 		expect(r.modelId).toBe("piper-fr_FR-siwis-medium-int8");
 	});
 
-	test("Japanese locale → Kokoro multilingual (no Piper coverage)", () => {
+	test("Japanese locale → English fallback while Kokoro is flagged incompatible", () => {
+		// v7.1.2: Kokoro multilingual is `incompatible` on sherpa-onnx-node
+		// 1.12.29 (returns NaN samples). The recommender skips it and falls
+		// back to the English default rather than routing users to a silent
+		// model. Once upstream fixes voices.bin and we drop the flag, this
+		// should expect "kokoro-int8-multi-lang-v1_0" again.
 		const r = recommendDefaultModel("ja-JP");
-		expect(r.modelId).toBe("kokoro-int8-multi-lang-v1_0");
+		expect(r.modelId).toBe("kitten-nano-en-v0_2");
+		expect(r.fallback).toBe(true);
 	});
 
-	test("Korean locale → Kokoro multilingual", () => {
+	test("Korean locale → English fallback while Kokoro is flagged incompatible", () => {
 		const r = recommendDefaultModel("ko-KR");
-		expect(r.modelId).toBe("kokoro-int8-multi-lang-v1_0");
+		expect(r.modelId).toBe("kitten-nano-en-v0_2");
+		expect(r.fallback).toBe(true);
 	});
 
 	test("Portuguese locale → pt-BR Piper (catalog has no pt-PT)", () => {

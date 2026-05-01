@@ -65,10 +65,25 @@ export interface VoiceConfig {
 	ttsSpeed?: number;
 	/**
 	 * If true, the agent's responses are spoken automatically after each
-	 * turn. v6.0 ships with this defaulting OFF; manual /voice-speak is
-	 * the primary entry point. Auto-speak hook in v6.1.
+	 * turn. v7.1.1: defaults to true so users get audio responses out of
+	 * the box once TTS is enabled — disable via /voice-settings or
+	 * `voice.ttsAutoSpeak = false` in settings.json.
 	 */
 	ttsAutoSpeak?: boolean;
+	/**
+	 * v7.1.1: If true, an STT transcription is automatically submitted to
+	 * the agent (turn triggered) instead of just being placed in the
+	 * editor. The user-spoken text bypasses the manual `[enter]` step.
+	 * Defaults to false — preserves the v7.0.x behavior so existing
+	 * users aren't surprised.
+	 */
+	autoSubmitOnSpeak?: boolean;
+	/**
+	 * v7.1.3: hold-to-talk activation delay in milliseconds. Range
+	 * [200, 3000]. Default 700ms — snappy without being trigger-happy.
+	 * Override via `/voice-hold-delay <ms>` or settings.json.
+	 */
+	holdThresholdMs?: number;
 	/**
 	 * BCP-47 language tag for TTS (overrides `language`). Useful when
 	 * STT and TTS should use different languages — e.g. user dictates in
@@ -117,7 +132,9 @@ export const DEFAULT_CONFIG: VoiceConfig = {
 	ttsLocalVoiceId: 0,
 	ttsDeepgramVoiceId: "aura-asteria-en",
 	ttsSpeed: 1.0,
-	ttsAutoSpeak: false,
+	ttsAutoSpeak: true,
+	autoSubmitOnSpeak: false,
+	holdThresholdMs: 700,
 	ttsLanguage: undefined,
 	ttsDeepgramStreaming: false,
 	ttsOnboardingShown: false,
@@ -200,6 +217,15 @@ function migrateConfig(rawVoice: any, source: VoiceConfigSource): VoiceConfig {
 			? Math.max(0.5, Math.min(2.0, rawVoice.ttsSpeed))
 			: DEFAULT_CONFIG.ttsSpeed,
 		ttsAutoSpeak: typeof rawVoice.ttsAutoSpeak === "boolean" ? rawVoice.ttsAutoSpeak : DEFAULT_CONFIG.ttsAutoSpeak,
+		autoSubmitOnSpeak: typeof rawVoice.autoSubmitOnSpeak === "boolean"
+			? rawVoice.autoSubmitOnSpeak
+			: DEFAULT_CONFIG.autoSubmitOnSpeak,
+		holdThresholdMs: typeof rawVoice.holdThresholdMs === "number"
+			&& Number.isFinite(rawVoice.holdThresholdMs)
+			&& rawVoice.holdThresholdMs >= 200
+			&& rawVoice.holdThresholdMs <= 3000
+			? rawVoice.holdThresholdMs
+			: DEFAULT_CONFIG.holdThresholdMs,
 		ttsLanguage: typeof rawVoice.ttsLanguage === "string" && rawVoice.ttsLanguage
 			? rawVoice.ttsLanguage
 			: undefined,
