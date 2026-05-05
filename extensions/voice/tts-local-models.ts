@@ -270,6 +270,15 @@ export const TTS_LOCAL_MODELS: TtsLocalModelInfo[] = [
 		defaultSid: 0,
 		archiveUrl: `${TTS_RELEASE}/kokoro-int8-multi-lang-v1_1.tar.bz2`,
 		sampleRate: 24000,
+		// v7.x runtime confirmation (2026-05-05): on M-series Apple Silicon
+		// + sherpa-onnx-node 1.13.0, kokoro-int8-multi-lang-v1_1 sid=0
+		// produces NaN samples just like v1.0. Same upstream root cause
+		// (int8 quantization of speaker embeddings in voices.bin). Mark
+		// incompatible so the picker hides it and synthesize() refuses
+		// instead of letting users hear silence-as-19-seconds-of-audio.
+		// Use kokoro-multi-lang-v1_1 fp32 (the un-quantized variant
+		// shipped alongside) or kokoro-en-v0_19 as English-only fallback.
+		incompatible: "kokoro multilingual int8 v1.1 also produces NaN samples on sherpa-onnx-node 1.13. Use kokoro-multi-lang-v1_1 (fp32) or kokoro-en-v0_19 instead.",
 	},
 	{
 		// Untested-but-non-quantized fp32 multilingual. 333 MB — opt-in
@@ -279,10 +288,14 @@ export const TTS_LOCAL_MODELS: TtsLocalModelInfo[] = [
 		size: "~333 MB",
 		sizeBytes: 349_418_188,
 		runtimeRamMB: 1400,
-		notes: "v1.0 multilingual fp32 — no int8 quantization, no NaN risk. 9 langs, 53 voices, 24 kHz. 333 MB.",
+		notes: "Recommended highest-quality multilingual. fp32 — NaN-safe. 9 langs, 53 voices, 24 kHz.",
 		languages: ["en", "zh", "ja", "ko", "es", "fr", "hi", "it", "pt"],
 		tier: "heavy",
-		preferred: false,
+		// Round-6 (user request "best of best"): both int8 variants of
+		// Kokoro multilingual now produce NaN samples on sherpa-onnx-node
+		// 1.13. The fp32 build is the only working multilingual option,
+		// so promote it to preferred so the picker recommends it.
+		preferred: true,
 		accuracy: 5,
 		speed: 3,
 		license: "Apache-2.0",
@@ -308,10 +321,11 @@ export const TTS_LOCAL_MODELS: TtsLocalModelInfo[] = [
 		size: "~304 MB",
 		sizeBytes: 319_625_534,
 		runtimeRamMB: 1200,
-		notes: "fp32 English HQ — best prosody, no quantization artifacts. 11 voices, 24 kHz.",
+		notes: "Recommended highest-quality English. fp32 prosody, no quantization artifacts. 11 voices, 24 kHz.",
 		languages: ["en"],
 		tier: "heavy",
-		preferred: false,
+		// Round-6: best-of-best English voice. fp32 — definitively NaN-safe.
+		preferred: true,
 		accuracy: 5,
 		speed: 3,
 		license: "Apache-2.0",

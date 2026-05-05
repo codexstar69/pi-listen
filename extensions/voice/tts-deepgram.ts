@@ -353,11 +353,29 @@ export async function deepgramSpeakStreaming(opts: DeepgramStreamingOpts): Promi
 	}
 	ws.binaryType = "arraybuffer";
 
+	// Round-8 audit (GPT-5.5 Codex P2): re-check the abort signal AFTER
+	// the WebSocket import/construction yields the event loop. If the
+	// caller aborted during the `await import("ws")` window, attaching
+	// `onAbort` below would silently no-op (abort events don't replay
+	// to listeners attached after the fact), and we'd proceed with the
+	// stream despite the user having cancelled.
+	if (signal?.aborted) {
+		try { ws.close(1000, "abort"); } catch {}
+		throw makeAbortError();
+	}
+
 	return new Promise<void>((resolve, reject) => {
 		let settled = false;
 		const settle = (action: () => void) => {
 			if (settled) return;
 			settled = true;
+			// Round-8 audit (GPT-5.5 Codex P2): centralize listener
+			// cleanup in `settle()` so EVERY exit path (resolve, reject,
+			// abort, error, close) removes the abort listener exactly
+			// once. The previous code only removed it in the "close"
+			// handler — when the WS emitted "error" without subsequent
+			// "close", the listener leaked on the caller's signal.
+			signal?.removeEventListener("abort", onAbort);
 			action();
 		};
 		const onAbort = () => settle(() => {
@@ -415,9 +433,9 @@ export async function deepgramSpeakStreaming(opts: DeepgramStreamingOpts): Promi
 			settle(() => reject(new Error(`Deepgram WS error: ${ev?.message ?? "unknown"}`)));
 		});
 		ws.addEventListener("close", (ev: any) => {
-			signal?.removeEventListener("abort", onAbort);
-			// Server-initiated close after a successful stream resolves
-			// the promise; abort/error paths already settled above.
+			// Round-8: listener cleanup is now centralized in settle()
+			// (fires on EVERY exit path including abort/error before
+			// close). No explicit removeEventListener needed here.
 			if (ev?.code === 1000) settle(() => resolve());
 			else settle(() => reject(new Error(`Deepgram WS closed: code=${ev?.code} reason=${ev?.reason ?? ""}`)));
 		});

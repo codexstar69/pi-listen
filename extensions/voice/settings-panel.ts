@@ -22,6 +22,14 @@ import { matchesKey, Key, truncateToWidth } from "@mariozechner/pi-tui";
 import type { Theme, ThemeColor } from "@mariozechner/pi-coding-agent";
 import type { VoiceConfig, VoiceSettingsScope } from "./config";
 import { LOCAL_MODELS, getLanguagesForLocalModel, type LocalModelInfo } from "./local";
+import { currentVoiceRuntimeEnv, isModelSupported } from "./model-compat";
+// Round-7 audit (GPT-5.5 Codex P0): the engine-toggle handler was using
+// `require("./engine-factory")` to get `pickDefaultModelForPlatform`, but
+// this package is `"type": "module"` (ESM) — `require` is not defined,
+// throws `ReferenceError`, and the broad `catch {}` swallowed it. Result:
+// engine toggle silently failed to re-pick the model (the exact Round-6
+// regression we'd just "fixed"). Static ESM import works at compile-time.
+import { pickDefaultModelForPlatform } from "./engine-factory";
 import type { DeviceProfile, ModelFitness } from "./device";
 import { getFreeDiskSpace, formatBytes, getModelsDir, scanHandyModels, importHandyModel } from "./model-download";
 import {
@@ -411,6 +419,16 @@ export class VoiceSettingsPanel {
 		const isLocal = config.backend === "local";
 		const useShort = iw < 42;
 
+		// Engine preference label (only relevant when backend is local).
+		// "auto" defers to the platform default (Metal whisper.cpp on
+		// Apple Silicon, sherpa-onnx Moonshine elsewhere).
+		const enginePref = config.voiceEngine ?? "auto";
+		const engineDisplay = enginePref === "sherpa-onnx"
+			? this.success("Sherpa-ONNX (CPU, prebuilt, all platforms)")
+			: enginePref === "whisper-cpp"
+				? this.accent("whisper.cpp (Metal/CUDA, GPU-accelerated)")
+				: this.dim("Auto (best for this platform)");
+
 		const rows: { label: string; value: string; hint?: string }[] = [
 			{
 				label: "Backend",
@@ -419,6 +437,16 @@ export class VoiceSettingsPanel {
 					: this.accent("Deepgram (cloud, live streaming)"),
 				hint: "toggle",
 			},
+			// Round-6 (user request): explicit engine picker for local
+			// backend. Lets users force Sherpa-ONNX or whisper.cpp without
+			// having to pick a specific model from each family. Only shown
+			// when backend is local — engine picks are meaningless for
+			// Deepgram cloud.
+			...(isLocal ? [{
+				label: "Engine",
+				value: engineDisplay,
+				hint: "cycle",
+			}] : []),
 			{
 				label: isLocal ? "Model" : "API Key",
 				value: isLocal
@@ -895,17 +923,80 @@ export class VoiceSettingsPanel {
 		}
 	}
 
+	/**
+	 * Logical row labels for the General tab in render order. Used by
+	 * `handleSelect` to dispatch on the active row by label rather than
+	 * by numeric index — protects against row-shape changes (e.g. the
+	 * conditional "Engine" row that only appears for local backend).
+	 */
+	private _currentGeneralRowLabels(): string[] {
+		const { config } = this.p;
+		const isLocal = config.backend === "local";
+		const labels = ["Backend"];
+		if (isLocal) labels.push("Engine");
+		labels.push(isLocal ? "Model" : "API Key");
+		labels.push("Language", "Scope", "Voice", "Auto-send");
+		return labels;
+	}
+
 	// ─── Actions ──────────────────────────────────────────────────────────
 
 	private handleSelect(tabId: TabId): void {
 		if (tabId === "general") {
 			const { config } = this.p;
-			switch (this.row) {
-				case 0: // Backend toggle
+			// Round-6 (user request): build the row label list dynamically
+			// (the Engine row only appears for local backend) and dispatch
+			// by label — this way inserting/reordering rows never breaks
+			// the action map. Earlier the dispatch was row-index based,
+			// which silently misfired when conditional rows changed shape.
+			const rowLabels = this._currentGeneralRowLabels();
+			const label = rowLabels[this.row];
+			switch (label) {
+				case "Backend":
 					config.backend = config.backend === "local" ? "deepgram" : "local";
 					this.save();
 					break;
-				case 1: // Model (local) or API Key (deepgram)
+				case "Engine": {
+					// Cycle: auto → sherpa-onnx → whisper-cpp → auto
+					const cur = config.voiceEngine ?? "auto";
+					const next = cur === "auto"
+						? "sherpa-onnx"
+						: cur === "sherpa-onnx"
+							? "whisper-cpp"
+							: "auto";
+					// Round-7 audit (GPT-5.5 Amp #2): pick model BEFORE
+					// committing the engine preference. If the new
+					// preference can't be satisfied on this platform
+					// (e.g. forced whisper-cpp on linux-arm64), the pick
+					// throws — and we want to leave BOTH `voiceEngine`
+					// AND `localModel` unchanged in that case. Otherwise
+					// the UI labels the engine as "whisper-cpp forced"
+					// while transcription silently routes through
+					// `localModel` (still sherpa) — a contract violation.
+					try {
+						const newDefault = pickDefaultModelForPlatform(
+							undefined,
+							undefined,
+							next,
+						);
+						// Pick succeeded — commit both fields atomically.
+						config.voiceEngine = next;
+						config.localModel = newDefault;
+					} catch {
+						// Pick failed (forced engine has no supported model
+						// on this platform). Leave both fields unchanged so
+						// UI state stays coherent. The cycle "skipped" this
+						// preference; user can press again to advance.
+						break;
+					}
+					// Engine change invalidates whichever model was cached
+					// — clear both adapters so the next transcribe respects
+					// the new preference.
+					this.p.clearRecognizerCache();
+					this.save();
+					break;
+				}
+				case "Model":
 					if (config.backend === "local") {
 						this.tab = 1;
 						this.row = 0;
@@ -913,18 +1004,22 @@ export class VoiceSettingsPanel {
 						this.refreshModelView();
 					}
 					break;
-				case 2: // Language picker
+				case "API Key":
+					// Stub — opening the API-key flow is wired elsewhere;
+					// keep the original behavior (do nothing on Enter).
+					break;
+				case "Language":
 					this.openLangPicker();
 					break;
-				case 3: // Scope toggle
+				case "Scope":
 					config.scope = config.scope === "project" ? "global" : "project";
 					this.save();
 					break;
-				case 4: // Voice toggle
+				case "Voice":
 					config.enabled = !config.enabled;
 					this.save();
 					break;
-				case 5: // v7.1.3: Auto-send STT toggle
+				case "Auto-send":
 					config.autoSubmitOnSpeak = !(config.autoSubmitOnSpeak === true);
 					this.save();
 					break;
@@ -1030,6 +1125,16 @@ export class VoiceSettingsPanel {
 		config.localModel = modelId;
 		config.backend = "local";
 		config.localEndpoint = undefined;
+		// Round-8 audit (GPT-5.5 Amp P1): explicit model selection MUST
+		// clear any stale engine-family force. Otherwise the user could
+		// force "sherpa-onnx" via the General-tab toggle, then pick a
+		// whisper-cpp model from the Models tab — current session uses
+		// whisper.cpp (because `transcribeInProcess` resolves by
+		// `localModel`), but next session's `resolveEffectiveModel(...,
+		// "sherpa-onnx")` sees the persisted force and silently falls
+		// back to a sherpa default. Resetting to "auto" matches user
+		// intent: "I picked this exact model, ignore prior force."
+		config.voiceEngine = "auto";
 		this.save();
 		this.rebuildModels();
 	}
@@ -1369,7 +1474,14 @@ export class VoiceSettingsPanel {
 
 	private getRowCount(tabId: TabId): number {
 		switch (tabId) {
-			case "general": return 6;
+			// Round-6 audit (GPT-5.5 Codex + Kimi 2.5T BLOCK): the row
+			// count was hard-coded `6`, but the General tab now renders
+			// a conditional "Engine" row (only when backend is local).
+			// Returning the dynamic label-list length keeps keyboard
+			// navigation in sync — without this, the bottom row was
+			// unreachable when local backend was active (Engine row
+			// shifted "Auto-send" to index 6 but max was 5 = `6-1`).
+			case "general": return this._currentGeneralRowLabels().length;
 			case "models": return this.modelSelectableIdx.length;
 			case "downloaded": {
 				const dl = this.getDownloaded().length;
@@ -1394,10 +1506,17 @@ export class VoiceSettingsPanel {
 	 * empty groups are dropped so the user never sees an orphaned heading.
 	 */
 	private rebuildModels(): void {
-		const enriched: ModelRow[] = LOCAL_MODELS.map(m => ({
-			...m,
-			fitness: this.p.getModelFitness(m, this.p.device) as ModelFitness,
-		}));
+		// Filter by runtime support FIRST so the picker never shows a model
+		// the current platform/arch/CUDA combo can't run. Apple Silicon
+		// Metal models hide on Linux, CUDA models hide without `/dev/nvidia0`,
+		// etc. The platform-agnostic sherpa-onnx entries appear everywhere.
+		const env = currentVoiceRuntimeEnv();
+		const enriched: ModelRow[] = LOCAL_MODELS
+			.filter(m => isModelSupported(m, env))
+			.map(m => ({
+				...m,
+				fitness: this.p.getModelFitness(m, this.p.device) as ModelFitness,
+			}));
 		this.modelGroups = groupModels(enriched);
 		this.refreshModelView();
 	}

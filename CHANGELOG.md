@@ -5,6 +5,112 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.0.0] - 2026-05-06
+
+Major release: pluggable STT engine architecture (sherpa-onnx +
+whisper.cpp/Metal) plus comprehensive concurrency + lifecycle hardening
+across 8 multi-model audit rounds (Opus 4.7 / 4.6, GPT-5.5 codex/amp,
+Gemini 3.1 Pro Preview, GLM 5, Kimi K2.5T/K2.6 — 30+ confirmed bugs
+caught and fixed).
+
+### Added
+
+- **whisper.cpp Metal/CUDA engine** via `smart-whisper` — Apple Silicon
+  users now get **5–15× faster local STT** (RTF 0.029, ~30× realtime
+  on M4 Max). Auto-selected for fresh installs on darwin-arm64.
+- **`Engine` interface + adapter abstraction** — `engine-sherpa.ts`
+  wraps the existing sherpa-onnx path; `engine-whispercpp.ts` wraps
+  smart-whisper. Both implement the same lifecycle contract (idempotent
+  init, single-flight warmup, deferred-free, async `clearCache()`).
+- **STT engine selector** in `/voice-settings` General tab — toggle
+  `auto / Sherpa-ONNX / whisper.cpp`. Cycling re-picks the active
+  model for the chosen engine family. `voiceEngine` config field
+  persists across sessions.
+- **`pickDefaultModelForPlatform` + `resolveEffectiveModel`** —
+  platform-aware model selection with graceful fallback when persisted
+  config can't run on the current runtime (no config mutation across
+  machines).
+- **Bounded LRU caches** in both adapters —
+  `PI_VOICE_ENGINE_CACHE_SIZE` (whisper-cpp, default 1, max 4),
+  `PI_VOICE_SHERPA_CACHE_SIZE` (default 4, max 8). Prevents unbounded
+  native-memory growth across model switches.
+- **TTS warmup at session_start** (`warmupTtsInBackground`) —
+  eliminates "voice still getting delayed" first-speak cold-start
+  (was 500ms-3s for Kokoro fp32, now ~0).
+- **Synthesis pipeline depth 3** (`PI_VOICE_SYNTH_PIPELINE_DEPTH`,
+  clamped 1-8) — eliminates "stop at full stop" gaps at sentence
+  boundaries by keeping 3 chunks in flight.
+- **Catalog model upgrades** — `kokoro-multi-lang-v1_0` (fp32) and
+  `kokoro-en-v0_19` (fp32) promoted to `preferred: true` as the
+  best-of-best multilingual + English voices.
+- **First-recording download notifications** —
+  `setDownloadNotifier()` slot wired by `voice.ts` at session_start
+  surfaces clear `notify("info")` messages with throttled progress
+  when the first recording triggers a model fetch.
+
+### Changed
+
+- **`Engine.clearCache()` is async (`Promise<void>`)** — callers can
+  await native memory release before loading the next model. Adapters
+  defer `free()` while a transcribe is in flight (use-after-free
+  protection).
+- **Sherpa adapter caches recognizer references directly** —
+  `transcribe()` no longer re-resolves `getOrCreateRecognizer` on
+  every call. Type-aware cache key: `(model.id, lang)` for
+  Whisper/SenseVoice (language-bound recognizers), `model.id` only
+  for Moonshine/NeMo CTC/Transducer (language-insensitive).
+- **Settings panel dispatch is label-driven** instead of row-index —
+  inserting/reordering rows can no longer silently misfire.
+- **Voice models marked incompatible** —
+  `kokoro-int8-multi-lang-v1_0` and `v1_1` both produce NaN samples
+  on sherpa-onnx-node 1.13. The fp32 variants are working
+  alternatives.
+
+### Fixed
+
+- **30+ confirmed bugs** across 8 audit rounds (Opus 4.7/4.6,
+  GPT-5.5 codex/amp, Gemini 3.1 Pro Preview, GLM 5, Kimi K2.5T/K2.6),
+  including:
+  - **Concurrency**: reference-vs-id deferred-free race, LRU not
+    removing active entries, generation-token race, sherpa cache
+    coherence, single-flight warmup-promise identity check.
+  - **Cache-key correctness**: empty-lang fallback, type-aware key
+    for sherpa, lowercase consistency between adapter and
+    sherpa-engine.
+  - **Lifecycle**: ESM `require()` regression in settings panel,
+    stale-gen warmup flush race, immediate sherpa-engine flush at
+    `clearCache` time, `_warmupPromises.delete` identity-check.
+  - **Engine selector**: toggle now re-picks `localModel` atomically
+    (pick-then-commit on success, leave both unchanged on failure);
+    `voiceEngine` properly read from persisted config in
+    `migrateConfig`; explicit model picker resets stale engine force.
+  - **TTS**: pipeline AbortController for orphan synth on caller
+    abort; `warmupTts` gated on `config.ttsEnabled`; Deepgram WS
+    streaming abort window + error-path listener leak; centralized
+    listener cleanup in `settle()`.
+  - **Path traversal**: GGUF filename allowlist regex (rejects
+    URL-encoded escapes, Windows reserved names COM1-COM999+ and
+    LPT1-LPT99+, NUL bytes); `ggufFilenameFor` + CI catalog-invariants
+    test enforce.
+  - **Settings UX**: dynamic `getRowCount` for the conditional Engine
+    row; engine-aware error messages (`engine.id` instead of
+    hardcoded `sherpa-onnx`); persisted `whisperCppHintShownAt`
+    through `normalizeOnboarding`.
+
+### Migration notes
+
+- Existing 7.x configs are forward-compatible. New `voiceEngine` field
+  defaults to `"auto"`. The whisper.cpp engine is optional — install
+  fails gracefully if `smart-whisper` build tools are missing, falls
+  back to sherpa-onnx.
+- macOS: to enable Metal acceleration, shell-export
+  `GGML_METAL_PATH_RESOURCES` BEFORE Node starts (NSProcessInfo caches
+  env at process start). The whisper-cpp adapter surfaces a hint via
+  `engine.hint` when init succeeds without it.
+- Linux NVIDIA: install with `WHISPER_CUDA=1 bun install` to enable
+  CUDA. Without it, `requiresCUDA: true` models hide from the picker.
+- 360/360 tests pass · TypeScript clean · production-ready.
+
 ## [7.2.2] - 2026-05-01
 
 ### Added

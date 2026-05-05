@@ -86,10 +86,13 @@ import { TtsPlaybackIndicator } from "./voice/tts-playback-indicator";
 import { buildDeepgramWsUrl, resolveDeepgramApiKey, SAMPLE_RATE, CHANNELS } from "./voice/deepgram";
 import {
 	startLocalSession, stopLocalSession, abortLocalSession,
-	checkLocalServer, LOCAL_MODELS, DEFAULT_LOCAL_ENDPOINT,
+	checkLocalServer, LOCAL_MODELS, DEFAULT_LOCAL_ENDPOINT, DEFAULT_LOCAL_MODEL,
 	getLanguagesForLocalModel, isLanguageSupportedByModel, localLanguageDisplayName,
-	type LocalSession,
+	getDownloadUrlsForModel, setDownloadNotifier,
+	type LocalSession, type DownloadNotifierEvent,
 } from "./voice/local";
+import { resolveEffectiveModel } from "./voice/engine-factory";
+import { VoiceCatalogUnrecoverableError } from "./voice/engine";
 
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -845,6 +848,10 @@ export default function (pi: ExtensionAPI) {
 			try { w.cancel(); } catch (err) { voiceDebug("install widget cancel threw during voiceCleanup", String(err)); }
 		}
 		activeInstallWidgets.clear();
+		// Drop the transcribe-time download notifier so the closure doesn't
+		// outlive this session's `ctx`. Calls made from a stale notifier
+		// would notify into a torn-down UI surface.
+		try { setDownloadNotifier(null); } catch (err) { voiceDebug("setDownloadNotifier(null) threw", String(err)); }
 		// Stop any active playback the same way.
 		try { activePlaybackIndicator?.stop(); } catch (err) { voiceDebug("playback stop threw during voiceCleanup", String(err)); }
 		activePlaybackIndicator = null;
@@ -1578,6 +1585,267 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	/**
+	 * Eagerly load sherpa-onnx + the configured local recognizer in the
+	 * background, so the user's first hold-to-talk doesn't pay cold-start
+	 * cost (native module load + 100-700 MB ONNX graph + ORT partitioning,
+	 * easily 2-5 s on Apple Silicon for parakeet-v3).
+	 *
+	 * Skips when:
+	 *   - Backend isn't local (no recognizer needed)
+	 *   - Model isn't downloaded yet (we won't trigger a download here —
+	 *     ensureModelDownloaded() runs on first real recording instead, so
+	 *     warmup never blocks startup or surprises the user with traffic)
+	 *
+	 * Errors are swallowed and logged. Recognizer caching in
+	 * sherpa-engine.ts means the first real recording reuses this instance.
+	 */
+	function warmupLocalRecognizerInBackground() {
+		if (config.backend !== "local") return;
+		if (config.localEndpoint) return; // External server mode — no in-process load
+		(async () => {
+			try {
+				const { isModelDownloaded, getModelDir } = await import("./voice/model-download");
+				const { getEngineForModel } = await import("./voice/engine-factory");
+
+				const modelId = config.localModel || DEFAULT_LOCAL_MODEL;
+				const model = LOCAL_MODELS.find(m => m.id === modelId);
+				if (!model) return;
+				const downloadUrls = getDownloadUrlsForModel(model);
+				if (!isModelDownloaded(modelId, downloadUrls)) return;
+
+				const engine = getEngineForModel(model);
+				if (!engine.available) {
+					const ok = await engine.init();
+					if (!ok) return;
+				}
+				const modelDir = getModelDir(modelId);
+				await engine.warmup({ model, modelDir, lang: config.language || "en" });
+				voiceDebug("warmup: engine recognizer preloaded", { modelId, engine: engine.id });
+			} catch (err) {
+				voiceDebug("warmup: failed (non-fatal)", { error: String(err) });
+			}
+		})();
+	}
+
+	/**
+	 * Eagerly load the configured TTS model into native memory at
+	 * session_start so the first `/voice-speak` doesn't pay cold-start
+	 * latency (Kokoro fp32 init is 500ms-3s — exactly the "voice still
+	 * getting delayed" complaint from round-6 user feedback).
+	 *
+	 * Skips when:
+	 *   - TTS is disabled (`config.ttsEnabled === false`)
+	 *   - Backend is Deepgram cloud (no local model to load)
+	 *   - Model files aren't downloaded yet (warmup never triggers downloads)
+	 *
+	 * Errors are swallowed and logged; warmup is best-effort and the
+	 * next real speak() surfaces any real load problem.
+	 */
+	function warmupTtsInBackground() {
+		// Round-7 audit (Opus 4.7 + GPT-5.5 Amp #4): TTS is opt-in
+		// (default `ttsEnabled: false`). Without this gate, installed
+		// local TTS models would be loaded into native memory at every
+		// session_start even when the user explicitly disabled TTS —
+		// that's a production memory regression. Only warm when the
+		// user has TTS turned on.
+		if (config.ttsEnabled !== true) return;
+		// Default ttsBackend is "local" (per config.ts), so when
+		// undefined we should warm the local model. Only skip when user
+		// explicitly picked Deepgram cloud.
+		const ttsBackend = config.ttsBackend ?? "local";
+		if (ttsBackend !== "local") return;
+		// Same gate as STT: only warm if voice is actually enabled.
+		if (!config.enabled) return;
+		(async () => {
+			try {
+				const { warmupTts } = await import("./voice/tts-engine");
+				const { getInstalledTtsModelDir, getTtsModel } = await import("./voice/tts-local-models");
+				const modelId = config.ttsLocalModel || "kitten-nano-en-v0_2";
+				let modelDir: string;
+				try {
+					modelDir = getInstalledTtsModelDir(modelId);
+				} catch {
+					// Not installed yet — first speak will trigger download.
+					// Don't warm a partially-installed model.
+					return;
+				}
+				const model = getTtsModel(modelId);
+				const ok = await warmupTts(model, modelDir);
+				voiceDebug("warmup: TTS model preloaded", { modelId, ok });
+			} catch (err) {
+				voiceDebug("warmup: TTS failed (non-fatal)", { error: String(err) });
+			}
+		})();
+	}
+
+	/**
+	 * Reconcile the persisted `config.localModel` against what's actually
+	 * supported on the current runtime. Runs once per `session_start` after
+	 * config loads. Three cases:
+	 *
+	 *   1. Persisted id supports current runtime → no-op.
+	 *   2. Persisted id unsupported (e.g. user copied config from an Apple
+	 *      Silicon machine to Linux) OR catalog degraded → silently use the
+	 *      platform default for THIS session, surface a one-time
+	 *      notification, leave persisted config UNTOUCHED so the same file
+	 *      still works when the user returns to the original machine.
+	 *   3. Catalog unrecoverable (empty / malformed) → disable voice for
+	 *      this session with a clear error notification, rather than
+	 *      letting "Unknown model: …" surface mid-transcribe with no
+	 *      breadcrumb.
+	 */
+	/**
+	 * Wire the local.ts download notifier so transcribe-time downloads
+	 * surface visible UI. Without this, the user holds space, releases,
+	 * and watches the recording widget hang while a 57-800 MB GGUF
+	 * downloads in silence — the round-2 audit "first-recording UX" gap.
+	 *
+	 * Throttle progress updates to ~1/sec so we don't spam notify().
+	 */
+	function setupTranscribeDownloadNotifier() {
+		if (!ctx?.hasUI) return;
+		let lastProgressAt = 0;
+		const handler = (ev: DownloadNotifierEvent) => {
+			if (!ctx?.hasUI) return;
+			try {
+				if (ev.type === "start") {
+					ctx.ui.notify(
+						`Downloading speech model "${ev.modelId}" (${ev.humanSize}). ` +
+						`First use may take a moment.`,
+						"info",
+					);
+				} else if (ev.type === "progress") {
+					const now = Date.now();
+					if (now - lastProgressAt < 1000) return; // 1 Hz throttle
+					lastProgressAt = now;
+					const pct = ev.raw.totalBytes > 0
+						? Math.floor((ev.raw.downloadedBytes / ev.raw.totalBytes) * 100)
+						: 0;
+					ctx.ui.notify(`Downloading "${ev.modelId}"… ${pct}%`, "info");
+				} else if (ev.type === "done") {
+					ctx.ui.notify(`Speech model "${ev.modelId}" ready.`, "info");
+				} else if (ev.type === "fail") {
+					ctx.ui.notify(
+						`Speech model download failed for "${ev.modelId}": ${ev.error}`,
+						"error",
+					);
+				}
+			} catch (err) {
+				voiceDebug("download notifier failed", { err: String(err) });
+			}
+		};
+		setDownloadNotifier(handler);
+	}
+
+	function migratePersistedModelOnSessionStart() {
+		if (config.backend !== "local") return; // Deepgram path doesn't care
+		let resolved: ReturnType<typeof resolveEffectiveModel>;
+		try {
+			// Pass the user's engine preference so the resolver can re-pick
+			// when the user just toggled "Sherpa-only" / "whisper.cpp-only"
+			// and their currently-selected model is from the other family.
+			resolved = resolveEffectiveModel(
+				config.localModel,
+				undefined,
+				undefined,
+				config.voiceEngine,
+			);
+		} catch (err) {
+			if (err instanceof VoiceCatalogUnrecoverableError) {
+				voiceDebug("session_start: voice catalog unrecoverable", { err: err.message });
+				if (ctx?.hasUI) {
+					ctx.ui.notify(
+						`Voice catalog is corrupted (${err.message}). Voice features ` +
+						`disabled for this session. Reinstall pi-voice or check the ` +
+						`extension files.`,
+						"error",
+					);
+				}
+				config = { ...config, enabled: false };
+				return;
+			}
+			throw err; // unexpected — let upper handler decide
+		}
+		if (!resolved.fellBack && !resolved.degraded) return;
+		voiceDebug("model fallback", {
+			from: resolved.from, to: resolved.id, degraded: !!resolved.degraded,
+		});
+		if (ctx?.hasUI) {
+			const reason = resolved.degraded
+				? `Voice catalog degraded — using "${resolved.id}" for this session.`
+				: `Voice model "${resolved.from}" isn't supported on this machine — ` +
+				  `using "${resolved.id}" for this session.`;
+			ctx.ui.notify(
+				`${reason} Run /voice-settings to pick a different default.`,
+				resolved.degraded ? "warning" : "info",
+			);
+		}
+		// session-scoped only — does NOT mutate persisted config
+		config = { ...config, localModel: resolved.id };
+	}
+
+	/**
+	 * Phase 3 — one-time hint for existing Apple Silicon users still on a
+	 * sherpa-onnx model (e.g. Parakeet v3). Suggests switching to Whisper
+	 * Base EN Metal for ~5–15× faster transcription. Sticky via
+	 * `config.onboarding.whisperCppHintShownAt` so it never fires twice on
+	 * the same install. Skips entirely on:
+	 *   - Non-Apple-Silicon platforms
+	 *   - Users already on a whisper-cpp model
+	 *   - Sessions without a UI surface
+	 *   - The Deepgram backend (whisper.cpp doesn't apply)
+	 *   - Onboarding-incomplete installs (let onboarding finish first)
+	 */
+	function maybeShowWhisperCppHint() {
+		if (process.platform !== "darwin" || process.arch !== "arm64") return;
+		if (!ctx?.hasUI) return;
+		if (config.backend !== "local") return;
+		if (!config.onboarding.completed) return;
+		if (config.onboarding.whisperCppHintShownAt) return;
+
+		const currentModelId = config.localModel || DEFAULT_LOCAL_MODEL;
+		const currentModel = LOCAL_MODELS.find(m => m.id === currentModelId);
+		// User is already on whisper-cpp — nothing to nudge about.
+		if (currentModel?.engine === "whisper-cpp") {
+			markWhisperCppHintShown();
+			return;
+		}
+
+		try {
+			ctx.ui.notify(
+				"Whisper Base EN (Metal) is now available — 5-15× faster ASR " +
+				"on Apple Silicon vs. the current sherpa-onnx CPU path. Run " +
+				"/voice-settings to switch. (Shown once per install.)",
+				"info",
+			);
+		} catch {
+			// notify can fail silently if UI is mid-teardown; either way,
+			// mark as shown so we don't retry every session.
+		}
+		markWhisperCppHintShown();
+	}
+
+	function markWhisperCppHintShown() {
+		const now = new Date().toISOString();
+		config = {
+			...config,
+			onboarding: { ...config.onboarding, whisperCppHintShownAt: now },
+		};
+		try {
+			saveConfig(
+				getSessionStartPersistedConfig({
+					config,
+					envDeepgramApiKey: process.env.DEEPGRAM_API_KEY,
+				}),
+				config.scope === "project" ? "project" : "global",
+				currentCwd,
+			);
+		} catch (err) {
+			voiceDebug("maybeShowWhisperCppHint: saveConfig failed (non-fatal)", { err: String(err) });
+		}
+	}
+
 	function setupHoldToTalk() {
 		if (!ctx?.hasUI) return;
 
@@ -2129,9 +2397,14 @@ export default function (pi: ExtensionAPI) {
 			// updateVoiceStatus() clears the entry so users don't see stale
 			// "MIC STREAM" text from a prior session. Hold-to-talk wiring
 			// only runs when enabled.
+			migratePersistedModelOnSessionStart();
+			maybeShowWhisperCppHint();
+			setupTranscribeDownloadNotifier();
 			updateVoiceStatus();
 			if (config.enabled) {
 				setupHoldToTalk();
+				warmupLocalRecognizerInBackground();
+				warmupTtsInBackground();
 			}
 			return;
 		}
@@ -2157,8 +2430,12 @@ export default function (pi: ExtensionAPI) {
 				envDeepgramApiKey: process.env.DEEPGRAM_API_KEY,
 			});
 			saveConfig(configToSave, config.scope === "project" ? "project" : "global", currentCwd);
+			migratePersistedModelOnSessionStart();
+			setupTranscribeDownloadNotifier();
 			updateVoiceStatus();
 			setupHoldToTalk();
+			warmupLocalRecognizerInBackground();
+			warmupTtsInBackground();
 			if (!isStartup) return;
 			const backendLabel = hasLocalModel
 				? `Local model: ${LOCAL_MODELS.find(m => m.id === config.localModel)?.name || config.localModel} (offline, batch mode)`
@@ -2220,6 +2497,22 @@ export default function (pi: ExtensionAPI) {
 		const reason = (event as { reason?: string } | undefined)?.reason;
 		if (reason === "quit" || reason === undefined) {
 			try {
+				// Round-5 audit (GPT-5.5 #2): clear BOTH engines so
+				// whisper.cpp's GGUF native memory is released too. The
+				// previous sherpa-only call left whisper-cpp's `_whispers`
+				// map untouched on terminal quit, leaking 100MB-1GB of
+				// native heap per loaded model.
+				const [{ sherpaEngine }, { whispercppEngine }] = await Promise.all([
+					import("./voice/engine-sherpa"),
+					import("./voice/engine-whispercpp"),
+				]);
+				await Promise.all([
+					sherpaEngine.clearCache(),
+					whispercppEngine.clearCache(),
+				]);
+				// Legacy alias kept so the rest of this block (which may
+				// still reference the old name) compiles unchanged. The
+				// engine adapters' clearCache fully supersedes it.
 				const { clearRecognizerCache } = await import("./voice/sherpa-engine");
 				clearRecognizerCache();
 			} catch {}
@@ -2796,7 +3089,15 @@ export default function (pi: ExtensionAPI) {
 
 		const { detectDevice, getModelFitness, formatDeviceSummary } = await import("./voice/device");
 		const { getDownloadedModels, deleteModel, ensureModelDownloaded } = await import("./voice/model-download");
-		const { isSherpaAvailable, clearRecognizerCache } = await import("./voice/sherpa-engine");
+		const { isSherpaAvailable } = await import("./voice/sherpa-engine");
+		// Round-5 audit (GPT-5.5 #2): the settings panel's
+		// `clearRecognizerCache` callback (used on model switch / language
+		// switch / delete-active-model) must clear BOTH engines, not only
+		// sherpa-onnx's internal cache. Otherwise whisper.cpp's `_whispers`
+		// keeps the old GGUF resident even after the user picked a
+		// different model.
+		const { sherpaEngine } = await import("./voice/engine-sherpa");
+		const { whispercppEngine } = await import("./voice/engine-whispercpp");
 		const { VoiceSettingsPanel } = await import("./voice/settings-panel");
 		type PanelAction = import("./voice/settings-panel").PanelAction;
 		const { LANGUAGES } = await import("./voice/onboarding");
@@ -2816,7 +3117,13 @@ export default function (pi: ExtensionAPI) {
 			isSherpaAvailable,
 			formatDeviceSummary,
 			saveConfig: (cfg: VoiceConfig, scope: VoiceSettingsScope, cwd: string) => saveConfig(cfg, scope, cwd),
-			clearRecognizerCache: () => { try { clearRecognizerCache(); } catch {} },
+			clearRecognizerCache: () => {
+				// Fire-and-forget both engines; settings panel callers
+				// don't await. Errors are swallowed since this is best-
+				// effort cache invalidation.
+				void sherpaEngine.clearCache().catch(() => { /* ignore */ });
+				void whispercppEngine.clearCache().catch(() => { /* ignore */ });
+			},
 			resolveApiKey: () => resolveDeepgramApiKey(config) ?? undefined,
 			deepgramLanguages: LANGUAGES.map(l => ({ name: l.name, code: l.code, popular: l.popular })),
 		};

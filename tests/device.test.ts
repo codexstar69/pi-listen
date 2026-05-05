@@ -4,6 +4,7 @@ import {
 	getModelFitness,
 	autoRecommendModel,
 	formatDeviceSummary,
+	hasCUDA,
 	localeToLanguageCode,
 	type DeviceProfile,
 } from "../extensions/voice/device";
@@ -194,6 +195,12 @@ describe("localeToLanguageCode", () => {
 describe("LOCAL_MODELS catalog", () => {
 	test("all models have non-empty downloadUrls", () => {
 		for (const model of LOCAL_MODELS) {
+			// Phase-2 GGUF entries route via whisperCppModel.downloadUrls;
+			// the legacy sherpaModel field is stubbed with empty maps. The
+			// invariant check belongs in `tests/catalog-invariants` for
+			// those entries — here we only assert the legacy shape for
+			// sherpa-routed models.
+			if (model.engine === "whisper-cpp") continue;
 			const urls = model.sherpaModel.downloadUrls;
 			const urlCount = Object.keys(urls).length;
 			expect(urlCount).toBeGreaterThan(0);
@@ -260,5 +267,63 @@ describe("LOCAL_MODELS catalog", () => {
 			expect(model.sizeBytes).toBeGreaterThan(0);
 			expect(model.runtimeRamMB).toBeGreaterThan(0);
 		}
+	});
+});
+
+// ─── hasCUDA — env-authoritative + platform-aware ────────────────────────────
+
+describe("hasCUDA", () => {
+	test("darwin with no env override → false (no CUDA on Mac)", () => {
+		expect(hasCUDA({}, "darwin")).toBe(false);
+	});
+
+	test("win32 with no env override → false (no Windows prebuilt)", () => {
+		expect(hasCUDA({}, "win32")).toBe(false);
+	});
+
+	test("CUDA_VISIBLE_DEVICES=\"\" disables CUDA on every platform", () => {
+		expect(hasCUDA({ CUDA_VISIBLE_DEVICES: "" }, "linux")).toBe(false);
+		expect(hasCUDA({ CUDA_VISIBLE_DEVICES: "" }, "darwin")).toBe(false);
+		expect(hasCUDA({ CUDA_VISIBLE_DEVICES: "" }, "win32")).toBe(false);
+	});
+
+	test("CUDA_VISIBLE_DEVICES=\"-1\" disables CUDA", () => {
+		expect(hasCUDA({ CUDA_VISIBLE_DEVICES: "-1" }, "linux")).toBe(false);
+	});
+
+	test("CUDA_VISIBLE_DEVICES=\" -1 \" disables (whitespace trimmed)", () => {
+		expect(hasCUDA({ CUDA_VISIBLE_DEVICES: " -1 " }, "linux")).toBe(false);
+	});
+
+	test("CUDA_VISIBLE_DEVICES=\"   \" disables (whitespace-only trims to empty)", () => {
+		expect(hasCUDA({ CUDA_VISIBLE_DEVICES: "   " }, "linux")).toBe(false);
+		expect(hasCUDA({ CUDA_VISIBLE_DEVICES: "\t" }, "linux")).toBe(false);
+	});
+
+	test("CUDA_VISIBLE_DEVICES=\"NONE\" disables (case-insensitive)", () => {
+		expect(hasCUDA({ CUDA_VISIBLE_DEVICES: "NONE" }, "linux")).toBe(false);
+		expect(hasCUDA({ CUDA_VISIBLE_DEVICES: "None" }, "linux")).toBe(false);
+		expect(hasCUDA({ CUDA_VISIBLE_DEVICES: "none" }, "linux")).toBe(false);
+	});
+
+	test("CUDA_VISIBLE_DEVICES=\"VOID\" disables (case-insensitive)", () => {
+		expect(hasCUDA({ CUDA_VISIBLE_DEVICES: "VOID" }, "linux")).toBe(false);
+		expect(hasCUDA({ CUDA_VISIBLE_DEVICES: "void" }, "linux")).toBe(false);
+	});
+
+	test("CUDA_VISIBLE_DEVICES=\"0\" enables CUDA on every platform", () => {
+		expect(hasCUDA({ CUDA_VISIBLE_DEVICES: "0" }, "linux")).toBe(true);
+		expect(hasCUDA({ CUDA_VISIBLE_DEVICES: "0" }, "darwin")).toBe(true);
+		expect(hasCUDA({ CUDA_VISIBLE_DEVICES: "0" }, "win32")).toBe(true);
+	});
+
+	test("NVIDIA_VISIBLE_DEVICES=\"all\" enables CUDA", () => {
+		expect(hasCUDA({ NVIDIA_VISIBLE_DEVICES: "all" }, "linux")).toBe(true);
+	});
+
+	test("env var SET takes precedence over native probe (no fallthrough)", () => {
+		// Even if /dev/nvidia0 happens to exist on the test host, an
+		// explicit empty override must still return false.
+		expect(hasCUDA({ CUDA_VISIBLE_DEVICES: "" }, "linux")).toBe(false);
 	});
 });

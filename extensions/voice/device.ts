@@ -390,3 +390,78 @@ function detectLocale(): string {
 export function localeToLanguageCode(locale: string): string {
 	return locale.split("-")[0] || "en";
 }
+
+// ─── CUDA detection (cheap, env-authoritative) ───────────────────────────────
+
+/**
+ * Tokens that disable CUDA when set as the env-var value. Match is
+ * case-insensitive after `.trim()`:
+ *   - ""              → disabled (explicit empty / whitespace-only)
+ *   - "-1"            → disabled (CUDA convention)
+ *   - "none" / "void" → disabled (NVIDIA conventions)
+ *
+ * Anything else (e.g. "0", "all", "0,1,2") enables CUDA. To re-enable
+ * CUDA after disabling via env, unset the variable entirely or set it
+ * to a device id like "0".
+ */
+const CUDA_DISABLE_VALUES = new Set(["", "-1", "none", "void"]);
+
+/**
+ * Cheap CUDA-availability check used by `engine-factory` to decide whether
+ * a CUDA-only model is selectable on the current runtime.
+ *
+ * Env-var semantics (from round-2/3 godspeed review):
+ *   - When CUDA_VISIBLE_DEVICES or NVIDIA_VISIBLE_DEVICES is SET, its value
+ *     is authoritative — we do NOT fall through to native probing. This
+ *     lets users disable CUDA explicitly (`CUDA_VISIBLE_DEVICES=""` or
+ *     `="-1"`) without `/dev/nvidia0` overriding their intent.
+ *   - When neither var is set, we probe native paths. Linux only — Windows
+ *     has no shipped whisper.cpp CUDA prebuilt today; revisit when it does.
+ *
+ * Distinct from `detectGPU()` above which spawns `nvidia-smi` to fetch
+ * VRAM/name. This function never spawns; it's safe to call repeatedly.
+ */
+export function hasCUDA(
+	env: NodeJS.ProcessEnv = process.env,
+	platform: NodeJS.Platform = process.platform,
+): boolean {
+	// Step 1: honor explicit env override on every platform.
+	const visible = env.CUDA_VISIBLE_DEVICES ?? env.NVIDIA_VISIBLE_DEVICES;
+	if (visible !== undefined) {
+		return !CUDA_DISABLE_VALUES.has(visible.trim().toLowerCase());
+	}
+	// Step 2: env var unset — probe native paths on platforms we ship for.
+	if (platform === "linux") {
+		return fs.existsSync("/dev/nvidia0") ||
+			fs.existsSync("/proc/driver/nvidia/version");
+	}
+	// Windows is intentionally NOT probed — see Non-goals (no verified
+	// win32-x64-CUDA prebuilt). Add detection only when prebuilts ship.
+	return false;
+}
+
+/**
+ * Whether the current `smart-whisper` binding was built with CUDA support.
+ *
+ * `hasCUDA()` only knows whether the SYSTEM has a CUDA-capable GPU and
+ * driver. It cannot detect whether the user's `node-gyp rebuild` of
+ * `smart-whisper` actually compiled the CUDA backend in (which requires
+ * `WHISPER_CUDA=1` at install time). A user with CUDA hardware but a
+ * default install would still get CPU-only inference, just slowly.
+ *
+ * Round-2 audit fix: gate `requiresCUDA: true` model selection on BOTH
+ * `hasCUDA()` AND `cudaBuildCapable()`. The latter is signaled via the
+ * `WHISPER_CUDA` env var — users who installed with
+ * `WHISPER_CUDA=1 bun install` typically keep the var exported in their
+ * shell config or systemd unit, so it persists into the runtime
+ * environment. If they don't keep it set, CUDA models hide from the
+ * picker and they default to sherpa-onnx until they re-export it.
+ *
+ * This isn't a true binding-introspection probe (smart-whisper doesn't
+ * expose one); it's a user-asserted capability flag that matches the
+ * documented install workflow. A future smart-whisper version could
+ * expose `getBackendCapabilities()` and we'd switch to that.
+ */
+export function cudaBuildCapable(env: NodeJS.ProcessEnv = process.env): boolean {
+	return env.WHISPER_CUDA === "1";
+}

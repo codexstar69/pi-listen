@@ -113,13 +113,29 @@ export async function speak(opts: SpeakOpts): Promise<void> {
 	// loop iteration's `await` consumes the (rejected) promise. The
 	// awaiter still observes the rejection because the catch is on a
 	// SHADOW promise — `synthOne()` itself returns the original.
+	// Round-6 audit (GPT-5.5 Codex + Kimi 2.5T): pipeline-level abort.
+	// With pipeline depth > 1, several synth promises run ahead of
+	// playback. If the outer flow aborts/errors, those queued synths
+	// keep computing (Kokoro/Piper native compute) — wasting CPU/GPU
+	// and contending with the next speak. Link a pipeline-scoped
+	// AbortController to the caller's signal, pass IT to synthesizeChunk
+	// (so each chunk respects both the caller abort AND a pipeline-only
+	// abort), and fire it in the outer catch.
+	const pipelineAbort = new AbortController();
+	const pipelineSignal = pipelineAbort.signal;
+	const onCallerAbort = () => pipelineAbort.abort();
+	if (signal) {
+		if (signal.aborted) pipelineAbort.abort();
+		else signal.addEventListener("abort", onCallerAbort, { once: true });
+	}
+
 	const synthOne = (chunk: string) => {
 		const p = synthesizeChunk({
 			chunk,
 			backend,
 			config,
 			language,
-			signal,
+			signal: pipelineSignal,
 			resolveModelDir: opts.resolveModelDir,
 		});
 		// Shadow .catch — swallows so an orphaned promise never
@@ -171,20 +187,48 @@ export async function speak(opts: SpeakOpts): Promise<void> {
 			} catch (err) {
 				try { sink.cancel(); } catch {}
 				throw err;
+			} finally {
+				// Round-7 audit (GPT-5.5 Codex P1): the early-return
+				// Deepgram streaming branch must clean up the abort
+				// listener too — otherwise every successful streamed
+				// speak leaks one listener on the caller's session-
+				// scoped signal. The main try/finally below wouldn't
+				// run because we return/throw before reaching it.
+				if (signal) signal.removeEventListener("abort", onCallerAbort);
 			}
 		}
 		// No streaming player available — fall through to REST/file path.
+		// The main try/finally below will clean up the listener on the
+		// fall-through path.
 	}
 
 	try {
-		let nextSynth: ReturnType<typeof synthOne> | null = null;
+		// Round-6 (smoothness audit): pipeline depth was 1 — when synth was
+		// slower than playback (common for kokoro/piper on multi-sentence
+		// utterances), playback would underrun at every sentence boundary,
+		// producing the "huge stop at full stop" gap. Maintain N concurrent
+		// synth promises in flight so playback never waits for a single
+		// chunk to finish synthesizing.
+		//
+		// Default depth = 3 chunks ahead. At ~5s/chunk × 240KB int16-mono-
+		// 24kHz = 720KB peak buffered audio. Negligible memory cost,
+		// dramatic latency win at sentence boundaries.
+		// Override via PI_VOICE_SYNTH_PIPELINE_DEPTH (clamped 1-8).
+		const pipelineDepth = resolvePipelineDepth();
+		// Pre-fill the queue with the first N synth promises.
+		const queue: ReturnType<typeof synthOne>[] = [];
+		for (let i = 0; i < Math.min(pipelineDepth, chunks.length); i++) {
+			queue.push(synthOne(chunks[i]!));
+		}
 		for (let i = 0; i < chunks.length; i++) {
 			if (signal?.aborted) throw makeAbortError();
-			// First iteration synthesizes inline; subsequent iterations use
-			// the prefetched audio from the previous iteration.
-			const audio = await (nextSynth ?? synthOne(chunks[i]!));
-			nextSynth = null;
+			const audio = await queue.shift()!;
 			if (signal?.aborted) throw makeAbortError();
+			// Prefetch chunk at i+pipelineDepth so the queue stays full.
+			const lookahead = i + pipelineDepth;
+			if (lookahead < chunks.length) {
+				queue.push(synthOne(chunks[lookahead]!));
+			}
 
 			// Streaming path: open the sink lazily on first chunk so we
 			// have the actual sample rate. PCM-yielding chunks (local
@@ -195,22 +239,13 @@ export async function speak(opts: SpeakOpts): Promise<void> {
 					stream = openPlaybackStream({ sampleRate: audio.sampleRate, signal });
 				}
 				if (stream) {
-					// Kick off NEXT chunk's synth BEFORE awaiting the
-					// write — synthesis runs in parallel with stdin
-					// write/drain. writePcm returns a promise that
-					// resolves once the byte queue is accepted (or
-					// drained on backpressure).
-					if (i + 1 < chunks.length) nextSynth = synthOne(chunks[i + 1]!);
 					await stream.writePcm(float32ToInt16(audio.samples));
 					continue;
 				}
 			}
 
 			// Non-streaming fallback (Windows, missing sox, or WAV chunks):
-			// file-per-chunk playback. Pipeline next synth while playing.
-			if (i + 1 < chunks.length) {
-				nextSynth = synthOne(chunks[i + 1]!);
-			}
+			// file-per-chunk playback. Synth queue stays primed.
 			await playAudio({ source: audio, signal });
 			if (signal?.aborted) throw makeAbortError();
 		}
@@ -225,9 +260,37 @@ export async function speak(opts: SpeakOpts): Promise<void> {
 			stream = null;
 		}
 	} catch (err) {
+		// Abort queued synth promises — they may still be in native
+		// compute. Without this, an aborted speak leaves Kokoro/Piper
+		// computing audio nobody will play (CPU/GPU waste, contention).
+		pipelineAbort.abort();
 		cleanupStream();
 		throw err;
+	} finally {
+		// Detach the caller's abort listener so we don't accumulate
+		// listeners on a session-scoped signal across speak calls.
+		if (signal) signal.removeEventListener("abort", onCallerAbort);
 	}
+}
+
+// ─── Pipeline tuning ───────────────────────────────────────────────────────────
+
+/**
+ * Synth pipeline depth for `speak()`. Default 3 — keeps 3 chunks in flight
+ * so playback never waits for one synth job to complete. Smooth even when
+ * synth is slower than playback (common for Kokoro / Piper on multi-
+ * sentence utterances). Bounded 1..8 to cap concurrent native compute.
+ *
+ * Override via `PI_VOICE_SYNTH_PIPELINE_DEPTH` for power users who want
+ * to trade memory for latency or vice versa.
+ */
+function resolvePipelineDepth(env: NodeJS.ProcessEnv = process.env): number {
+	const raw = env.PI_VOICE_SYNTH_PIPELINE_DEPTH;
+	if (!raw) return 3;
+	const n = Number.parseInt(raw, 10);
+	if (!Number.isFinite(n) || n < 1) return 3;
+	if (n > 8) return 8;
+	return n;
 }
 
 // ─── Backend dispatch ─────────────────────────────────────────────────────────

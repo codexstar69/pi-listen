@@ -19,9 +19,32 @@ export interface VoiceOnboardingState {
 	lastValidatedAt?: string;
 	source?: "first-run" | "setup-command" | "migration" | "repair";
 	skippedAt?: string;
+	/** Set after the one-time "switch to Metal" hint has been shown to an
+	 *  existing Apple Silicon user on a sherpa-onnx model. Sticky so the
+	 *  hint never fires twice on the same install. */
+	whisperCppHintShownAt?: string;
 }
 
 export type VoiceBackend = "deepgram" | "local";
+
+/**
+ * Local STT engine preference. Distinct from `backend` (which selects
+ * between Deepgram cloud and local in-process). When `backend === "local"`,
+ * this picks WHICH local engine — the older sherpa-onnx (CPU, prebuilt,
+ * works everywhere) or the newer whisper.cpp (GPU-accelerated on Apple
+ * Silicon Metal + Linux CUDA, but requires node-gyp build).
+ *
+ *   - "auto" (default): `engine-factory.pickDefaultModelForPlatform()`
+ *     picks the best available model for the runtime — Metal Whisper on
+ *     Apple Silicon, sherpa-onnx Moonshine elsewhere. New users get the
+ *     fastest option without thinking about it.
+ *   - "sherpa-onnx": force sherpa-onnx regardless of platform. Useful as
+ *     an escape hatch when whisper.cpp regresses, or when the user wants
+ *     deterministic CPU-only behavior. Same effect as `PI_VOICE_FORCE_SHERPA=1`.
+ *   - "whisper-cpp": force whisper.cpp regardless of platform. Will surface
+ *     a clear error on platforms where the smart-whisper binding can't load.
+ */
+export type VoiceEnginePreference = "auto" | "sherpa-onnx" | "whisper-cpp";
 
 export interface VoiceConfig {
 	version: number;
@@ -33,6 +56,12 @@ export interface VoiceConfig {
 	deepgramApiKey?: string;
 	/** Transcription backend — "deepgram" (cloud streaming) or "local" (batch via local server) */
 	backend?: VoiceBackend;
+	/** Local engine preference: "auto" (default), "sherpa-onnx", or
+	 *  "whisper-cpp". Surfaces in /voice-settings as a top-level toggle
+	 *  so users can pick their preferred local STT engine without picking
+	 *  a specific model first. The auto-resolver picks the best supported
+	 *  model in the chosen engine family. */
+	voiceEngine?: VoiceEnginePreference;
 	/** Local model ID (e.g. "whisper-small", "whisper-turbo", "parakeet-v3") */
 	localModel?: string;
 	/** Local transcription server URL (default: http://localhost:8080) */
@@ -171,6 +200,13 @@ function normalizeOnboarding(input: any, fallbackCompleted: boolean): VoiceOnboa
 		lastValidatedAt: typeof input?.lastValidatedAt === "string" ? input.lastValidatedAt : undefined,
 		source: typeof input?.source === "string" ? input.source : fallbackCompleted ? "migration" : undefined,
 		skippedAt: typeof input?.skippedAt === "string" ? input.skippedAt : undefined,
+		// Round-8 audit (GPT-5.5 Amp P2): the round-3 "shown once per
+		// install" Apple Silicon whisper.cpp hint was being saved by
+		// `markWhisperCppHintShown()` but DROPPED here on the next
+		// reload — so the hint re-fired every session despite the
+		// sticky-flag design. Persist the timestamp through the
+		// normalizer.
+		whisperCppHintShownAt: typeof input?.whisperCppHintShownAt === "string" ? input.whisperCppHintShownAt : undefined,
 	};
 }
 
@@ -192,6 +228,16 @@ function migrateConfig(rawVoice: any, source: VoiceConfigSource): VoiceConfig {
 		scope: (rawVoice.scope as VoiceSettingsScope | undefined) ?? (source === "project" ? "project" : "global"),
 		deepgramApiKey: typeof rawVoice.deepgramApiKey === "string" ? rawVoice.deepgramApiKey : undefined,
 		backend: rawVoice.backend === "local" ? "local" : undefined,
+		// Round-6 audit (GPT-5.5×2 BLOCK): voiceEngine was missing from
+		// migrateConfig — settings-panel writes it but the next
+		// session_start would reload the persisted file without
+		// `voiceEngine` and silently lose the user's preference. Validate
+		// against the literal union so a hand-edited config with an
+		// unknown engine value falls back to undefined (= "auto") rather
+		// than poisoning the engine factory.
+		voiceEngine: rawVoice.voiceEngine === "sherpa-onnx" || rawVoice.voiceEngine === "whisper-cpp" || rawVoice.voiceEngine === "auto"
+			? rawVoice.voiceEngine
+			: undefined,
 		localModel: typeof rawVoice.localModel === "string" ? rawVoice.localModel : undefined,
 		localEndpoint: typeof rawVoice.localEndpoint === "string" ? rawVoice.localEndpoint : undefined,
 		toggleShortcut: source !== "project" && typeof rawVoice.toggleShortcut === "string"

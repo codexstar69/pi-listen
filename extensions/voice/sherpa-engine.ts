@@ -59,8 +59,12 @@ export function getOrCreateRecognizer(model: LocalModelInfo, modelDir: string, l
 	// shared loader so STT and TTS share the single-flight init.
 	getSherpaModule();
 
-	// Strip regional suffix for local models (e.g. "pt-BR" → "pt")
-	const baseLang = language.split("-")[0] || language;
+	// Strip regional suffix and lowercase. Round-5 audit (Kimi 2.5T #4):
+	// lowercase MUST match the adapter's `recognizerKey()` normalization,
+	// otherwise `lang="EN-US"` produces adapter key `"...\0en"` but sherpa-
+	// engine's internal key is `(model, "EN")` — cache incoherence between
+	// the two layers.
+	const baseLang = (language.split("-")[0] || language).toLowerCase();
 
 	if (cachedRecognizer && cachedRecognizer.modelId === model.id && cachedRecognizer.language === baseLang) {
 		return cachedRecognizer.recognizer;
@@ -157,7 +161,7 @@ function createWhisperRecognizer(model: LocalModelInfo, modelDir: string, langua
 			},
 			tokens: path.join(modelDir, files.tokens!),
 			numThreads: getNumThreads(),
-			provider: "cpu",
+			provider: getProvider("whisper"),
 		},
 	});
 }
@@ -193,7 +197,7 @@ function createMoonshineRecognizer(model: LocalModelInfo, modelDir: string): She
 			moonshine: moonshineConfig,
 			tokens: path.join(modelDir, files.tokens!),
 			numThreads: getNumThreads(),
-			provider: "cpu",
+			provider: getProvider("moonshine"),
 		},
 	});
 }
@@ -215,7 +219,7 @@ function createSenseVoiceRecognizer(model: LocalModelInfo, modelDir: string, lan
 			},
 			tokens: path.join(modelDir, files.tokens!),
 			numThreads: getNumThreads(),
-			provider: "cpu",
+			provider: getProvider("sense_voice"),
 		},
 	});
 }
@@ -235,7 +239,7 @@ function createNemoCtcRecognizer(model: LocalModelInfo, modelDir: string): Sherp
 			},
 			tokens: path.join(modelDir, files.tokens!),
 			numThreads: getNumThreads(),
-			provider: "cpu",
+			provider: getProvider("nemo_ctc"),
 		},
 	});
 }
@@ -243,10 +247,9 @@ function createNemoCtcRecognizer(model: LocalModelInfo, modelDir: string): Sherp
 // Verified against: nodejs-addon-examples/test_asr_non_streaming_transducer.js
 //
 // Tuning notes:
-//   - `provider: "cpu"` is intentionally NOT "coreml". For transformer / TDT
-//     graphs CoreML is currently a regression on Apple Silicon (sherpa-onnx
-//     issue #2910 — RTF 0.470 with CoreML vs 0.427 CPU on M2 Max). Revisit
-//     when sherpa-onnx upstream lands the partition-aware CoreML EP.
+//   - Transducer stays on CPU regardless of platform — see getProvider().
+//     CoreML regresses TDT graphs (sherpa-onnx issue #2910, RTF 0.470 vs
+//     0.427 on M2 Max). Revisit when the partition-aware CoreML EP lands.
 //   - `numThreads` uses the higher transducer cap (6 vs Whisper's 4). Parakeet
 //     TDT v3's encoder-decoder-joiner scales to ~6 P-cores; 4 leaves modern
 //     M-series chips idle. Per RTF curves at
@@ -267,7 +270,7 @@ function createTransducerRecognizer(model: LocalModelInfo, modelDir: string): Sh
 			},
 			tokens: path.join(modelDir, files.tokens!),
 			numThreads: getNumThreads(TRANSDUCER_MAX_THREADS),
-			provider: "cpu",
+			provider: getProvider("transducer"),
 			// debug: 1 — uncomment to log per-stage (encoder/decoder/joiner) timings.
 		},
 	});
@@ -324,3 +327,31 @@ function getNumThreads(maxThreads = 4): number {
 
 /** Transducer (Parakeet, Zipformer) thread budget — see getNumThreads(). */
 const TRANSDUCER_MAX_THREADS = 6;
+
+/**
+ * Pick an ONNX Runtime execution provider for `modelType`.
+ *
+ * Apple Silicon ships a bundled CoreML EP in `libonnxruntime.dylib`
+ * (verified via `nm -gU` → `OrtSessionOptionsAppendExecutionProvider_CoreML`).
+ * Routing encoder-heavy graphs through it offloads matmuls to the Neural
+ * Engine / GPU and typically lands 1.5–3× speedups vs. the CPU EP.
+ *
+ *   - "transducer" (Parakeet TDT, Zipformer) → CPU. CoreML is a measured
+ *     regression on M2 Max (sherpa-onnx issue #2910, RTF 0.470 vs 0.427)
+ *     until upstream lands the partition-aware EP.
+ *   - "whisper" / "moonshine" / "sense_voice" / "nemo_ctc" → CoreML on
+ *     darwin-arm64. If the int8/quantized graph has ops CoreML can't
+ *     compile, ORT silently partitions the unsupported subgraph back to
+ *     CPU, so the worst case is "no change," not a crash.
+ *   - Any other platform → CPU.
+ *
+ * Env escape hatch: `PI_VOICE_FORCE_CPU=1` forces CPU across the board.
+ * Use it to A/B test or work around a CoreML driver regression without
+ * rebuilding.
+ */
+function getProvider(modelType: string): string {
+	if (process.env.PI_VOICE_FORCE_CPU === "1") return "cpu";
+	if (modelType === "transducer") return "cpu";
+	if (process.platform === "darwin" && process.arch === "arm64") return "coreml";
+	return "cpu";
+}

@@ -52,6 +52,36 @@ export interface LocalModelInfo {
 	speed: 1 | 2 | 3 | 4 | 5;
 	/** sherpa-onnx model configuration — file paths and download URLs */
 	sherpaModel: SherpaModelConfig;
+
+	// ─── Pluggable engine fields (Phase 1, additive + back-compat) ───────────
+	// All three are optional. Existing entries pre-date these fields and
+	// behave identically to before; the defaults are documented below.
+
+	/** Which STT engine runs this model. `undefined` → "sherpa-onnx" (the
+	 *  legacy default; preserves zero-touch back-compat for every existing
+	 *  catalog entry). Phase 2 adds "whisper-cpp" entries. */
+	engine?: import("./engine").EngineId;
+
+	/** Per-runtime support constraints. `undefined` (or empty) → universally
+	 *  supported (matches the sherpa-onnx legacy assumption). When set, at
+	 *  least one entry must match the runtime env for the model to be
+	 *  selectable. Resolution lives in `model-compat.isModelSupported`. */
+	supports?: import("./model-compat").ModelSupport[];
+
+	/** On-disk file format. `undefined` → "onnx" (sherpa-onnx legacy). GGUF
+	 *  models (whisper.cpp) ship as a single .bin file; ONNX models ship
+	 *  multiple files via `sherpaModel.files`. */
+	format?: "onnx" | "gguf";
+
+	/** whisper.cpp model configuration — used when `format === "gguf"`.
+	 *  Phase 1 declares the field for forward-compat; no catalog entries
+	 *  populate it yet. Phase 2 adds GGUF entries. */
+	whisperCppModel?: {
+		/** On-disk filename, e.g. "ggml-base.en-q5_1.bin". */
+		files: { model: string };
+		/** GGUF source URL. */
+		downloadUrls: { model: string };
+	};
 }
 
 // HuggingFace base URLs for sherpa-onnx models (verified repos)
@@ -86,6 +116,87 @@ function hf2(repo: string, file: string): string {
  *   variants compatible with sherpa-onnx. See: https://github.com/moonshine-ai/moonshine
  */
 export const LOCAL_MODELS: LocalModelInfo[] = [
+	// ═══════════════════════════════════════════════════════════════════════
+	// WHISPER.CPP METAL — Apple Silicon top picks (Phase 2)
+	//   GGUF source: https://huggingface.co/ggerganov/whisper.cpp (Apache 2.0)
+	//   Engine: smart-whisper (NAPI binding around whisper.cpp + Metal)
+	//   Platforms: darwin-arm64 only — Metal kernels are macOS-specific.
+	// ═══════════════════════════════════════════════════════════════════════
+	{
+		id: "whisper-base-en-metal", name: "Whisper Base EN (Metal)",
+		size: "~57 MB", sizeBytes: 60_000_000, runtimeRamMB: 200,
+		notes: "Default for fresh Apple Silicon installs. Fast, ~96% accuracy.",
+		langSupport: "english-only", tier: "edge", preferred: true, accuracy: 4, speed: 5,
+		engine: "whisper-cpp",
+		supports: [{ platform: "darwin", arch: "arm64" }],
+		format: "gguf",
+		whisperCppModel: {
+			files: { model: "ggml-base.en-q5_1.bin" },
+			downloadUrls: {
+				model: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en-q5_1.bin",
+			},
+		},
+		// Note: sherpaModel is required by the existing LocalModelInfo
+		// shape but unused for whisper-cpp entries. Stub with safe-but-
+		// non-functional values so callers that read the field for
+		// non-engine purposes (e.g. `langSupport` UI hints) stay happy.
+		// The engine factory routes via `model.engine` so the stub is
+		// never dispatched to sherpa-onnx.
+		sherpaModel: { type: "whisper", files: {}, downloadUrls: {} },
+	},
+	{
+		id: "whisper-large-v3-turbo-metal", name: "Whisper Turbo (Metal)",
+		size: "~574 MB", sizeBytes: 602_000_000, runtimeRamMB: 1700,
+		notes: "Best accuracy on Apple Silicon. Multilingual, ~99% accuracy, GPU-accelerated.",
+		langSupport: "whisper", tier: "standard", accuracy: 5, speed: 4,
+		engine: "whisper-cpp",
+		supports: [{ platform: "darwin", arch: "arm64" }],
+		format: "gguf",
+		whisperCppModel: {
+			files: { model: "ggml-large-v3-turbo-q5_0.bin" },
+			downloadUrls: {
+				model: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin",
+			},
+		},
+		sherpaModel: { type: "whisper", files: {}, downloadUrls: {} },
+	},
+	{
+		id: "whisper-tiny-en-metal", name: "Whisper Tiny EN (Metal)",
+		size: "~31 MB", sizeBytes: 33_000_000, runtimeRamMB: 110,
+		notes: "Smallest English model — fastest, lowest accuracy.",
+		langSupport: "english-only", tier: "edge", accuracy: 3, speed: 5,
+		engine: "whisper-cpp",
+		supports: [{ platform: "darwin", arch: "arm64" }],
+		format: "gguf",
+		whisperCppModel: {
+			files: { model: "ggml-tiny.en-q5_1.bin" },
+			downloadUrls: {
+				model: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en-q5_1.bin",
+			},
+		},
+		sherpaModel: { type: "whisper", files: {}, downloadUrls: {} },
+	},
+	// ═══════════════════════════════════════════════════════════════════════
+	// WHISPER.CPP CUDA — Linux GPU (Phase 3)
+	//   Same GGUF source as Metal entries; different supports constraint.
+	//   Requires `requiresCUDA: true` so device.hasCUDA gates selection.
+	// ═══════════════════════════════════════════════════════════════════════
+	{
+		id: "whisper-large-v3-turbo-cuda", name: "Whisper Turbo (CUDA)",
+		size: "~574 MB", sizeBytes: 602_000_000, runtimeRamMB: 1700,
+		notes: "Best accuracy on Linux x64 + NVIDIA GPU. Multilingual, GPU-accelerated.",
+		langSupport: "whisper", tier: "standard", accuracy: 5, speed: 4,
+		engine: "whisper-cpp",
+		supports: [{ platform: "linux", arch: "x64", requiresCUDA: true }],
+		format: "gguf",
+		whisperCppModel: {
+			files: { model: "ggml-large-v3-turbo-q5_0.bin" },
+			downloadUrls: {
+				model: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin",
+			},
+		},
+		sherpaModel: { type: "whisper", files: {}, downloadUrls: {} },
+	},
 	// ═══════════════════════════════════════════════════════════════════════
 	// TOP PICKS — best overall models, shown first
 	// ═══════════════════════════════════════════════════════════════════════
@@ -356,6 +467,56 @@ export const LOCAL_MODELS: LocalModelInfo[] = [
 
 export const DEFAULT_LOCAL_ENDPOINT = "http://localhost:8080";
 export const DEFAULT_LOCAL_MODEL = "parakeet-v3";
+
+/**
+ * Optional notifier the engine layer calls when a transcribe-time
+ * download begins / progresses / settles. Wired up by `voice.ts` at
+ * `session_start` so the user sees clear UI when the first recording
+ * triggers a model download (round-2 audit UX gap: previously the user
+ * saw a "hung" recording while a 57-800 MB GGUF was fetched).
+ *
+ * `null` until set; `transcribeInProcess` no-ops the notifier path when
+ * unset (CLI / test contexts without a UI surface).
+ */
+export type DownloadNotifierEvent =
+	| { type: "start"; modelId: string; sizeBytes: number; humanSize: string }
+	| { type: "progress"; modelId: string; raw: import("./model-download").DownloadProgress }
+	| { type: "done"; modelId: string }
+	| { type: "fail"; modelId: string; error: string };
+export type DownloadNotifier = (event: DownloadNotifierEvent) => void;
+
+let _downloadNotifier: DownloadNotifier | null = null;
+
+/** Set the transcribe-time download notifier. Called by voice.ts at
+ *  session_start (and `null` at session_shutdown). Single global slot
+ *  — only one session runs at a time. */
+export function setDownloadNotifier(fn: DownloadNotifier | null): void {
+	_downloadNotifier = fn;
+}
+
+/**
+ * Pick the role→URL map for downloading a model, based on its `format`.
+ * GGUF models (whisper.cpp) use `whisperCppModel.downloadUrls`; ONNX
+ * models use `sherpaModel.downloadUrls` (the legacy default for entries
+ * that pre-date the `format` field).
+ *
+ * Both maps share the same `Record<string, string>` shape so
+ * `model-download.ensureModelDownloaded` + `isModelDownloaded` can
+ * consume either without further branching.
+ */
+export function getDownloadUrlsForModel(model: LocalModelInfo): Record<string, string> {
+	if (model.format === "gguf") {
+		const urls = model.whisperCppModel?.downloadUrls;
+		if (!urls || Object.keys(urls).length === 0) {
+			throw new Error(
+				`Catalog entry "${model.id}" is format=gguf but has no ` +
+				`whisperCppModel.downloadUrls — fix in extensions/voice/local.ts.`,
+			);
+		}
+		return urls;
+	}
+	return model.sherpaModel.downloadUrls;
+}
 
 // ─── Language support per model family ───────────────────────────────────────
 // Whisper uses simple ISO 639-1 codes (no regional variants like "en-AU").
@@ -787,30 +948,67 @@ export function abortLocalSession(session: LocalSession | null): void {
  * Auto-downloads model on first use.
  */
 async function transcribeInProcess(pcmData: Buffer, config: VoiceConfig): Promise<string> {
-	const { initSherpa, isSherpaAvailable, getSherpaError, getOrCreateRecognizer, transcribeBuffer } = await import("./sherpa-engine");
-	const { ensureModelDownloaded } = await import("./model-download");
+	const { ensureModelDownloaded, isModelDownloaded } = await import("./model-download");
+	const { getEngineForModel } = await import("./engine-factory");
 
-	// Initialize sherpa if needed
-	if (!isSherpaAvailable()) {
-		const ok = await initSherpa();
+	const modelId = config.localModel || DEFAULT_LOCAL_MODEL;
+	const model = LOCAL_MODELS.find(m => m.id === modelId);
+	if (!model) throw new Error(`Unknown model: ${modelId}`);
+
+	// Ensure model files are downloaded BEFORE engine init/warmup so the
+	// engine never has to fetch. (Engines deliberately do not own model
+	// downloading — separation of concerns.) `getDownloadUrlsForModel`
+	// picks the right role→URL map based on `model.format`: ONNX entries
+	// use `sherpaModel.downloadUrls`, GGUF entries use
+	// `whisperCppModel.downloadUrls`.
+	const downloadUrls = getDownloadUrlsForModel(model);
+
+	// Notifier hook for the round-2 audit UX gap: surface a clear download
+	// notification when the first recording triggers a fetch. The notifier
+	// is set by voice.ts at session_start; `null` in CLI/test contexts.
+	const willDownload = !isModelDownloaded(model.id, downloadUrls);
+	if (willDownload) _downloadNotifier?.({
+		type: "start", modelId: model.id, sizeBytes: model.sizeBytes, humanSize: model.size,
+	});
+
+	let modelDir: string;
+	try {
+		modelDir = await ensureModelDownloaded(
+			model.id,
+			downloadUrls,
+			model.sizeBytes,
+			willDownload && _downloadNotifier
+				? (raw) => _downloadNotifier?.({ type: "progress", modelId: model.id, raw })
+				: undefined,
+		);
+	} catch (err) {
+		if (willDownload) _downloadNotifier?.({
+			type: "fail", modelId: model.id, error: err instanceof Error ? err.message : String(err),
+		});
+		throw err;
+	}
+	if (willDownload) _downloadNotifier?.({ type: "done", modelId: model.id });
+
+	const engine = getEngineForModel(model);
+	if (!engine.available) {
+		const ok = await engine.init();
 		if (!ok) {
-			throw new Error(`sherpa-onnx not available: ${getSherpaError() || "unknown error"}. Set localEndpoint in config to use an external server instead.`);
+			// Round-6 audit (GPT-5.5 Amp polish): name the actual engine
+			// in the error so users with whisper-cpp selected don't see
+			// "sherpa-onnx not available" — they correctly see
+			// "whisper-cpp not available" and can act on it.
+			throw new Error(
+				`${engine.id} not available: ${engine.error || "unknown error"}. ` +
+				`Set localEndpoint in config to use an external server instead.`,
+			);
 		}
 	}
 
-	const model = LOCAL_MODELS.find(m => m.id === (config.localModel || DEFAULT_LOCAL_MODEL));
-	if (!model) throw new Error(`Unknown model: ${config.localModel}`);
-
-	// Ensure model files are downloaded
-	const modelDir = await ensureModelDownloaded(
-		model.id,
-		model.sherpaModel.downloadUrls,
-		model.sizeBytes,
-	);
-
-	// Create/reuse recognizer and transcribe
-	const recognizer = getOrCreateRecognizer(model, modelDir, config.language || "en");
-	return transcribeBuffer(pcmData, recognizer);
+	return engine.transcribe(pcmData, {
+		model,
+		modelDir,
+		lang: config.language || "en",
+	});
 }
 
 /** Check if a local transcription server is reachable. */
