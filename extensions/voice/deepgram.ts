@@ -25,6 +25,10 @@ export function buildDeepgramWsUrl(config: VoiceConfig): string {
 		smart_format: "true",
 		interim_results: "true",
 	});
+	for (const keyterm of config.deepgramKeyterms ?? []) {
+		const normalized = keyterm.trim();
+		if (normalized) params.append("keyterm", normalized);
+	}
 	return `${DEEPGRAM_WS_URL}?${params.toString()}`;
 }
 

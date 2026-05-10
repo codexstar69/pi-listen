@@ -39,6 +39,8 @@ export interface VoiceConfig {
 	localEndpoint?: string;
 	/** Global-only shortcut used to toggle recording without hold-to-talk */
 	toggleShortcut?: string;
+	/** Deepgram Nova-3 keyterms: words/phrases to bias recognition toward. */
+	deepgramKeyterms?: string[];
 
 	// ─── TTS (text-to-speech) ─────────────────────────────────────────
 	// All TTS fields are opt-in (default: TTS disabled). New in v6.0.0.
@@ -125,6 +127,7 @@ export const DEFAULT_CONFIG: VoiceConfig = {
 	localModel: undefined,
 	localEndpoint: undefined,
 	toggleShortcut: "ctrl+shift+v",
+	deepgramKeyterms: [],
 	// TTS defaults — all opt-in
 	ttsEnabled: false,
 	ttsBackend: "local",
@@ -197,6 +200,9 @@ function migrateConfig(rawVoice: any, source: VoiceConfigSource): VoiceConfig {
 		toggleShortcut: source !== "project" && typeof rawVoice.toggleShortcut === "string"
 			? rawVoice.toggleShortcut
 			: DEFAULT_CONFIG.toggleShortcut,
+		deepgramKeyterms: Array.isArray(rawVoice.deepgramKeyterms)
+			? rawVoice.deepgramKeyterms.filter((term: unknown): term is string => typeof term === "string" && term.trim().length > 0)
+			: DEFAULT_CONFIG.deepgramKeyterms,
 		// TTS fields — type-validated; mismatched persisted values fall
 		// back to safe defaults so a hand-edited config can't poison the
 		// engine. Notably: ttsLocalVoiceId rejects strings (would crash
