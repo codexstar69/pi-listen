@@ -296,6 +296,24 @@ Settings stored in Pi's settings files under the `voice` key:
 into `~/.pi/agent/settings.json`. If you paste a key during onboarding, that is
 an explicit save and it still goes to `~/.env.secrets` or `~/.zshrc`.
 
+### Deepgram keyterms
+
+When using the Deepgram backend, add `deepgramKeyterms` to bias recognition
+toward words or phrases that are frequently misheard, such as app names,
+libraries, or product names:
+
+```json
+{
+  "voice": {
+    "backend": "deepgram",
+    "deepgramKeyterms": ["ffmpeg", "GStreamer", "pi agent"]
+  }
+}
+```
+
+Each entry is sent to Deepgram as a `keyterm` query parameter. This setting is
+ignored by the local/offline backend.
+
 ---
 
 ## Troubleshooting

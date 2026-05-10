@@ -77,6 +77,19 @@ describe("loadConfigWithSource", () => {
 		expect(result.config.onboarding.completed).toBe(false);
 	});
 
+	test("loads Deepgram keyterms from settings", () => {
+		const cwd = makeTempDir();
+		const agentDir = path.join(cwd, "agent-home");
+		writeSettings(agentDir, "settings.json", {
+			enabled: true,
+			deepgramKeyterms: ["Raycast", "", "  ", "VS Code"],
+		});
+
+		const result = loadConfigWithSource(cwd, { agentDir });
+
+		expect(result.config.deepgramKeyterms).toEqual(["Raycast", "VS Code"]);
+	});
+
 	test("prefers project config over global config and preserves project scope", () => {
 		const cwd = makeTempDir();
 		const agentDir = path.join(cwd, "agent-home");
