@@ -6,6 +6,7 @@ import {
 	DEFAULT_CONFIG,
 	getSessionStartPersistedConfig,
 	isLoopbackEndpoint,
+	isValidHoldKey,
 	loadConfigWithSource,
 	needsOnboarding,
 	saveConfig,
@@ -75,6 +76,32 @@ describe("loadConfigWithSource", () => {
 
 		expect(result.source).toBe("global");
 		expect(result.config.onboarding.completed).toBe(false);
+	});
+
+	test("loads configured hold key from settings", () => {
+		const cwd = makeTempDir();
+		const agentDir = path.join(cwd, "agent-home");
+		writeSettings(agentDir, "settings.json", {
+			enabled: true,
+			holdKey: "alt+r",
+		});
+
+		const result = loadConfigWithSource(cwd, { agentDir });
+
+		expect(result.config.holdKey).toBe("alt+r");
+	});
+
+	test("falls back to default hold key for invalid settings", () => {
+		const cwd = makeTempDir();
+		const agentDir = path.join(cwd, "agent-home");
+		writeSettings(agentDir, "settings.json", {
+			enabled: true,
+			holdKey: "alt v",
+		});
+
+		const result = loadConfigWithSource(cwd, { agentDir });
+
+		expect(result.config.holdKey).toBe(DEFAULT_CONFIG.holdKey);
 	});
 
 	test("prefers project config over global config and preserves project scope", () => {
@@ -280,6 +307,21 @@ describe("saveConfig", () => {
 
 		expect(tmpFiles).toHaveLength(0);
 		expect(JSON.parse(fs.readFileSync(savedPath, "utf8"))).toBeDefined();
+	});
+});
+
+describe("isValidHoldKey", () => {
+	test("accepts plain and modified key ids", () => {
+		expect(isValidHoldKey("space")).toBe(true);
+		expect(isValidHoldKey("alt+r")).toBe(true);
+		expect(isValidHoldKey("ctrl+shift+v")).toBe(true);
+		expect(isValidHoldKey("f8")).toBe(true);
+	});
+
+	test("rejects malformed key ids", () => {
+		expect(isValidHoldKey("")).toBe(false);
+		expect(isValidHoldKey("alt r")).toBe(false);
+		expect(isValidHoldKey("hyper+r")).toBe(false);
 	});
 });
 

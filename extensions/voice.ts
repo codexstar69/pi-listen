@@ -72,6 +72,7 @@ import * as path from "node:path";
 import {
 	DEFAULT_CONFIG,
 	getSessionStartPersistedConfig,
+	isValidHoldKey,
 	loadConfigWithSource,
 	loadGlobalToggleShortcut,
 	saveConfig,
@@ -667,6 +668,19 @@ export default function (pi: ExtensionAPI) {
 		const v = (config as any).holdThresholdMs;
 		if (typeof v === "number" && Number.isFinite(v) && v >= 200 && v <= 3000) return v;
 		return HOLD_THRESHOLD_DEFAULT_MS;
+	}
+
+	function getHoldKey(): string {
+		const v = (config as any).holdKey;
+		if (typeof v === "string" && isValidHoldKey(v)) return v;
+		return DEFAULT_CONFIG.holdKey || "space";
+	}
+
+	function formatKeyLabel(keyId: string): string {
+		return keyId
+			.split("+")
+			.map((p) => p.length <= 1 ? p.toUpperCase() : p[0]!.toUpperCase() + p.slice(1))
+			.join("+");
 	}
 
 	// ─── Toggle Shortcut (resolved once at startup, used everywhere) ──────
@@ -1517,6 +1531,7 @@ export default function (pi: ExtensionAPI) {
 
 	function onSpaceReleaseDetected() {
 		releaseDetectTimer = null;
+		const holdKeyLabel = formatKeyLabel(getHoldKey());
 		voiceDebug("onSpaceReleaseDetected", { voiceState, holdConfirmed, spaceConsumed, spaceDownTime, spacePressCount, timeSinceRecStart: spaceConsumed ? Date.now() - recordingStartedAt : null });
 
 		// If we never confirmed this was a hold (< REPEAT_CONFIRM_COUNT rapid presses),
@@ -1542,7 +1557,7 @@ export default function (pi: ExtensionAPI) {
 			spacePressCount = 0;
 			holdConfirmed = false;
 			// Don't type a space — user clearly intended to trigger voice but let go too early
-			ctx?.ui.notify("Hold SPACE longer to activate voice.", "info");
+			ctx?.ui.notify(`Hold ${holdKeyLabel} longer to activate voice.`, "info");
 			return;
 		}
 
@@ -1586,6 +1601,11 @@ export default function (pi: ExtensionAPI) {
 		terminalInputUnsub = ctx.ui.onTerminalInput((data: string) => {
 			if (!config.enabled) return undefined;
 
+			const holdKey = getHoldKey();
+			const holdKeyIsSpace = holdKey === "space";
+			const holdKeyLabel = formatKeyLabel(holdKey);
+			const isHoldKey = matchesKey(data, holdKey as KeyId);
+
 			// v7.1 §4 — escape priority routing for v7.1 widgets. When
 			// no overlay (panel/help/picker) is in front (those run
 			// inside ctx.ui.custom() and consume their own input), the
@@ -1614,34 +1634,35 @@ export default function (pi: ExtensionAPI) {
 				return { consume: true };
 			}
 
-			// ── Track non-space keypresses for typing cooldown ──
-			// If user was just typing (non-space key within TYPING_COOLDOWN_MS),
+			// ── Track non-hold keypresses for typing cooldown ──
+			// If user was just typing (non-hold key within TYPING_COOLDOWN_MS),
 			// don't let space holds activate voice — they're just typing.
-			if (!matchesKey(data, "space") && !isKeyRelease(data) && !isKeyRepeat(data)) {
-				// Regular keypress that isn't space — user is typing
+			if (!isHoldKey && !isKeyRelease(data) && !isKeyRepeat(data)) {
+				// Regular keypress that isn't the hold key — user is typing
 				if (data.length > 0 && data.charCodeAt(0) >= 32) {
 					lastNonSpaceKeyTime = Date.now();
 				}
 			}
 
-			// ── SPACE handling ──
-			if (matchesKey(data, "space")) {
+			// ── Hold-to-talk key handling ──
+			if (isHoldKey) {
 				// ── ERROR COOLDOWN: block all voice activation for 5s after an error ──
 				if (errorCooldownUntil > Date.now()) {
-					// During cooldown, let space through as a normal character
-					return undefined;
+					// During cooldown, let space through as a normal character.
+					// Non-space hold keys are consumed to avoid accidental editor input.
+					return holdKeyIsSpace ? undefined : { consume: true };
 				}
 
 				// ── TYPING COOLDOWN: if user was just typing, let space through ──
 				// Apple-style: if a non-space key was pressed recently, this space
 				// is part of typing (e.g., "hello world"), not a voice activation.
 				// Only applies to NEW activations — don't interrupt active recording.
-				if (voiceState === "idle" && !spaceConsumed &&
+				if (holdKeyIsSpace && voiceState === "idle" && !spaceConsumed &&
 					lastNonSpaceKeyTime > 0 && (Date.now() - lastNonSpaceKeyTime) < TYPING_COOLDOWN_MS) {
 					return undefined;
 				}
 
-				voiceDebug("SPACE event", {
+				voiceDebug("hold key event", {
 					isRelease: isKeyRelease(data),
 					isRepeat: isKeyRepeat(data),
 					voiceState,
@@ -1650,6 +1671,7 @@ export default function (pi: ExtensionAPI) {
 					spaceConsumed,
 					spacePressCount,
 					spaceDownTime: spaceDownTime ? Date.now() - spaceDownTime : null,
+					holdKey,
 					dataHex: Buffer.from(data).toString("hex"),
 				});
 
@@ -1669,11 +1691,12 @@ export default function (pi: ExtensionAPI) {
 						hideWidget();
 						setVoiceState("idle");
 						if (holdDuration < 300) {
-							// Quick tap — just type a space
-							if (ctx?.hasUI) ctx.ui.setEditorText((ctx.ui.getEditorText() || "") + " ");
+							// Quick space tap — just type a space. Other configured hold keys
+							// are consumed so they don't leak into the editor.
+							if (holdKeyIsSpace && ctx?.hasUI) ctx.ui.setEditorText((ctx.ui.getEditorText() || "") + " ");
 						} else {
 							// Held long enough to see warmup but let go → show hint
-							ctx?.ui.notify("Hold SPACE longer to activate voice.", "info");
+							ctx?.ui.notify(`Hold ${holdKeyLabel} longer to activate voice.`, "info");
 						}
 						return { consume: true };
 					}
@@ -1682,7 +1705,7 @@ export default function (pi: ExtensionAPI) {
 					// Kitty path since we enter warmup on first press, but handle anyway)
 					if (spaceDownTime && !holdConfirmed && voiceState === "idle") {
 						resetHoldState();
-						if (ctx?.hasUI) ctx.ui.setEditorText((ctx.ui.getEditorText() || "") + " ");
+						if (holdKeyIsSpace && ctx?.hasUI) ctx.ui.setEditorText((ctx.ui.getEditorText() || "") + " ");
 						return { consume: true };
 					}
 
@@ -1803,10 +1826,10 @@ export default function (pi: ExtensionAPI) {
 					spaceDownTime = Date.now();
 					holdConfirmed = true;
 					if (!kittyReleaseDetected) {
-						voiceDebug("SPACE during recording → cancel delayed stop, re-arm release detect");
+						voiceDebug("hold key during recording → cancel delayed stop, re-arm release detect");
 						resetReleaseDetect();
 					} else {
-						voiceDebug("SPACE during recording → cancel delayed stop (Kitty)");
+						voiceDebug("hold key during recording → cancel delayed stop (Kitty)");
 					}
 					return { consume: true };
 				}
@@ -1814,7 +1837,7 @@ export default function (pi: ExtensionAPI) {
 				// If already in warmup → consume
 				if (voiceState === "warmup") {
 					if (!kittyReleaseDetected) {
-						voiceDebug("SPACE during warmup → re-arm release detect");
+						voiceDebug("hold key during warmup → re-arm release detect");
 						resetReleaseDetect();
 					}
 					return { consume: true };
@@ -1825,7 +1848,7 @@ export default function (pi: ExtensionAPI) {
 				// voiceState transitioning to "recording" (async gap)
 				if (spaceConsumed) {
 					if (!kittyReleaseDetected) {
-						voiceDebug("SPACE while spaceConsumed (async gap) → re-arm release detect");
+						voiceDebug("hold key while spaceConsumed (async gap) → re-arm release detect");
 						resetReleaseDetect();
 					}
 					return { consume: true };
@@ -1956,10 +1979,11 @@ export default function (pi: ExtensionAPI) {
 					}
 				}
 
-				// IDLE — first SPACE press (non-Kitty path)
-				// Do NOT consume — let it pass through to whatever UI is focused
-				// (editor, search box, picker, etc.). Only start consuming after
-				// we confirm it's a hold via REPEAT_CONFIRM_COUNT rapid presses.
+				// IDLE — first hold-key press (non-Kitty path)
+				// For SPACE, do NOT consume — let it pass through to whatever UI is
+				// focused (editor, search box, picker, etc.). For non-space keys,
+				// consume immediately so configured activation keys don't type text.
+				// After confirming a hold, all repeats are consumed.
 				if (voiceState === "idle") {
 					spaceDownTime = Date.now();
 					spaceConsumed = false;
@@ -1969,8 +1993,9 @@ export default function (pi: ExtensionAPI) {
 
 					resetReleaseDetect();
 
-					// Don't consume — let the space reach the focused UI component
-					return undefined;
+					// Don't consume space — let it reach the focused UI component.
+					// Do consume non-space hold keys to avoid editor input.
+					return holdKeyIsSpace ? undefined : { consume: true };
 				}
 
 				if (spaceConsumed) return { consume: true };
@@ -2163,10 +2188,11 @@ export default function (pi: ExtensionAPI) {
 			const backendLabel = hasLocalModel
 				? `Local model: ${LOCAL_MODELS.find(m => m.id === config.localModel)?.name || config.localModel} (offline, batch mode)`
 				: "Deepgram Nova-3 (cloud, live streaming)";
+			const holdKeyLabel = formatKeyLabel(getHoldKey());
 			const lines = [
 				"pi-listen ready!",
 				"",
-				"  Hold SPACE to record → release to transcribe",
+				`  Hold ${holdKeyLabel} to record → release to transcribe`,
 				`  ${toggleShortcutLabel} to toggle recording`,
 				`  Backend: ${backendLabel}`,
 				`  Audio: ${audioTool ? `${audioTool.name}` : "NONE — install sox or ffmpeg"}`,
@@ -2462,12 +2488,13 @@ export default function (pi: ExtensionAPI) {
 				const backendInfo = config.backend === "local"
 					? `Voice enabled (local model: ${config.localModel || "whisper-small"}).`
 					: "Voice enabled (Deepgram streaming).";
+				const holdKeyLabel = formatKeyLabel(getHoldKey());
 				cmdCtx.ui.notify([
 					backendInfo,
 					"",
-					"  Hold SPACE → release to transcribe",
+					`  Hold ${holdKeyLabel} → release to transcribe`,
 					`  ${toggleShortcutLabel} → toggle recording on/off`,
-					"  Quick SPACE tap → types a space (no voice)",
+					holdKeyLabel === "Space" ? "  Quick SPACE tap → types a space (no voice)" : `  Quick ${holdKeyLabel} tap → consumed (no voice)`,
 					"  Escape × 2 → clear editor",
 					"",
 					"  /voice-settings → open settings panel",
@@ -2525,10 +2552,11 @@ export default function (pi: ExtensionAPI) {
 				editorTextBeforeVoice = ctx?.hasUI ? (ctx.ui.getEditorText() || "") : "";
 				const ok = await startVoiceRecording();
 				if (ok) {
+					const holdKeyLabel = formatKeyLabel(getHoldKey());
 					cmdCtx.ui.notify([
 						"🎤 Continuous dictation mode active.",
 						"",
-						"  Speak freely — no need to hold SPACE.",
+						`  Speak freely — no need to hold ${holdKeyLabel}.`,
 						"  /voice stop → finalize and stop",
 						`  ${toggleShortcutLabel} → also stops dictation`,
 					].join("\n"), "info");
@@ -2691,8 +2719,9 @@ export default function (pi: ExtensionAPI) {
 						lines.push("    whisper.cpp: ./build/bin/whisper-server -m models/ggml-small.bin --port 8080");
 						lines.push("    Or any OpenAI-compatible transcription server");
 					} else {
+						const holdKeyLabel = formatKeyLabel(getHoldKey());
 						lines.push("  All checks passed — voice is ready!");
-						lines.push(`  Hold SPACE to record, or use ${toggleShortcutLabel} to toggle.`);
+						lines.push(`  Hold ${holdKeyLabel} to record, or use ${toggleShortcutLabel} to toggle.`);
 					}
 				} else if (isLocal) {
 					// In-process sherpa-onnx mode — no server needed
@@ -2702,8 +2731,9 @@ export default function (pi: ExtensionAPI) {
 						lines.push("    brew install sox       # macOS (recommended)");
 						lines.push("    apt install sox        # Linux");
 					} else {
+						const holdKeyLabel = formatKeyLabel(getHoldKey());
 						lines.push("  All checks passed — voice is ready (in-process sherpa-onnx)!");
-						lines.push(`  Hold SPACE to record, or use ${toggleShortcutLabel} to toggle.`);
+						lines.push(`  Hold ${holdKeyLabel} to record, or use ${toggleShortcutLabel} to toggle.`);
 					}
 				} else {
 					ready = !!dgKey && !!tool;
@@ -2720,8 +2750,9 @@ export default function (pi: ExtensionAPI) {
 						lines.push("    apt install ffmpeg     # Linux (alternative)");
 						lines.push("    choco install sox      # Windows");
 					} else {
+						const holdKeyLabel = formatKeyLabel(getHoldKey());
 						lines.push("  All checks passed — voice is ready!");
-						lines.push(`  Hold SPACE to record, or use ${toggleShortcutLabel} to toggle.`);
+						lines.push(`  Hold ${holdKeyLabel} to record, or use ${toggleShortcutLabel} to toggle.`);
 					}
 				}
 
@@ -2773,8 +2804,9 @@ export default function (pi: ExtensionAPI) {
 
 	async function openHelpOverlay(cmdCtx: ExtensionCommandContext): Promise<void> {
 		if (!cmdCtx.hasUI) {
+			const holdKeyLabel = formatKeyLabel(getHoldKey());
 			cmdCtx.ui.notify(
-				"pi-listen: hold space=record · /voice-speak <text> · /voice-settings · /voice-help",
+				`pi-listen: hold ${holdKeyLabel}=record · /voice-speak <text> · /voice-settings · /voice-help`,
 				"info",
 			);
 			return;

@@ -39,6 +39,8 @@ export interface VoiceConfig {
 	localEndpoint?: string;
 	/** Global-only shortcut used to toggle recording without hold-to-talk */
 	toggleShortcut?: string;
+	/** Key held to activate push-to-talk recording. Defaults to "space". */
+	holdKey?: string;
 
 	// ─── TTS (text-to-speech) ─────────────────────────────────────────
 	// All TTS fields are opt-in (default: TTS disabled). New in v6.0.0.
@@ -125,6 +127,7 @@ export const DEFAULT_CONFIG: VoiceConfig = {
 	localModel: undefined,
 	localEndpoint: undefined,
 	toggleShortcut: "ctrl+shift+v",
+	holdKey: "space",
 	// TTS defaults — all opt-in
 	ttsEnabled: false,
 	ttsBackend: "local",
@@ -197,6 +200,9 @@ function migrateConfig(rawVoice: any, source: VoiceConfigSource): VoiceConfig {
 		toggleShortcut: source !== "project" && typeof rawVoice.toggleShortcut === "string"
 			? rawVoice.toggleShortcut
 			: DEFAULT_CONFIG.toggleShortcut,
+		holdKey: typeof rawVoice.holdKey === "string" && isValidHoldKey(rawVoice.holdKey)
+			? rawVoice.holdKey
+			: DEFAULT_CONFIG.holdKey,
 		// TTS fields — type-validated; mismatched persisted values fall
 		// back to safe defaults so a hand-edited config can't poison the
 		// engine. Notably: ttsLocalVoiceId rejects strings (would crash
@@ -283,6 +289,11 @@ export function isValidShortcut(shortcut: string): boolean {
 	if (key.length === 0) return false;
 	const mods = parts.slice(0, -1);
 	return mods.every((m) => VALID_MODIFIERS.has(m));
+}
+
+/** Validate a hold-to-talk key id like "space", "alt+v", or "f8". */
+export function isValidHoldKey(keyId: string): boolean {
+	return isValidShortcut(keyId);
 }
 
 /**

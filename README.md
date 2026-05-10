@@ -129,13 +129,13 @@ See your hardware profile (RAM, CPU, GPU), dependency status (sherpa-onnx runtim
 
 | Action | Key | Notes |
 |--------|-----|-------|
-| **Record to editor** | Hold `SPACE` (≥1.2s) | Release to finalize. Pre-records during warmup so you don't miss words. |
+| **Record to editor** | Hold configured key (`SPACE` by default, ≥1.2s) | Release to finalize. Pre-records during warmup so you don't miss words. |
 | **Toggle recording** | `Ctrl+Shift+V` | Works in all terminals — press to start, press again to stop. |
 | **Clear editor** | `Escape` × 2 | Double-tap within 500ms to clear all text. |
 
 ### How recording works
 
-1. **Hold SPACE** — warmup countdown appears, audio capture starts immediately (pre-recording)
+1. **Hold the configured key** — warmup countdown appears, audio capture starts immediately (pre-recording)
 2. **Keep holding** — live transcription streams into the editor (Deepgram) or audio buffers (local)
 3. **Release SPACE** — recording continues for 1.5s (tail recording) to catch your last word, then finalizes
 4. Text appears in the editor, ready to send
@@ -216,7 +216,7 @@ Plus 8 language-specialized Moonshine v2 variants for Japanese, Korean, Arabic, 
 ### How local models work
 
 ```
-Hold SPACE → audio captured to memory buffer
+Hold configured key → audio captured to memory buffer
                 ↓
 Release SPACE → buffer sent to sherpa-onnx (in-process)
                 ↓
@@ -287,6 +287,7 @@ Settings stored in Pi's settings files under the `voice` key:
     "backend": "local",
     "localModel": "parakeet-v3",
     "scope": "global",
+    "holdKey": "space",
     "onboarding": { "completed": true, "schemaVersion": 2 }
   }
 }
@@ -295,6 +296,10 @@ Settings stored in Pi's settings files under the `voice` key:
 `DEEPGRAM_API_KEY` from your shell is used at runtime and is not copied back
 into `~/.pi/agent/settings.json`. If you paste a key during onboarding, that is
 an explicit save and it still goes to `~/.env.secrets` or `~/.zshrc`.
+
+Set `holdKey` to change the key used for hold-to-talk activation. The default
+is `space`; examples include `alt+r`, `ctrl+shift+v`, or `f8`. Non-space hold
+keys are consumed while detecting a hold so they do not type into the editor.
 
 ---
 
