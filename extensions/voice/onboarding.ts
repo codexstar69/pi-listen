@@ -1,4 +1,4 @@
-import type { ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { VoiceBackend, VoiceConfig, VoiceSettingsScope } from "./config";
 import {
 	LOCAL_MODELS, DEFAULT_LOCAL_MODEL, DEFAULT_LOCAL_ENDPOINT,
@@ -129,7 +129,7 @@ export async function pickLanguage(
 	currentCode: string,
 	overrideLanguages?: LocalLangEntry[],
 ): Promise<string | undefined> {
-	const { Container, Input, Spacer, Text, fuzzyFilter, getKeybindings } = await import("@mariozechner/pi-tui");
+	const { Container, Input, Spacer, Text, fuzzyFilter, getKeybindings } = await import("@earendil-works/pi-tui");
 
 	const langList: LangEntry[] = overrideLanguages
 		? overrideLanguages.map(l => ({ name: l.name, code: l.code, popular: l.popular }))
@@ -311,7 +311,7 @@ export async function pickLocalModel(
 	currentModelId: string | undefined,
 	language: string,
 ): Promise<LocalModelInfo | undefined> {
-	const { Container, Input, Spacer, Text, fuzzyFilter, getKeybindings } = await import("@mariozechner/pi-tui");
+	const { Container, Input, Spacer, Text, fuzzyFilter, getKeybindings } = await import("@earendil-works/pi-tui");
 
 	const device = detectDevice();
 	const allItems = LOCAL_MODELS.map(m => {

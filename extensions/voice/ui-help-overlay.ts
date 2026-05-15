@@ -13,8 +13,8 @@
  *   - `h`  is intentionally NOT bound (vim users would trigger it).
  */
 
-import { matchesKey, Key } from "@mariozechner/pi-tui";
-import type { Theme } from "@mariozechner/pi-coding-agent";
+import { matchesKey, Key } from "@earendil-works/pi-tui";
+import type { Theme } from "@earendil-works/pi-coding-agent";
 import { ICON } from "./ui-icons";
 import { isPanelTooNarrow } from "./ui-width";
 
