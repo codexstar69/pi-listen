@@ -18,8 +18,8 @@
  *     is far below the cost of stale frames
  */
 
-import { matchesKey, Key, truncateToWidth } from "@mariozechner/pi-tui";
-import type { Theme, ThemeColor } from "@mariozechner/pi-coding-agent";
+import { matchesKey, Key, truncateToWidth } from "@earendil-works/pi-tui";
+import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import type { VoiceConfig, VoiceSettingsScope } from "./config";
 import { LOCAL_MODELS, getLanguagesForLocalModel, type LocalModelInfo } from "./local";
 import type { DeviceProfile, ModelFitness } from "./device";

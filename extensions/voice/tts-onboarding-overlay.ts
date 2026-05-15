@@ -30,8 +30,8 @@
  *   └──────────────────────────────────────────────────────────────┘
  */
 
-import { matchesKey, Key } from "@mariozechner/pi-tui";
-import type { Theme } from "@mariozechner/pi-coding-agent";
+import { matchesKey, Key } from "@earendil-works/pi-tui";
+import type { Theme } from "@earendil-works/pi-coding-agent";
 import { recommendDefaultModel, isTtsModelInstalled, getTtsModel } from "./tts-local-models";
 import { ICON } from "./ui-icons";
 import { isPanelTooNarrow, visualWidth, padRightVisual } from "./ui-width";

@@ -21,7 +21,7 @@
  * without changing any other code path.
  */
 
-import type { ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { VoiceConfig, VoiceSettingsScope } from "./config";
 import type { DeviceProfile } from "./device";
 import { recommendDefaultModel, isTtsModelInstalled, getTtsModel } from "./tts-local-models";
