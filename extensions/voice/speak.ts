@@ -153,7 +153,7 @@ export async function speak(opts: SpeakOpts): Promise<void> {
 		const sink = openPlaybackStream({ sampleRate: dgSampleRate, signal });
 		if (sink) {
 			try {
-				const voiceId = config.ttsDeepgramVoiceId || "aura-asteria-en";
+				const voiceId = config.ttsDeepgramVoiceId || DEFAULT_DEEPGRAM_TTS_VOICE;
 				for (const chunk of chunks) {
 					if (signal?.aborted) throw makeAbortError();
 					await deepgramSpeakStreaming({

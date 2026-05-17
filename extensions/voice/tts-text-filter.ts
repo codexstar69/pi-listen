@@ -208,9 +208,11 @@ export function prepareForSpeech(input: string, opts: PrepareForSpeechOpts = {})
 	text = text.replace(/([!?.])\1{2,}/g, "$1");
 	text = text.replace(/-{3,}/g, " ");
 
-	// 15. Collapse whitespace runs. Keep paragraph breaks (double newline)
-	//     because the segmenter uses them; everything else becomes a
-	//     single space.
+	// 15. Collapse whitespace runs. Keep a single paragraph break (double
+	//     newline) because TTS engines use it as a natural pause boundary,
+	//     but normalize whitespace-only blank-line runs so agent output
+	//     padded with spaces does not synthesize as long silence.
+	text = text.replace(/[ \t]*\r?\n[ \t]*/g, "\n");
 	text = text.replace(/[ \t]+/g, " ");
 	text = text.replace(/\n{3,}/g, "\n\n");
 	text = text.trim();

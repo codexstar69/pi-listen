@@ -56,9 +56,9 @@ export interface VoiceConfig {
 	 */
 	ttsLocalVoiceId?: number;
 	/**
-	 * Deepgram backend voice id (e.g. "aura-asteria-en"). Type-validated
+	 * Deepgram backend voice id (e.g. "aura-2-thalia-en"). Type-validated
 	 * at config load — numbers get rejected and fall back to
-	 * "aura-asteria-en".
+	 * the default Aura-2 voice.
 	 */
 	ttsDeepgramVoiceId?: string;
 	/** Speech rate multiplier; range 0.5–2.0. Default 1.0. */
@@ -130,7 +130,7 @@ export const DEFAULT_CONFIG: VoiceConfig = {
 	ttsBackend: "local",
 	ttsLocalModel: "kitten-nano-en-v0_2",
 	ttsLocalVoiceId: 0,
-	ttsDeepgramVoiceId: "aura-asteria-en",
+	ttsDeepgramVoiceId: "aura-2-thalia-en",
 	ttsSpeed: 1.0,
 	ttsAutoSpeak: true,
 	autoSubmitOnSpeak: false,
