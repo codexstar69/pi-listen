@@ -422,7 +422,11 @@ function startStreamingSession(
 		recProc.stdout?.on("data", (chunk: Buffer) => {
 			if (ws.readyState === WebSocket.OPEN) {
 				session.hadAudioData = true;
-				try { ws.send(chunk); } catch {}
+				const audioFrame = chunk.buffer.slice(
+					chunk.byteOffset,
+					chunk.byteOffset + chunk.byteLength,
+				) as ArrayBuffer;
+				try { ws.send(audioFrame); } catch {}
 				// Feed audio data to level meter for reactive waveform
 				updateAudioLevel(chunk);
 				// Start stale-session watchdog on first audio chunk
@@ -3352,7 +3356,7 @@ export default function (pi: ExtensionAPI) {
 			ctx = cmdCtx;
 			const { getTtsModel, isTtsModelInstalled, TTS_LOCAL_MODELS } =
 				await import("./voice/tts-local-models");
-			const { DEEPGRAM_TTS_VOICES } = await import("./voice/tts-deepgram");
+			const { DEEPGRAM_TTS_VOICES, DEFAULT_DEEPGRAM_TTS_VOICE } = await import("./voice/tts-deepgram");
 			const { resolveDeepgramApiKey } = await import("./voice/deepgram");
 
 			const isLocal = (config.ttsBackend ?? "local") === "local";
@@ -3382,7 +3386,7 @@ export default function (pi: ExtensionAPI) {
 				lines.push("");
 				lines.push(`  Catalog:      ${TTS_LOCAL_MODELS.length} models available — /voice-speak-models to browse`);
 			} else {
-				const voiceId = config.ttsDeepgramVoiceId ?? "aura-asteria-en";
+				const voiceId = config.ttsDeepgramVoiceId ?? DEFAULT_DEEPGRAM_TTS_VOICE;
 				const voice = DEEPGRAM_TTS_VOICES.find(v => v.id === voiceId);
 				const apiKey = resolveDeepgramApiKey(config);
 				lines.push("  Deepgram backend:");

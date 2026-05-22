@@ -32,6 +32,7 @@ import {
 } from "./tts-local-models";
 import {
 	DEEPGRAM_TTS_VOICES,
+	DEFAULT_DEEPGRAM_TTS_VOICE,
 	filterDeepgramVoicesByLanguage,
 } from "./tts-deepgram";
 import { PickerChassis, type PickerRow } from "./ui-picker";
@@ -732,7 +733,7 @@ export class VoiceSettingsPanel {
 			const voice = model?.voices.find(v => v.sid === sid);
 			return voice ? `${shortName} · ${voice.name}` : `${shortName} · sid ${sid}`;
 		}
-		return config.ttsDeepgramVoiceId ?? "aura-asteria-en";
+		return config.ttsDeepgramVoiceId ?? DEFAULT_DEEPGRAM_TTS_VOICE;
 	}
 
 	private formatLocalModelLabel(id: string | undefined): string {
@@ -753,7 +754,7 @@ export class VoiceSettingsPanel {
 			const voice = model?.voices.find(v => v.sid === sid);
 			return voice ? `${voice.name} (sid ${sid})` : `sid ${sid}`;
 		}
-		return config.ttsDeepgramVoiceId ?? "aura-asteria-en";
+		return config.ttsDeepgramVoiceId ?? DEFAULT_DEEPGRAM_TTS_VOICE;
 	}
 
 	// ─── Device tab ───────────────────────────────────────────────────────
@@ -1263,7 +1264,7 @@ export class VoiceSettingsPanel {
 		const isLocal = (config.ttsBackend ?? "local") === "local";
 		const currentId: string | number = isLocal
 			? (typeof config.ttsLocalVoiceId === "number" ? config.ttsLocalVoiceId : 0)
-			: (config.ttsDeepgramVoiceId ?? "aura-asteria-en");
+			: (config.ttsDeepgramVoiceId ?? DEFAULT_DEEPGRAM_TTS_VOICE);
 		const idx = all.findIndex(v => v.id === currentId);
 		this.ttsVoiceRow = idx >= 0 ? idx : 0;
 		this.sub = "tts-voice-picker";
@@ -1276,7 +1277,7 @@ export class VoiceSettingsPanel {
 		const isLocal = (config.ttsBackend ?? "local") === "local";
 		const currentId: string | number = isLocal
 			? (typeof config.ttsLocalVoiceId === "number" ? config.ttsLocalVoiceId : 0)
-			: (config.ttsDeepgramVoiceId ?? "aura-asteria-en");
+			: (config.ttsDeepgramVoiceId ?? DEFAULT_DEEPGRAM_TTS_VOICE);
 
 		lines.push(`  ${this.bold(isLocal ? "Pick local voice" : "Pick Deepgram voice")}`);
 		const cursor = this.ttsVoiceSearch ? this.ttsVoiceSearch : this.dim("type to filter…");

@@ -34,19 +34,35 @@ import type { PlaybackStream } from "./tts-playback";
 
 /**
  * Subset of Deepgram Aura voices surfaced in the picker. The full Aura
- * catalog is large and changes; we list the stable, well-known voices a
- * coding agent would actually use. Users can override with any voice id
- * supported by Deepgram by setting `ttsDeepgramVoiceId` directly.
+ * catalog is large and changes; we list the stable, well-known English
+ * voices a coding agent would actually use. Aura 2 voices are listed first
+ * so the picker defaults to the newer models while still exposing Aura 1.
+ * Users can override with any voice id supported by Deepgram by setting
+ * `ttsDeepgramVoiceId` directly.
  *
- * Naming convention: `aura-<name>-<lang>` for Aura-1, `aura-2-<name>-<lang>`
- * for Aura-2. The trailing language code makes language ↔ voice matching
- * a substring check.
+ * Naming convention: `aura-<name>-<lang>` for Aura 1,
+ * `aura-2-<name>-<lang>` for Aura 2. The trailing language code makes
+ * language ↔ voice matching a substring check.
  *
  * Sample rate is the recommended default per Deepgram docs — 24 kHz gives
  * good fidelity and matches the Kitten/Kokoro local pipeline so playback
  * code doesn't need backend-specific buffer handling.
  */
 export const DEEPGRAM_TTS_VOICES = [
+	{ id: "aura-2-thalia-en", name: "Thalia (en, female, clear)", language: "en", gender: "female" },
+	{ id: "aura-2-andromeda-en", name: "Andromeda (en, female, expressive)", language: "en", gender: "female" },
+	{ id: "aura-2-amalthea-en", name: "Amalthea (en, female, cheerful)", language: "en", gender: "female" },
+	{ id: "aura-2-apollo-en", name: "Apollo (en, male, confident)", language: "en", gender: "male" },
+	{ id: "aura-2-arcas-en", name: "Arcas (en, male, smooth)", language: "en", gender: "male" },
+	{ id: "aura-2-odysseus-en", name: "Odysseus (en, male, professional)", language: "en", gender: "male" },
+	{ id: "aura-2-asteria-en", name: "Asteria (en, female, knowledgeable)", language: "en", gender: "female" },
+	{ id: "aura-2-athena-en", name: "Athena (en, female, professional)", language: "en", gender: "female" },
+	{ id: "aura-2-helena-en", name: "Helena (en, female, friendly)", language: "en", gender: "female" },
+	{ id: "aura-2-hera-en", name: "Hera (en, female, warm)", language: "en", gender: "female" },
+	{ id: "aura-2-luna-en", name: "Luna (en, female, natural)", language: "en", gender: "female" },
+	{ id: "aura-2-orion-en", name: "Orion (en, male, polite)", language: "en", gender: "male" },
+	{ id: "aura-2-orpheus-en", name: "Orpheus (en, male, trustworthy)", language: "en", gender: "male" },
+	{ id: "aura-2-zeus-en", name: "Zeus (en, male, deep)", language: "en", gender: "male" },
 	{ id: "aura-asteria-en", name: "Asteria (en, female, conversational)", language: "en", gender: "female" },
 	{ id: "aura-luna-en", name: "Luna (en, female, polished)", language: "en", gender: "female" },
 	{ id: "aura-stella-en", name: "Stella (en, female, friendly)", language: "en", gender: "female" },
@@ -62,7 +78,7 @@ export const DEEPGRAM_TTS_VOICES = [
 ] as const;
 
 /** Default Deepgram voice id — used if the user hasn't picked one. */
-export const DEFAULT_DEEPGRAM_TTS_VOICE = "aura-asteria-en";
+export const DEFAULT_DEEPGRAM_TTS_VOICE = "aura-2-thalia-en";
 
 /** Sample rate negotiated with the REST endpoint (Hz). */
 export const DEEPGRAM_TTS_SAMPLE_RATE = 24000;
@@ -252,8 +268,8 @@ export function getDeepgramVoice(id: string): typeof DEEPGRAM_TTS_VOICES[number]
  * show English Aura voices.
  *
  * Region matching is intentionally loose (base tag only) for Deepgram
- * because Aura voice ids carry language without region (e.g. `aura-asteria-en`
- * is American, `aura-angus-en` is Irish — both list `language: "en"`).
+ * because Aura voice ids carry language without region (e.g.
+ * `aura-2-thalia-en` and `aura-asteria-en` both list `language: "en"`).
  */
 export function filterDeepgramVoicesByLanguage(lang: string): readonly (typeof DEEPGRAM_TTS_VOICES)[number][] {
 	const base = (lang.split("-")[0] ?? "").toLowerCase();
@@ -266,7 +282,7 @@ export function filterDeepgramVoicesByLanguage(lang: string): readonly (typeof D
  * the speak orchestrator before any network call so language ↔ voice
  * mismatches surface immediately rather than after a wasted round trip.
  *
- * Voices not in the surfaced catalog (custom Aura-2 ids the user pasted
+ * Voices not in the surfaced catalog (custom Aura ids the user pasted
  * directly into config) are accepted on faith — Deepgram's server will
  * reject if invalid.
  */

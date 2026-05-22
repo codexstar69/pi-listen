@@ -107,6 +107,17 @@ describe("prepareForSpeech — list markers", () => {
 	});
 });
 
+describe("prepareForSpeech — paragraph spacing", () => {
+	test("collapses whitespace-only blank-line runs to one paragraph break", () => {
+		const input = "Updated Source Link definition to component-level evidence.   \n   \n   \n Question 436\n \n \n Should Source Link Matching require the linked Authority Event itself to be fresh?\n \n \n Current relationships say yes.";
+		const r = prepareForSpeech(input);
+		expect(r.skipped).toBe(false);
+		expect(r.text).toBe("Updated Source Link definition to component-level evidence.\n\nQuestion four hundred thirty-six\n\nShould Source Link Matching require the linked Authority Event itself to be fresh?\n\nCurrent relationships say yes.");
+		expect(r.text).not.toMatch(/\n{3,}/);
+		expect(r.text).not.toMatch(/\n[ \t]+\n/);
+	});
+});
+
 describe("prepareForSpeech — length cap", () => {
 	test("rejects when output exceeds maxChars", () => {
 		const long = "word ".repeat(500); // ~2500 chars

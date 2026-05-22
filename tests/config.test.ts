@@ -43,6 +43,7 @@ describe("loadConfigWithSource", () => {
 		expect(result.config.enabled).toBe(true);
 		expect(result.config.onboarding.completed).toBe(false);
 		expect(result.config.scope).toBe("global");
+		expect(result.config.ttsDeepgramVoiceId).toBe("aura-2-thalia-en");
 	});
 
 	test("migrates legacy global config and marks onboarding complete when backend and model were explicit", () => {

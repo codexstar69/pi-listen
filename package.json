@@ -55,7 +55,8 @@
   },
   "devDependencies": {
     "@mariozechner/pi-coding-agent": "^0.70.5",
-    "@mariozechner/pi-tui": "^0.70.5"
+    "@mariozechner/pi-tui": "^0.70.5",
+    "@types/ws": "^8.18.1"
   },
   "pi": {
     "extensions": [
@@ -70,5 +71,8 @@
   ],
   "optionalDependencies": {
     "sherpa-onnx-node": "^1.13.0"
+  },
+  "dependencies": {
+    "ws": "^8.20.1"
   }
 }
