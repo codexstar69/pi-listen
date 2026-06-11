@@ -21,7 +21,7 @@ export interface VoiceOnboardingState {
 	skippedAt?: string;
 }
 
-export type VoiceBackend = "deepgram" | "local";
+export type VoiceBackend = "deepgram" | "local" | "sixtydb";
 
 export interface VoiceConfig {
 	version: number;
@@ -31,7 +31,17 @@ export interface VoiceConfig {
 	onboarding: VoiceOnboardingState;
 	/** Deepgram API key — stored in config so it's available even when env var isn't set */
 	deepgramApiKey?: string;
-	/** Transcription backend — "deepgram" (cloud streaming) or "local" (batch via local server) */
+	/**
+	 * 60db API key — stored in config so it's available even when the
+	 * SIXTYDB_API_KEY env var isn't set. Drives both 60db STT and 60db TTS.
+	 */
+	sixtyDbApiKey?: string;
+	/**
+	 * Transcription backend:
+	 *   - "deepgram" (cloud streaming, live interim transcripts)
+	 *   - "local"    (offline batch via sherpa / local server)
+	 *   - "sixtydb"  (cloud batch — record clip, POST /stt, one transcript)
+	 */
 	backend?: VoiceBackend;
 	/** Local model ID (e.g. "whisper-small", "whisper-turbo", "parakeet-v3") */
 	localModel?: string;
@@ -45,8 +55,8 @@ export interface VoiceConfig {
 
 	/** Master TTS toggle. When false, /voice-speak is a no-op. */
 	ttsEnabled?: boolean;
-	/** "local" (sherpa-onnx, offline) or "deepgram" (cloud REST). */
-	ttsBackend?: "local" | "deepgram";
+	/** "local" (sherpa-onnx, offline), "deepgram" (cloud REST), or "sixtydb" (60db cloud REST). */
+	ttsBackend?: "local" | "deepgram" | "sixtydb";
 	/** Active local TTS model id (e.g. "kitten-nano-en-v0_2"). */
 	ttsLocalModel?: string;
 	/**
@@ -61,6 +71,13 @@ export interface VoiceConfig {
 	 * "aura-asteria-en".
 	 */
 	ttsDeepgramVoiceId?: string;
+	/**
+	 * 60db backend voice id (a UUID from GET /myvoices, e.g.
+	 * "7c32dd99-d61d-493b-9601-37e9464be6f4"). Account-specific — there is
+	 * no fixed default; the picker fetches the user's voices live. Stored as
+	 * a string; numbers are rejected at config load.
+	 */
+	ttsSixtyDbVoiceId?: string;
 	/** Speech rate multiplier; range 0.5–2.0. Default 1.0. */
 	ttsSpeed?: number;
 	/**
@@ -97,6 +114,12 @@ export interface VoiceConfig {
 	 */
 	ttsDeepgramStreaming?: boolean;
 	/**
+	 * Opt-in WebSocket streaming for low TTFA on the 60db backend (via
+	 * wss://api.60db.ai/ws/tts). When false, 60db TTS uses REST only.
+	 * Mirrors `ttsDeepgramStreaming`.
+	 */
+	ttsSixtyDbStreaming?: boolean;
+	/**
 	 * Set to true after `tts-onboarding.maybeShowTtsOnboarding()` has
 	 * shown its first-run hint, so subsequent /voice-speak-toggle calls
 	 * don't re-spam the same notification. New in v7.0.0.
@@ -121,6 +144,7 @@ export const DEFAULT_CONFIG: VoiceConfig = {
 	language: "en",
 	scope: "global",
 	deepgramApiKey: undefined,
+	sixtyDbApiKey: undefined,
 	backend: undefined, // undefined = "deepgram" (default)
 	localModel: undefined,
 	localEndpoint: undefined,
@@ -131,12 +155,14 @@ export const DEFAULT_CONFIG: VoiceConfig = {
 	ttsLocalModel: "kitten-nano-en-v0_2",
 	ttsLocalVoiceId: 0,
 	ttsDeepgramVoiceId: "aura-asteria-en",
+	ttsSixtyDbVoiceId: undefined,
 	ttsSpeed: 1.0,
 	ttsAutoSpeak: true,
 	autoSubmitOnSpeak: false,
 	holdThresholdMs: 700,
 	ttsLanguage: undefined,
 	ttsDeepgramStreaming: false,
+	ttsSixtyDbStreaming: false,
 	ttsOnboardingShown: false,
 	onboarding: {
 		completed: false,
@@ -191,7 +217,9 @@ function migrateConfig(rawVoice: any, source: VoiceConfigSource): VoiceConfig {
 		language: typeof rawVoice.language === "string" ? rawVoice.language : DEFAULT_CONFIG.language,
 		scope: (rawVoice.scope as VoiceSettingsScope | undefined) ?? (source === "project" ? "project" : "global"),
 		deepgramApiKey: typeof rawVoice.deepgramApiKey === "string" ? rawVoice.deepgramApiKey : undefined,
-		backend: rawVoice.backend === "local" ? "local" : undefined,
+		sixtyDbApiKey: typeof rawVoice.sixtyDbApiKey === "string" ? rawVoice.sixtyDbApiKey : undefined,
+		// undefined falls back to the "deepgram" default at the call sites.
+		backend: rawVoice.backend === "local" || rawVoice.backend === "sixtydb" ? rawVoice.backend : undefined,
 		localModel: typeof rawVoice.localModel === "string" ? rawVoice.localModel : undefined,
 		localEndpoint: typeof rawVoice.localEndpoint === "string" ? rawVoice.localEndpoint : undefined,
 		toggleShortcut: source !== "project" && typeof rawVoice.toggleShortcut === "string"
@@ -203,7 +231,9 @@ function migrateConfig(rawVoice: any, source: VoiceConfigSource): VoiceConfig {
 		// sherpa's numeric sid arg) and ttsDeepgramVoiceId rejects numbers
 		// (would 4xx at the Deepgram REST layer).
 		ttsEnabled: typeof rawVoice.ttsEnabled === "boolean" ? rawVoice.ttsEnabled : DEFAULT_CONFIG.ttsEnabled,
-		ttsBackend: rawVoice.ttsBackend === "deepgram" ? "deepgram" : DEFAULT_CONFIG.ttsBackend,
+		ttsBackend: rawVoice.ttsBackend === "deepgram" || rawVoice.ttsBackend === "sixtydb"
+			? rawVoice.ttsBackend
+			: DEFAULT_CONFIG.ttsBackend,
 		ttsLocalModel: typeof rawVoice.ttsLocalModel === "string" && rawVoice.ttsLocalModel
 			? rawVoice.ttsLocalModel
 			: DEFAULT_CONFIG.ttsLocalModel,
@@ -213,6 +243,11 @@ function migrateConfig(rawVoice: any, source: VoiceConfigSource): VoiceConfig {
 		ttsDeepgramVoiceId: typeof rawVoice.ttsDeepgramVoiceId === "string" && rawVoice.ttsDeepgramVoiceId
 			? rawVoice.ttsDeepgramVoiceId
 			: DEFAULT_CONFIG.ttsDeepgramVoiceId,
+		// Account-specific UUID; reject numbers (would 4xx at the 60db REST
+		// layer). No fixed default — undefined means "user hasn't picked".
+		ttsSixtyDbVoiceId: typeof rawVoice.ttsSixtyDbVoiceId === "string" && rawVoice.ttsSixtyDbVoiceId
+			? rawVoice.ttsSixtyDbVoiceId
+			: undefined,
 		ttsSpeed: typeof rawVoice.ttsSpeed === "number" && Number.isFinite(rawVoice.ttsSpeed)
 			? Math.max(0.5, Math.min(2.0, rawVoice.ttsSpeed))
 			: DEFAULT_CONFIG.ttsSpeed,
@@ -232,6 +267,9 @@ function migrateConfig(rawVoice: any, source: VoiceConfigSource): VoiceConfig {
 		ttsDeepgramStreaming: typeof rawVoice.ttsDeepgramStreaming === "boolean"
 			? rawVoice.ttsDeepgramStreaming
 			: DEFAULT_CONFIG.ttsDeepgramStreaming,
+		ttsSixtyDbStreaming: typeof rawVoice.ttsSixtyDbStreaming === "boolean"
+			? rawVoice.ttsSixtyDbStreaming
+			: DEFAULT_CONFIG.ttsSixtyDbStreaming,
 		ttsOnboardingShown: typeof rawVoice.ttsOnboardingShown === "boolean"
 			? rawVoice.ttsOnboardingShown
 			: false,
@@ -342,6 +380,7 @@ function serializeConfig(config: VoiceConfig, scope: VoiceSettingsScope): VoiceC
 		scope,
 		// Never persist API keys into project-scoped config — prevents accidental repo commits
 		deepgramApiKey: scope === "project" ? undefined : config.deepgramApiKey,
+		sixtyDbApiKey: scope === "project" ? undefined : config.sixtyDbApiKey,
 		// Only allow loopback endpoints in project config — prevents mic audio exfiltration
 		localEndpoint: (scope === "project" && config.localEndpoint && !isLoopbackEndpoint(config.localEndpoint))
 			? undefined

@@ -34,6 +34,7 @@ import {
 	DEEPGRAM_TTS_VOICES,
 	filterDeepgramVoicesByLanguage,
 } from "./tts-deepgram";
+import { filterVoicesByLanguage, type SixtyDbVoice } from "./sixtydb";
 import { PickerChassis, type PickerRow } from "./ui-picker";
 import { ICON } from "./ui-icons";
 import { localeLabel, formatRomanizedLabel } from "./ui-locale-labels";
@@ -65,6 +66,13 @@ function buildTtsModelPickerRows(catalog: ReadonlyArray<TtsLocalModelInfo>): Pic
 	return out;
 }
 
+/** Short display label for a TTS backend value (undefined → "Local"). */
+function ttsBackendLabel(backend: VoiceConfig["ttsBackend"]): string {
+	if (backend === "deepgram") return "Deepgram";
+	if (backend === "sixtydb") return "60db";
+	return "Local";
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 const TAB_IDS = ["general", "models", "downloaded", "speak", "device"] as const;
@@ -90,6 +98,16 @@ export interface PanelDeps {
 	clearRecognizerCache: () => void;
 	resolveApiKey: () => string | undefined;
 	deepgramLanguages: { name: string; code: string; popular?: boolean }[];
+	/** Resolve the 60db API key (for the General/Speak tab key-status display). */
+	resolveSixtyDbApiKey?: () => string | undefined;
+	/**
+	 * 60db account voices, prefetched in voice.ts from GET /myvoices when a
+	 * 60db backend is active. Injected (not fetched in-panel) because the
+	 * picker renders synchronously — mirrors the `deepgramLanguages` pattern.
+	 * Undefined/empty means "not loaded"; `sixtyDbVoicesError` carries why.
+	 */
+	sixtyDbVoices?: SixtyDbVoice[];
+	sixtyDbVoicesError?: string | null;
 	/**
 	 * Optional. If provided, panel renders use the host theme so colors track
 	 * user theme choices (Catppuccin, Solarized, etc.). Without it, raw ANSI
@@ -364,8 +382,10 @@ export class VoiceSettingsPanel {
 		const { config } = this.p;
 		const sttOn = config.enabled === true;
 		const ttsOn = config.ttsEnabled === true;
-		const sttBackend = sttOn ? (config.backend === "deepgram" ? "Deepgram" : "Local") : "off";
-		const ttsBackend = ttsOn ? ((config.ttsBackend ?? "local") === "deepgram" ? "Deepgram" : "Local") : "off";
+		const sttBackend = sttOn
+			? (config.backend === "local" ? "Local" : config.backend === "sixtydb" ? "60db" : "Deepgram")
+			: "off";
+		const ttsBackend = ttsOn ? ttsBackendLabel(config.ttsBackend) : "off";
 		const lang = config.ttsLanguage || config.language || "en";
 		const sttBadge = sttOn ? this.success(`${ICON.bulletActive} STT`) : this.dim(`${ICON.bulletInactive} STT`);
 		const ttsBadge = ttsOn ? this.success(`${ICON.bulletActive} TTS`) : this.dim(`${ICON.bulletInactive} TTS`);
@@ -377,11 +397,14 @@ export class VoiceSettingsPanel {
 		const sttDetail = sttOn
 			? `${sttBackend}${config.backend === "local" && config.localModel ? `/${this.shortenId(config.localModel)}` : ""}`
 			: "off";
-		const ttsModelId = ttsOn && (config.ttsBackend ?? "local") === "local"
+		const ttsBackendVal = config.ttsBackend ?? "local";
+		const ttsModelId = ttsOn && ttsBackendVal === "local"
 			? this.shortenId(config.ttsLocalModel ?? "")
-			: ttsOn && (config.ttsBackend ?? "local") === "deepgram"
+			: ttsOn && ttsBackendVal === "deepgram"
 				? this.shortenId(String(config.ttsDeepgramVoiceId ?? ""))
-				: "";
+				: ttsOn && ttsBackendVal === "sixtydb"
+					? this.shortenId(String(config.ttsSixtyDbVoiceId ?? ""))
+					: "";
 		const ttsDetail = ttsOn ? `${ttsBackend}${ttsModelId ? `/${ttsModelId}` : ""}` : "off";
 		return `${sttBadge} ${this.dim(sttDetail)}${sep}${ttsBadge} ${this.dim(ttsDetail)}${sep}${this.dim(`Lang ${lang}`)}`;
 	}
@@ -409,14 +432,19 @@ export class VoiceSettingsPanel {
 		const lines: string[] = [];
 		const { config } = this.p;
 		const isLocal = config.backend === "local";
+		const isSixtyDb = config.backend === "sixtydb";
 		const useShort = iw < 42;
+
+		const backendValue = isLocal
+			? this.success("Local (offline, batch)")
+			: isSixtyDb
+				? this.accent("60db (cloud, batch)")
+				: this.accent("Deepgram (cloud, live streaming)");
 
 		const rows: { label: string; value: string; hint?: string }[] = [
 			{
 				label: "Backend",
-				value: isLocal
-					? this.success("Local (offline, batch)")
-					: this.accent("Deepgram (cloud, live streaming)"),
+				value: backendValue,
 				hint: "toggle",
 			},
 			{
@@ -424,7 +452,12 @@ export class VoiceSettingsPanel {
 				value: isLocal
 					? (LOCAL_MODELS.find(m => m.id === config.localModel)?.name || config.localModel || "—")
 					: (() => {
-						const key = this.p.resolveApiKey();
+						// Cloud backends show their respective key's status. The
+						// key itself is set via env var or settings.json (not
+						// edited inline here), matching the Deepgram flow.
+						const key = isSixtyDb
+							? this.p.resolveSixtyDbApiKey?.()
+							: this.p.resolveApiKey();
 						return key ? this.success(`set (${key.slice(0, 8)}…)`) : this.error("NOT SET");
 					})(),
 				hint: isLocal ? "choose ›" : undefined,
@@ -648,7 +681,7 @@ export class VoiceSettingsPanel {
 		// current TTS configuration so the user can scan it without
 		// reading every row.
 		const statusParts: string[] = [];
-		statusParts.push(isLocal ? "Local" : "Deepgram");
+		statusParts.push(ttsBackendLabel(config.ttsBackend));
 		statusParts.push(this.formatActiveModelOrVoice(config));
 		statusParts.push(`${(config.ttsSpeed ?? 1.0).toFixed(2)}×`);
 		const lang = config.ttsLanguage || config.language || "en";
@@ -676,14 +709,16 @@ export class VoiceSettingsPanel {
 				label: "Backend",
 				value: isLocal
 					? this.success("Local (offline, sherpa-onnx)")
-					: this.accent("Deepgram (cloud REST)"),
+					: (config.ttsBackend === "sixtydb")
+						? this.accent("60db (cloud REST)")
+						: this.accent("Deepgram (cloud REST)"),
 				hint: "toggle",
 			},
 			{
 				label: "Model",
 				value: isLocal
 					? this.formatLocalModelLabel(config.ttsLocalModel)
-					: this.dim("(deepgram backend — pick a voice instead)"),
+					: this.dim(`(${ttsBackendLabel(config.ttsBackend).toLowerCase()} backend — pick a voice instead)`),
 				hint: isLocal ? "pick model ›" : undefined,
 			},
 			{
@@ -732,7 +767,18 @@ export class VoiceSettingsPanel {
 			const voice = model?.voices.find(v => v.sid === sid);
 			return voice ? `${shortName} · ${voice.name}` : `${shortName} · sid ${sid}`;
 		}
+		if (config.ttsBackend === "sixtydb") return this.sixtyDbVoiceLabel(config.ttsSixtyDbVoiceId);
 		return config.ttsDeepgramVoiceId ?? "aura-asteria-en";
+	}
+
+	/**
+	 * Friendly label for a 60db voice id: the voice's name if it's in the
+	 * prefetched catalog, otherwise the raw id, otherwise a "none" hint.
+	 */
+	private sixtyDbVoiceLabel(id: string | undefined): string {
+		if (!id) return "(none selected)";
+		const v = (this.p.sixtyDbVoices ?? []).find(x => x.id === id);
+		return v ? v.name : id;
 	}
 
 	private formatLocalModelLabel(id: string | undefined): string {
@@ -753,6 +799,7 @@ export class VoiceSettingsPanel {
 			const voice = model?.voices.find(v => v.sid === sid);
 			return voice ? `${voice.name} (sid ${sid})` : `sid ${sid}`;
 		}
+		if (config.ttsBackend === "sixtydb") return this.sixtyDbVoiceLabel(config.ttsSixtyDbVoiceId);
 		return config.ttsDeepgramVoiceId ?? "aura-asteria-en";
 	}
 
@@ -901,8 +948,10 @@ export class VoiceSettingsPanel {
 		if (tabId === "general") {
 			const { config } = this.p;
 			switch (this.row) {
-				case 0: // Backend toggle
-					config.backend = config.backend === "local" ? "deepgram" : "local";
+				case 0: // Backend cycle: deepgram → local → 60db → deepgram
+					config.backend = config.backend === "local" ? "sixtydb"
+						: config.backend === "sixtydb" ? "deepgram"
+						: "local";
 					this.save();
 					break;
 				case 1: // Model (local) or API Key (deepgram)
@@ -960,10 +1009,14 @@ export class VoiceSettingsPanel {
 					config.ttsEnabled = !config.ttsEnabled;
 					this.save();
 					break;
-				case 1: // Backend toggle
-					config.ttsBackend = (config.ttsBackend ?? "local") === "local" ? "deepgram" : "local";
+				case 1: { // Backend cycle: local → deepgram → 60db → local
+					const cur = config.ttsBackend ?? "local";
+					config.ttsBackend = cur === "local" ? "deepgram"
+						: cur === "deepgram" ? "sixtydb"
+						: "local";
 					this.save();
 					break;
+				}
 				case 2: // Model picker (local only — Deepgram has no model concept)
 					if ((config.ttsBackend ?? "local") === "local") {
 						this.openTtsModelPicker();
@@ -1041,6 +1094,7 @@ export class VoiceSettingsPanel {
 			if (englishOnly) return; // Single language — nothing to pick
 			this.langList = languages;
 		} else {
+			// Cloud backends (Deepgram / 60db) use the broad ISO language list.
 			this.langList = this.p.deepgramLanguages;
 		}
 		this.langSearch = "";
@@ -1242,6 +1296,18 @@ export class VoiceSettingsPanel {
 				language,
 			}));
 		}
+		if (config.ttsBackend === "sixtydb") {
+			// 60db: account voices were prefetched in voice.ts. Filter by the
+			// current language for relevance, falling back to the full list.
+			const lang = config.ttsLanguage || config.language || "en";
+			const voices = filterVoicesByLanguage(this.p.sixtyDbVoices ?? [], lang);
+			return voices.map(v => ({
+				id: v.id,
+				label: v.name,
+				meta: [v.gender, v.accent].filter(Boolean).join(", "),
+				language: v.language || undefined,
+			}));
+		}
 		// Deepgram: filter Aura voices by current language for relevance.
 		const lang = config.ttsLanguage || config.language || "en";
 		const filtered = filterDeepgramVoicesByLanguage(lang);
@@ -1256,14 +1322,19 @@ export class VoiceSettingsPanel {
 		return all.filter(v => `${v.label} ${v.meta ?? ""} ${v.id} ${v.language ?? ""}`.toLowerCase().includes(q));
 	}
 
+	/** The configured TTS voice id for the active backend. */
+	private currentTtsVoiceId(): string | number {
+		const { config } = this.p;
+		const b = config.ttsBackend ?? "local";
+		if (b === "local") return typeof config.ttsLocalVoiceId === "number" ? config.ttsLocalVoiceId : 0;
+		if (b === "sixtydb") return config.ttsSixtyDbVoiceId ?? "";
+		return config.ttsDeepgramVoiceId ?? "aura-asteria-en";
+	}
+
 	private openTtsVoicePicker(): void {
 		this.ttsVoiceSearch = "";
 		const all = this.getCurrentVoiceCatalog();
-		const { config } = this.p;
-		const isLocal = (config.ttsBackend ?? "local") === "local";
-		const currentId: string | number = isLocal
-			? (typeof config.ttsLocalVoiceId === "number" ? config.ttsLocalVoiceId : 0)
-			: (config.ttsDeepgramVoiceId ?? "aura-asteria-en");
+		const currentId = this.currentTtsVoiceId();
 		const idx = all.findIndex(v => v.id === currentId);
 		this.ttsVoiceRow = idx >= 0 ? idx : 0;
 		this.sub = "tts-voice-picker";
@@ -1273,18 +1344,34 @@ export class VoiceSettingsPanel {
 		const lines: string[] = [];
 		const filtered = this.getFilteredTtsVoices();
 		const { config } = this.p;
-		const isLocal = (config.ttsBackend ?? "local") === "local";
-		const currentId: string | number = isLocal
-			? (typeof config.ttsLocalVoiceId === "number" ? config.ttsLocalVoiceId : 0)
-			: (config.ttsDeepgramVoiceId ?? "aura-asteria-en");
+		const backend = config.ttsBackend ?? "local";
+		const currentId = this.currentTtsVoiceId();
+		const title = backend === "local" ? "Pick local voice"
+			: backend === "sixtydb" ? "Pick 60db voice"
+			: "Pick Deepgram voice";
 
-		lines.push(`  ${this.bold(isLocal ? "Pick local voice" : "Pick Deepgram voice")}`);
+		lines.push(`  ${this.bold(title)}`);
 		const cursor = this.ttsVoiceSearch ? this.ttsVoiceSearch : this.dim("type to filter…");
 		lines.push(`  ${this.dim("Search:")} ${cursor}`);
 		lines.push("");
 
 		if (filtered.length === 0) {
-			lines.push(this.dim("    No matching voices."));
+			// 60db voices are fetched from the account; surface why the list
+			// is empty (no key, fetch error, or genuinely no voices) so the
+			// user knows the fix rather than seeing a bare "no matches".
+			if (backend === "sixtydb") {
+				if (this.p.sixtyDbVoicesError) {
+					lines.push(this.error(`    Could not load 60db voices: ${this.p.sixtyDbVoicesError}`));
+				} else if ((this.p.sixtyDbVoices ?? []).length === 0) {
+					lines.push(this.dim("    No 60db voices found for this account."));
+					lines.push(this.dim("    Set SIXTYDB_API_KEY then reopen /voice-settings,"));
+					lines.push(this.dim("    or clone a voice at 60db.ai."));
+				} else {
+					lines.push(this.dim("    No matching voices."));
+				}
+			} else {
+				lines.push(this.dim("    No matching voices."));
+			}
 			lines.push("");
 			lines.push(this.dim("  esc back  type to filter"));
 			return lines;
@@ -1344,10 +1431,12 @@ export class VoiceSettingsPanel {
 		if (matchesKey(data, Key.enter)) {
 			const v = filtered[this.ttsVoiceRow];
 			if (!v) return;
-			const isLocal = (this.p.config.ttsBackend ?? "local") === "local";
-			if (isLocal && typeof v.id === "number") {
+			const backend = this.p.config.ttsBackend ?? "local";
+			if (backend === "local" && typeof v.id === "number") {
 				this.p.config.ttsLocalVoiceId = v.id;
-			} else if (!isLocal && typeof v.id === "string") {
+			} else if (backend === "sixtydb" && typeof v.id === "string") {
+				this.p.config.ttsSixtyDbVoiceId = v.id;
+			} else if (backend === "deepgram" && typeof v.id === "string") {
 				this.p.config.ttsDeepgramVoiceId = v.id;
 			}
 			this.save();

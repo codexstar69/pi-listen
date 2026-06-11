@@ -16,6 +16,37 @@ export function shellEscapeSingleQuoted(value: string): string {
 	return value.replace(/'/g, `'"'"'`);
 }
 
+/**
+ * Persist `export <varName>='<value>'` to the user's shell secrets file
+ * (~/.env.secrets if present, else ~/.zshrc), updating an existing line in
+ * place. Returns the file written. `varName` must be a trusted literal
+ * (it's interpolated into a RegExp and the export line) — callers pass
+ * constants like "SIXTYDB_API_KEY". The value is single-quote-escaped.
+ */
+async function persistEnvExport(varName: string, value: string): Promise<string> {
+	const fs = await import("node:fs");
+	const os = await import("node:os");
+	const home = os.homedir();
+	const envSecretsPath = `${home}/.env.secrets`;
+	const zshrcPath = `${home}/.zshrc`;
+	const exportLine = `export ${varName}='${shellEscapeSingleQuoted(value)}'`;
+
+	const targetFile = fs.existsSync(envSecretsPath) ? envSecretsPath : zshrcPath;
+	const existing = fs.existsSync(targetFile) ? fs.readFileSync(targetFile, "utf-8") : "";
+	const isNewFile = !fs.existsSync(targetFile);
+
+	if (existing.includes(varName)) {
+		const updated = existing.replace(new RegExp(`^export ${varName}=.*$`, "m"), exportLine);
+		fs.writeFileSync(targetFile, updated, { mode: 0o600 });
+	} else {
+		fs.appendFileSync(targetFile, `\n${exportLine}\n`);
+	}
+	if (isNewFile) {
+		try { fs.chmodSync(targetFile, 0o600); } catch {}
+	}
+	return targetFile;
+}
+
 export interface OnboardingResult {
 	config: VoiceConfig;
 	selectedScope: VoiceSettingsScope;
@@ -454,10 +485,15 @@ export async function runVoiceOnboarding(
 		[
 			"Deepgram — cloud, live streaming as you speak, $200 free credit",
 			"Local model — fully offline, no API key, transcribes after recording",
+			"60db — cloud, voice cloning + multilingual, transcribes after recording",
 		],
 	);
 	if (!backendChoice) return undefined;
-	const selectedBackend: VoiceBackend = backendChoice.includes("Local") ? "local" : "deepgram";
+	const selectedBackend: VoiceBackend = backendChoice.includes("Local")
+		? "local"
+		: backendChoice.includes("60db")
+			? "sixtydb"
+			: "deepgram";
 
 	let localModel = currentConfig.localModel;
 	let localEndpoint: string | undefined = currentConfig.localEndpoint;
@@ -523,6 +559,64 @@ export async function runVoiceOnboarding(
 			if (!picked) return undefined;
 			localModel = picked.id;
 			localEndpoint = undefined;
+		}
+	} else if (selectedBackend === "sixtydb") {
+		// ─── 60db backend setup ──────────────────────────────
+		const hasSixtyKey = Boolean(process.env.SIXTYDB_API_KEY || currentConfig.sixtyDbApiKey);
+
+		if (!hasSixtyKey) {
+			const keyAction = await ctx.ui.select(
+				"60db API key not found. What would you like to do?",
+				[
+					"Paste API key now",
+					"I'll set it up later (ask pi to help or export SIXTYDB_API_KEY=...)",
+				],
+			);
+			if (!keyAction) return undefined;
+
+			if (keyAction.startsWith("Paste")) {
+				ctx.ui.notify(
+					[
+						"Get your 60db API key:",
+						"  → https://60db.ai",
+						"",
+						"Paste your key below:",
+					].join("\n"),
+					"info",
+				);
+				const apiKey = await ctx.ui.input("SIXTYDB_API_KEY");
+				if (apiKey && apiKey.trim().length > 10) {
+					const trimmedKey = apiKey.trim();
+					// Reject keys with embedded newlines — they'd corrupt shell files.
+					if (trimmedKey.includes("\n") || trimmedKey.includes("\r")) {
+						ctx.ui.notify("Key contains newlines — rejected for safety.", "error");
+					} else {
+						const targetFile = await persistEnvExport("SIXTYDB_API_KEY", trimmedKey);
+						process.env.SIXTYDB_API_KEY = trimmedKey;
+						ctx.ui.notify(
+							`API key saved to ${targetFile}\nActive in this session. New terminals will pick it up automatically.`,
+							"info",
+						);
+					}
+				} else if (apiKey !== undefined && apiKey !== null) {
+					ctx.ui.notify(
+						"Key looks too short — skipped. You can set it later:\n  export SIXTYDB_API_KEY=\"your-key\"",
+						"warning",
+					);
+				}
+			} else {
+				ctx.ui.notify(
+					[
+						"No problem! When you're ready:",
+						"  1. Get a key → https://60db.ai",
+						"  2. Run: export SIXTYDB_API_KEY=\"your-key\"",
+						"  3. Or ask pi: \"help me set up my 60db API key\"",
+						"",
+						"Pick a voice for read-back later in /voice-settings → Speak tab.",
+					].join("\n"),
+					"info",
+				);
+			}
 		}
 	} else {
 		// ─── Deepgram backend setup (unchanged logic) ────────
@@ -650,7 +744,9 @@ export async function runVoiceOnboarding(
 	const selectedModel = LOCAL_MODELS.find(m => m.id === localModel);
 	const backendLabel = selectedBackend === "local"
 		? `Local — ${selectedModel?.name || localModel}${localEndpoint ? ` at ${localEndpoint}` : " (in-process)"}`
-		: "Deepgram Nova-3 (streaming)";
+		: selectedBackend === "sixtydb"
+			? "60db (cloud, batch)"
+			: "Deepgram Nova-3 (streaming)";
 
 	const summaryLines = [
 		`Backend: ${backendLabel}`,
@@ -658,6 +754,9 @@ export async function runVoiceOnboarding(
 		`Scope: ${selectedScope}`,
 		...(selectedBackend === "deepgram"
 			? [`API key: ${process.env.DEEPGRAM_API_KEY ? "configured" : "not yet set"}`]
+			: []),
+		...(selectedBackend === "sixtydb"
+			? [`API key: ${process.env.SIXTYDB_API_KEY || currentConfig.sixtyDbApiKey ? "configured" : "not yet set"}`]
 			: []),
 	];
 

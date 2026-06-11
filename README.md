@@ -6,7 +6,7 @@
   <img src="https://raw.githubusercontent.com/codexstar69/pi-listen/main/assets/banner.png" alt="pi-listen — Voice input for the Pi coding agent" width="100%" />
 </p>
 
-**Hold-to-talk voice input for [Pi](https://github.com/mariozechner/pi-coding-agent).** Cloud streaming via Deepgram or fully offline with local models.
+**Hold-to-talk voice input for [Pi](https://github.com/mariozechner/pi-coding-agent).** Cloud streaming via Deepgram, cloud batch via 60db, or fully offline with local models.
 
 [![npm version](https://img.shields.io/npm/v/@codexstar/pi-listen.svg)](https://www.npmjs.com/package/@codexstar/pi-listen)
 [![license](https://img.shields.io/npm/l/@codexstar/pi-listen.svg)](https://github.com/codexstar69/pi-listen/blob/main/LICENSE)
@@ -47,16 +47,16 @@ pi install npm:@codexstar/pi-listen
 
 ### 2. Choose your backend
 
-pi-listen supports two transcription backends:
+pi-listen supports three transcription backends:
 
-| | Deepgram (cloud) | Local models (offline) |
-|---|---|---|
-| **How it works** | Live streaming — text appears as you speak | Batch mode — transcribes after you finish recording |
-| **Setup** | API key required | No API key, models auto-download on first use |
-| **Internet** | Required | Not required after model download |
-| **Latency** | Real-time interim results | 2–10 seconds after recording stops |
-| **Languages** | 56+ with live streaming | Depends on model (1–57 languages) |
-| **Cost** | $200 free credit (lasts 6–12 months for most developers) | Free forever |
+| | Deepgram (cloud) | Local models (offline) | 60db (cloud) |
+|---|---|---|---|
+| **How it works** | Live streaming — text appears as you speak | Batch mode — transcribes after you finish recording | Batch mode — transcribes after you finish recording |
+| **Setup** | API key required | No API key, models auto-download on first use | API key required |
+| **Internet** | Required | Not required after model download | Required |
+| **Latency** | Real-time interim results | 2–10 seconds after recording stops | A few seconds after recording stops |
+| **Languages** | 56+ with live streaming | Depends on model (1–57 languages) | Multilingual + auto-detect |
+| **Cost** | $200 free credit (lasts 6–12 months for most developers) | Free forever | Per 60db account |
 
 Run `/voice-settings` inside Pi to choose your backend and configure everything from one panel.
 
@@ -74,10 +74,20 @@ No setup needed — run `/voice-settings`, switch backend to Local, and select a
 
 > **Note:** Local models use batch mode — they transcribe after you finish recording, not while you speak. For live streaming as you speak, use Deepgram.
 
+#### Option C: 60db (cloud, voice cloning)
+
+Get an API key from [60db.ai](https://60db.ai), then:
+
+```bash
+export SIXTYDB_API_KEY="your-key-here"     # add to ~/.zshrc or ~/.bashrc
+```
+
+Run `/voice-settings`, switch the backend to **60db**, and (for read-back) pick a voice — the Speak tab lists your account's voices live from 60db. 60db STT is batch mode, like local models.
+
 ### 3. Open Pi
 
 On first launch, pi-listen checks your setup and tells you what's ready:
-- Backend configured (Deepgram key or local model)
+- Backend configured (Deepgram key, local model, or 60db key)
 - Audio capture tool detected (sox, ffmpeg, or arecord)
 - If everything checks out, voice activates immediately
 
@@ -101,7 +111,7 @@ All configuration lives in one place: `/voice-settings`. Four tabs cover everyth
 
 <img src="https://raw.githubusercontent.com/codexstar69/pi-listen/main/assets/settings-general.png" alt="General settings — backend, model, language, scope, voice toggle" width="600" />
 
-Toggle between Deepgram (cloud, live streaming) and Local (offline, batch mode). Change language, scope, and enable/disable voice — all with keyboard shortcuts.
+Cycle the backend between Deepgram (cloud, live streaming), Local (offline, batch mode), and 60db (cloud, batch). Change language, scope, and enable/disable voice — all with keyboard shortcuts.
 
 ### Models — browse, search, install
 
@@ -152,6 +162,8 @@ See your hardware profile (RAM, CPU, GPU), dependency status (sherpa-onnx runtim
 | `/voice-autosubmit` `[on|off]` | Toggle: STT text auto-sent to the agent |
 | `/voice-speak-models` | Browse / install TTS voice models |
 | `/voice-speak-info` | Diagnose TTS state |
+| `/voice-stream` `[on\|off]` | Toggle Deepgram WebSocket streaming TTS |
+| `/voice-60db-stream` `[on\|off]` | Toggle 60db WebSocket streaming TTS |
 | `/voice-help` | Keyboard + command reference (or press `F1`) |
 | `/voice test` | Full diagnostics — audio tool, mic, API key |
 | `/voice on` / `off` | Enable or disable voice |
@@ -235,7 +247,7 @@ Models from [Handy](https://github.com/cjpais/handy) (`~/Library/Application Sup
 
 | Feature | Description |
 |---------|-------------|
-| **Dual backend** | Deepgram (cloud, live streaming) or local models (offline, batch) — switch in settings |
+| **Triple backend** | Deepgram (cloud, live streaming), local models (offline, batch), or 60db (cloud, batch + voice cloning) — switch in settings |
 | **19 local models** | Parakeet, Whisper, Moonshine, SenseVoice, GigaAM — with accuracy/speed ratings |
 | **Unified settings panel** | One overlay panel for all configuration — `/voice-settings` |
 | **Device-aware recommendations** | Scores models against your hardware. Only best-in-class models get [recommended]. |
@@ -260,7 +272,9 @@ extensions/voice.ts                Main extension — state machine, recording, 
 extensions/voice/config.ts         Config loading, saving, migration
 extensions/voice/onboarding.ts     First-run wizard, language picker
 extensions/voice/deepgram.ts       Deepgram URL builder, API key resolver
-extensions/voice/local.ts          Model catalog (19 models), in-process transcription
+extensions/voice/sixtydb.ts        60db URLs, API key resolver, /myvoices catalog fetch
+extensions/voice/tts-sixtydb.ts    60db TTS client — REST /tts-synthesize + WebSocket streaming
+extensions/voice/local.ts          Model catalog (19 models), in-process + 60db batch transcription
 extensions/voice/device.ts         Device profiling — RAM, GPU, CPU, container detection
 extensions/voice/model-download.ts Download manager — resume, progress, verification, Handy import
 extensions/voice/sherpa-engine.ts   sherpa-onnx bindings — recognizer lifecycle, inference
@@ -292,9 +306,14 @@ Settings stored in Pi's settings files under the `voice` key:
 }
 ```
 
-`DEEPGRAM_API_KEY` from your shell is used at runtime and is not copied back
-into `~/.pi/agent/settings.json`. If you paste a key during onboarding, that is
-an explicit save and it still goes to `~/.env.secrets` or `~/.zshrc`.
+`DEEPGRAM_API_KEY` (and `SIXTYDB_API_KEY` for the 60db backend) from your shell
+are used at runtime and are not copied back into `~/.pi/agent/settings.json`. If
+you paste a key during onboarding, that is an explicit save and it still goes to
+`~/.env.secrets` or `~/.zshrc`. Keys are never written into project-scoped config.
+
+For the 60db backend, set `"backend": "sixtydb"` (STT) and/or `"ttsBackend":
+"sixtydb"` with `"ttsSixtyDbVoiceId"` (a voice id from your account); enable
+low-latency read-back streaming with `"ttsSixtyDbStreaming": true`.
 
 ---
 
@@ -305,6 +324,8 @@ Run `/voice test` inside Pi for full diagnostics.
 | Problem | Solution |
 |---------|----------|
 | "DEEPGRAM_API_KEY not set" | [Get a key](https://dpgr.am/pi-voice) → `export DEEPGRAM_API_KEY="..."` in `~/.zshrc` |
+| "SIXTYDB_API_KEY not set" | [Get a key](https://60db.ai) → `export SIXTYDB_API_KEY="..."` in `~/.zshrc` |
+| "No 60db voice selected" | Run `/voice-settings` → Speak tab and pick a voice, or set `ttsSixtyDbVoiceId` |
 | "No audio capture tool found" | `brew install sox` or `brew install ffmpeg` |
 | Space doesn't activate voice | Run `/voice-settings` — voice may be disabled |
 | Local model not transcribing | Check `/voice-settings` → Device tab for sherpa-onnx status |
@@ -315,10 +336,10 @@ Run `/voice test` inside Pi for full diagnostics.
 
 ## Security
 
-- **Cloud STT** — audio is sent to Deepgram for transcription (Deepgram backend only)
+- **Cloud STT** — audio is sent to Deepgram (Deepgram backend) or 60db (60db backend) for transcription
 - **Local STT** — audio never leaves your machine (local backend)
 - **No telemetry** — pi-listen does not collect or transmit usage data
-- **API key** — stored in env var or Pi settings, never logged
+- **API keys** — `DEEPGRAM_API_KEY` / `SIXTYDB_API_KEY` stored in env var or global Pi settings, never logged, never persisted to project-scoped config
 
 See [SECURITY.md](SECURITY.md) for vulnerability reporting.
 

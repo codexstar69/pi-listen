@@ -84,6 +84,7 @@ import { makeRenderTicker, type RenderTicker } from "./voice/ui-render-ticker";
 import { TtsInstallProgressWidget } from "./voice/tts-install-progress";
 import { TtsPlaybackIndicator } from "./voice/tts-playback-indicator";
 import { buildDeepgramWsUrl, resolveDeepgramApiKey, SAMPLE_RATE, CHANNELS } from "./voice/deepgram";
+import { resolveSixtyDbApiKey } from "./voice/sixtydb";
 import {
 	startLocalSession, stopLocalSession, abortLocalSession,
 	checkLocalServer, LOCAL_MODELS, DEFAULT_LOCAL_ENDPOINT,
@@ -752,7 +753,11 @@ export default function (pi: ExtensionAPI) {
 					ctx.ui.setStatus("voice", undefined);
 					break;
 				}
-				const modeTag = !config.onboarding.completed ? "SETUP" : config.backend === "local" ? "LOCAL" : "STREAM";
+				const modeTag = !config.onboarding.completed
+					? "SETUP"
+					: config.backend === "local" ? "LOCAL"
+					: config.backend === "sixtydb" ? "60DB"
+					: "STREAM";
 				ctx.ui.setStatus("voice", `MIC ${modeTag}`);
 				break;
 			}
@@ -769,7 +774,8 @@ export default function (pi: ExtensionAPI) {
 				break;
 			}
 			case "finalizing":
-				if (config.backend === "local") {
+				if (config.backend === "local" || config.backend === "sixtydb") {
+					// Batch backends transcribe after stop — show progress.
 					ctx.ui.setStatus("voice", "STT...");
 				} else {
 					// Don't show "STT..." — live transcript handles it
@@ -1177,7 +1183,9 @@ export default function (pi: ExtensionAPI) {
 	function startPreRecording() {
 		abortActiveSpeak();
 		if (preRecordingSession) return; // Already started
-		if (config.backend === "local") return;      // No pre-recording for local batch mode
+		// No pre-recording for batch backends (local / 60db) — they buffer the
+		// full clip and transcribe on stop; there's no live stream to warm up.
+		if (config.backend === "local" || config.backend === "sixtydb") return;
 		if (!resolveDeepgramApiKey(config)) return; // No key — skip silently
 		if (!detectAudioCaptureTool()) return;       // No audio tool — skip silently
 
@@ -1252,11 +1260,13 @@ export default function (pi: ExtensionAPI) {
 
 				if (ctx?.hasUI) {
 					const prefix = editorTextBeforeVoice ? editorTextBeforeVoice + " " : "";
-					const isLocal = config.backend === "local";
+					// Batch backends (local sherpa / 60db cloud) send no interim
+					// transcripts, so the final text must always be inserted here.
+					const isBatch = config.backend === "local" || config.backend === "sixtydb";
 					const finalText = prefix + fullText;
 
-					if (isLocal) {
-						// Local backend (batch mode): no interim transcripts were sent to the editor,
+					if (isBatch) {
+						// Batch mode: no interim transcripts were sent to the editor,
 						// so we must always insert the final text. This is the ONLY place it arrives.
 						ctx.ui.setEditorText(finalText);
 					} else {
@@ -1380,8 +1390,10 @@ export default function (pi: ExtensionAPI) {
 		// ── Promote pre-recording, start local, or start streaming ──
 		let session: VoiceSession | null;
 
-		if (config.backend === "local") {
-			// Local backend: buffer audio, transcribe on stop
+		if (config.backend === "local" || config.backend === "sixtydb") {
+			// Batch backends (local sherpa / 60db cloud): buffer audio in
+			// memory, transcribe on stop. Identical capture machinery — only
+			// the destination in stopLocalSession differs (routed by config).
 			const audioTool = detectAudioCaptureTool();
 			if (!audioTool) {
 				recordingCallbacks.onError("No audio capture tool found. Install one of: sox, ffmpeg, or arecord (Linux)");
@@ -1472,9 +1484,14 @@ export default function (pi: ExtensionAPI) {
 			clearRecordingAnimTimer();
 			hideWidget();
 			if (activeSession.backend === "local") {
-				// Local: show which model is transcribing + estimated time
-				const modelName = LOCAL_MODELS.find(m => m.id === (config.localModel || "whisper-small"))?.name || config.localModel || "local model";
-				ctx?.ui.notify(`Transcribing with ${modelName}…`, "info");
+				// Batch session (local sherpa or 60db cloud). Both buffer then
+				// transcribe via stopLocalSession; the message reflects which.
+				if (config.backend === "sixtydb") {
+					ctx?.ui.notify("Transcribing with 60db…", "info");
+				} else {
+					const modelName = LOCAL_MODELS.find(m => m.id === (config.localModel || "whisper-small"))?.name || config.localModel || "local model";
+					ctx?.ui.notify(`Transcribing with ${modelName}…`, "info");
+				}
 				await stopLocalSession(activeSession, config);
 			} else {
 				stopStreamingSession(activeSession);
@@ -2144,9 +2161,10 @@ export default function (pi: ExtensionAPI) {
 		// Try migration if a backend is already configured.
 		const hasKey = !!resolveDeepgramApiKey(config);
 		const hasLocalModel = config.backend === "local" && !!config.localModel;
+		const hasSixtyDbKey = config.backend === "sixtydb" && !!resolveSixtyDbApiKey(config);
 		const audioTool = detectAudioCaptureTool();
-		if (hasKey || hasLocalModel) {
-			// Backend configured (Deepgram key or local model) — auto-activate.
+		if (hasKey || hasLocalModel || hasSixtyDbKey) {
+			// Backend configured (Deepgram key, local model, or 60db key) — auto-activate.
 			// Migration runs every transition; the welcome notification is gated
 			// on isStartup so /new and /resume don't re-spam the hint.
 			config.onboarding.completed = true;
@@ -2461,7 +2479,9 @@ export default function (pi: ExtensionAPI) {
 				setupHoldToTalk();
 				const backendInfo = config.backend === "local"
 					? `Voice enabled (local model: ${config.localModel || "whisper-small"}).`
-					: "Voice enabled (Deepgram streaming).";
+					: config.backend === "sixtydb"
+						? "Voice enabled (60db cloud batch)."
+						: "Voice enabled (Deepgram streaming).";
 				cmdCtx.ui.notify([
 					backendInfo,
 					"",
@@ -2563,13 +2583,16 @@ export default function (pi: ExtensionAPI) {
 			if (sub === "test") {
 				cmdCtx.ui.notify("Testing voice setup…", "info");
 				const isLocal = config.backend === "local";
+				const isSixtyDb = config.backend === "sixtydb";
 				const dgKey = resolveDeepgramApiKey(config);
+				const sixtyKey = resolveSixtyDbApiKey(config);
 				const tool = detectAudioCaptureTool();
 
+				const backendLabel = isLocal ? "local" : isSixtyDb ? "60db" : "deepgram";
 				const lines = [
 					"Voice diagnostics:",
 					"",
-					`  Backend: ${isLocal ? "local" : "deepgram"}`,
+					`  Backend: ${backendLabel}`,
 					"",
 					"  Audio capture:",
 					`    tool:              ${tool ? `${tool.name} (${tool.cmd})` : "NONE FOUND"}`,
@@ -2582,6 +2605,8 @@ export default function (pi: ExtensionAPI) {
 				if (isLocal) {
 					lines.push(`    local model:       ${config.localModel || "whisper-small"}`);
 					lines.push(`    local endpoint:    ${config.localEndpoint || DEFAULT_LOCAL_ENDPOINT}`);
+				} else if (isSixtyDb) {
+					lines.push(`    SIXTYDB_API_KEY:   ${sixtyKey ? "set (" + sixtyKey.slice(0, 8) + "…)" : "NOT SET"}`);
 				} else {
 					lines.push(`    DEEPGRAM_API_KEY:  ${dgKey ? "set (" + dgKey.slice(0, 8) + "…)" : "NOT SET"}`);
 				}
@@ -2801,6 +2826,22 @@ export default function (pi: ExtensionAPI) {
 		type PanelAction = import("./voice/settings-panel").PanelAction;
 		const { LANGUAGES } = await import("./voice/onboarding");
 		const { resolveDeepgramApiKey } = await import("./voice/deepgram");
+		const { fetchMyVoices } = await import("./voice/sixtydb");
+
+		// Prefetch 60db account voices when a 60db backend is active, so the
+		// settings panel's (synchronous) voice picker has data to show. The
+		// fetch is cached in sixtydb.ts, so reopening settings is instant.
+		let sixtyDbVoices: import("./voice/sixtydb").SixtyDbVoice[] = [];
+		let sixtyDbVoicesError: string | null = null;
+		if (config.ttsBackend === "sixtydb" || config.backend === "sixtydb") {
+			if (resolveSixtyDbApiKey(config)) {
+				try {
+					sixtyDbVoices = await fetchMyVoices(config);
+				} catch (err: any) {
+					sixtyDbVoicesError = err?.message ?? String(err);
+				}
+			}
+		}
 
 		const device = detectDevice();
 		// Construct the panel inside the custom() callback so the host theme
@@ -2818,7 +2859,10 @@ export default function (pi: ExtensionAPI) {
 			saveConfig: (cfg: VoiceConfig, scope: VoiceSettingsScope, cwd: string) => saveConfig(cfg, scope, cwd),
 			clearRecognizerCache: () => { try { clearRecognizerCache(); } catch {} },
 			resolveApiKey: () => resolveDeepgramApiKey(config) ?? undefined,
+			resolveSixtyDbApiKey: () => resolveSixtyDbApiKey(config) ?? undefined,
 			deepgramLanguages: LANGUAGES.map(l => ({ name: l.name, code: l.code, popular: l.popular })),
+			sixtyDbVoices,
+			sixtyDbVoicesError,
 		};
 
 		let panel!: InstanceType<typeof VoiceSettingsPanel>;
@@ -3223,6 +3267,25 @@ export default function (pi: ExtensionAPI) {
 			config.ttsDeepgramStreaming = next;
 			saveConfig(config, config.scope === "project" ? "project" : "global", currentCwd);
 			cmdCtx.ui.notify(`Deepgram WebSocket streaming TTS: ${next ? "ON" : "OFF"}`, "info");
+		},
+	});
+
+	// v7.3 — toggle 60db WebSocket streaming TTS (cloud backend). Mirrors
+	// /voice-stream: ON streams audio frames from wss://api.60db.ai/ws/tts
+	// into the local player as they arrive; OFF uses the REST
+	// /tts-synthesize path which returns a complete WAV.
+	pi.registerCommand("voice-60db-stream", {
+		description: "Toggle 60db WebSocket streaming TTS (cloud)",
+		handler: async (args, cmdCtx) => {
+			ctx = cmdCtx;
+			const trimmed = (args || "").trim().toLowerCase();
+			let next: boolean;
+			if (trimmed === "on") next = true;
+			else if (trimmed === "off") next = false;
+			else next = !(config.ttsSixtyDbStreaming === true);
+			config.ttsSixtyDbStreaming = next;
+			saveConfig(config, config.scope === "project" ? "project" : "global", currentCwd);
+			cmdCtx.ui.notify(`60db WebSocket streaming TTS: ${next ? "ON" : "OFF"}`, "info");
 		},
 	});
 

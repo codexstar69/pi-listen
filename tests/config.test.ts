@@ -64,6 +64,41 @@ describe("loadConfigWithSource", () => {
 		expect(result.config.onboarding.schemaVersion).toBe(result.config.version);
 	});
 
+	test("migrates 60db backend, key, and TTS voice id", () => {
+		const cwd = makeTempDir();
+		const agentDir = path.join(cwd, "agent-home");
+		writeSettings(agentDir, "settings.json", {
+			enabled: true,
+			backend: "sixtydb",
+			sixtyDbApiKey: "sk-60db-abc",
+			ttsBackend: "sixtydb",
+			ttsSixtyDbVoiceId: "7c32dd99-d61d-493b-9601-37e9464be6f4",
+			ttsSixtyDbStreaming: true,
+		});
+
+		const result = loadConfigWithSource(cwd, { agentDir });
+
+		expect(result.config.backend).toBe("sixtydb");
+		expect(result.config.sixtyDbApiKey).toBe("sk-60db-abc");
+		expect(result.config.ttsBackend).toBe("sixtydb");
+		expect(result.config.ttsSixtyDbVoiceId).toBe("7c32dd99-d61d-493b-9601-37e9464be6f4");
+		expect(result.config.ttsSixtyDbStreaming).toBe(true);
+	});
+
+	test("rejects a non-string 60db voice id (would 4xx at the REST layer)", () => {
+		const cwd = makeTempDir();
+		const agentDir = path.join(cwd, "agent-home");
+		writeSettings(agentDir, "settings.json", {
+			enabled: true,
+			ttsBackend: "sixtydb",
+			ttsSixtyDbVoiceId: 12345,
+		});
+
+		const result = loadConfigWithSource(cwd, { agentDir });
+
+		expect(result.config.ttsSixtyDbVoiceId).toBeUndefined();
+	});
+
 	test("keeps onboarding incomplete for partial legacy config", () => {
 		const cwd = makeTempDir();
 		const agentDir = path.join(cwd, "agent-home");
@@ -232,6 +267,38 @@ describe("saveConfig", () => {
 		const saved = JSON.parse(fs.readFileSync(savedPath, "utf8"));
 
 		expect(saved.voice.deepgramApiKey).toBe("secret-key-abc123");
+	});
+
+	test("strips sixtyDbApiKey from project-scoped saves", () => {
+		const cwd = makeTempDir();
+		const agentDir = path.join(cwd, "agent-home");
+		const config: VoiceConfig = {
+			...DEFAULT_CONFIG,
+			scope: "project",
+			sixtyDbApiKey: "sixtydb-secret-abc123",
+			onboarding: { completed: true, schemaVersion: DEFAULT_CONFIG.version },
+		};
+
+		const savedPath = saveConfig(config, "project", cwd, { agentDir });
+		const saved = JSON.parse(fs.readFileSync(savedPath, "utf8"));
+
+		expect(saved.voice.sixtyDbApiKey).toBeUndefined();
+	});
+
+	test("preserves sixtyDbApiKey in global-scoped saves", () => {
+		const cwd = makeTempDir();
+		const agentDir = path.join(cwd, "agent-home");
+		const config: VoiceConfig = {
+			...DEFAULT_CONFIG,
+			scope: "global",
+			sixtyDbApiKey: "sixtydb-secret-abc123",
+			onboarding: { completed: true, schemaVersion: DEFAULT_CONFIG.version },
+		};
+
+		const savedPath = saveConfig(config, "global", cwd, { agentDir });
+		const saved = JSON.parse(fs.readFileSync(savedPath, "utf8"));
+
+		expect(saved.voice.sixtyDbApiKey).toBe("sixtydb-secret-abc123");
 	});
 
 	test("strips non-loopback localEndpoint from project-scoped saves", () => {

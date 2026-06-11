@@ -17,6 +17,7 @@ import type { ChildProcess } from "node:child_process";
 import type { VoiceConfig } from "./config";
 import { isLoopbackEndpoint } from "./config";
 import { SAMPLE_RATE, CHANNELS } from "./deepgram";
+import { resolveSixtyDbApiKey, SIXTYDB_STT_URL } from "./sixtydb";
 
 // ─── Model catalog ───────────────────────────────────────────────────────────
 
@@ -653,6 +654,88 @@ export async function transcribeWithServer(
 	throw new Error(lastError || "Could not connect to local transcription server");
 }
 
+// ─── Transcription via 60db cloud (batch /stt) ───────────────────────────────
+
+/**
+ * POST the recorded clip to 60db's `/stt` endpoint and return the
+ * transcript. 60db STT is batch-only (no live interim transcripts), so it
+ * reuses the same buffer-then-upload machinery as the local backend — the
+ * only difference is the destination and `Authorization: Bearer` auth.
+ *
+ * Endpoint contract (https://docs.60db.ai/api-reference/stt/speech-to-text):
+ *   POST https://api.60db.ai/stt   (multipart/form-data)
+ *   Headers: Authorization: Bearer <key>
+ *   Fields:  file=<audio.wav>, language=<iso|auto>
+ *   Returns: JSON { text, language, ... }
+ *
+ * Max upload is 10 MB; at 16 kHz mono 16-bit that's ~5 min of audio, well
+ * above the MAX_RECORDING_SECS cap, so we don't pre-check size here.
+ */
+export async function transcribeWith60db(
+	wavBuffer: Buffer,
+	config: VoiceConfig,
+): Promise<string> {
+	const apiKey = resolveSixtyDbApiKey(config);
+	if (!apiKey) {
+		throw new Error("SIXTYDB_API_KEY not set. Run /voice-settings to configure it, or export SIXTYDB_API_KEY in your shell.");
+	}
+
+	const language = config.language || "auto";
+
+	// Build multipart/form-data manually (no external deps), mirroring
+	// transcribeWithServer above.
+	const boundary = `----PiVoice60db${Date.now()}`;
+	const parts: Buffer[] = [];
+
+	parts.push(Buffer.from(
+		`--${boundary}\r\n` +
+		`Content-Disposition: form-data; name="file"; filename="audio.wav"\r\n` +
+		`Content-Type: audio/wav\r\n\r\n`,
+	));
+	parts.push(wavBuffer);
+	parts.push(Buffer.from("\r\n"));
+
+	parts.push(Buffer.from(
+		`--${boundary}\r\n` +
+		`Content-Disposition: form-data; name="language"\r\n\r\n` +
+		`${language}\r\n`,
+	));
+
+	parts.push(Buffer.from(`--${boundary}--\r\n`));
+	const body = Buffer.concat(parts);
+
+	let resp: Response;
+	try {
+		resp = await fetch(SIXTYDB_STT_URL, {
+			method: "POST",
+			headers: {
+				"Authorization": `Bearer ${apiKey}`,
+				"Content-Type": `multipart/form-data; boundary=${boundary}`,
+				"Content-Length": String(body.length),
+				"Accept": "application/json",
+			},
+			body,
+			signal: AbortSignal.timeout(120_000),
+		});
+	} catch (err: any) {
+		if (err?.name === "AbortError" || err?.name === "TimeoutError") {
+			throw new Error("60db transcription timed out (120s)");
+		}
+		throw new Error(`60db network error: ${err?.message ?? String(err)}`);
+	}
+
+	if (!resp.ok) {
+		const detail = await resp.text().catch(() => "unknown");
+		throw new Error(`60db /stt HTTP ${resp.status}: ${detail.slice(0, 200)}`);
+	}
+
+	const json = await resp.json().catch(() => null) as { text?: string } | null;
+	if (!json || typeof json.text !== "string") {
+		throw new Error("60db /stt returned no transcript");
+	}
+	return json.text.trim();
+}
+
 // ─── Session lifecycle ───────────────────────────────────────────────────────
 
 /**
@@ -735,7 +818,11 @@ export async function stopLocalSession(session: LocalSession, config: VoiceConfi
 	try {
 		let text: string;
 
-		if (config.localEndpoint) {
+		if (config.backend === "sixtydb") {
+			// 60db cloud batch — upload the recorded clip, get a transcript.
+			const wavBuffer = createWavBuffer(pcmData);
+			text = await transcribeWith60db(wavBuffer, config);
+		} else if (config.localEndpoint) {
 			// External server mode (advanced override)
 			const wavBuffer = createWavBuffer(pcmData);
 			text = await transcribeWithServer(wavBuffer, config);
