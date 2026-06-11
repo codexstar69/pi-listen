@@ -32,7 +32,21 @@ import {
 	DEEPGRAM_TTS_SAMPLE_RATE,
 	assertLanguageForDeepgram,
 } from "./tts-deepgram";
+import {
+	sixtyDbSpeak,
+	sixtyDbSpeakStreaming,
+	SIXTYDB_TTS_SAMPLE_RATE,
+} from "./tts-sixtydb";
 import { play } from "./tts-playback";
+
+/** TTS backend after defaulting. `undefined`/unknown → "local". */
+type TtsBackend = "local" | "deepgram" | "sixtydb";
+
+function resolveTtsBackend(config: VoiceConfig): TtsBackend {
+	if (config.ttsBackend === "deepgram") return "deepgram";
+	if (config.ttsBackend === "sixtydb") return "sixtydb";
+	return "local";
+}
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
@@ -78,7 +92,7 @@ export async function speak(opts: SpeakOpts): Promise<void> {
 	}
 
 	const language = resolveLanguage(opts);
-	const backend: "local" | "deepgram" = config.ttsBackend === "deepgram" ? "deepgram" : "local";
+	const backend: TtsBackend = resolveTtsBackend(config);
 
 	// Chunk the text once up front. Each chunk is small enough to fit a
 	// single synthesize call without the engine refusing it; sequential
@@ -176,6 +190,31 @@ export async function speak(opts: SpeakOpts): Promise<void> {
 		// No streaming player available — fall through to REST/file path.
 	}
 
+	// v7.3 — 60db WebSocket streaming TTS. Same shape as the Deepgram
+	// streaming path: open the sink once, stream each chunk's audio frames
+	// into it as they arrive. 60db delivers base64 PCM inside JSON which
+	// tts-sixtydb decodes to Int16 before writing to the sink.
+	if (backend === "sixtydb" && config.ttsSixtyDbStreaming === true) {
+		const sr = SIXTYDB_TTS_SAMPLE_RATE;
+		const sink = openPlaybackStream({ sampleRate: sr, signal });
+		if (sink) {
+			try {
+				const voiceId = resolveSixtyDbVoiceId(config);
+				for (const chunk of chunks) {
+					if (signal?.aborted) throw makeAbortError();
+					await sixtyDbSpeakStreaming({ text: chunk, voiceId, config, sampleRate: sr, signal, sink });
+				}
+				await sink.end();
+				await sink.done();
+				return;
+			} catch (err) {
+				try { sink.cancel(); } catch {}
+				throw err;
+			}
+		}
+		// No streaming player available — fall through to REST/file path.
+	}
+
 	try {
 		let nextSynth: ReturnType<typeof synthOne> | null = null;
 		for (let i = 0; i < chunks.length; i++) {
@@ -234,7 +273,7 @@ export async function speak(opts: SpeakOpts): Promise<void> {
 
 interface SynthesizeChunkOpts {
 	chunk: string;
-	backend: "local" | "deepgram";
+	backend: TtsBackend;
 	config: VoiceConfig;
 	language: string;
 	signal?: AbortSignal;
@@ -243,10 +282,20 @@ interface SynthesizeChunkOpts {
 
 /**
  * Single chunk → audio. Returns either a Float32 PCM frame (local) or a
- * pre-encoded WAV blob (Deepgram). The playback layer accepts both.
+ * pre-encoded WAV blob (Deepgram / 60db). The playback layer accepts both.
  */
 async function synthesizeChunk(opts: SynthesizeChunkOpts): Promise<{ samples: Float32Array; sampleRate: number } | { wav: Uint8Array }> {
 	const { chunk, backend, config, language, signal } = opts;
+	if (backend === "sixtydb") {
+		const voiceId = resolveSixtyDbVoiceId(config);
+		const speed = typeof config.ttsSpeed === "number" && Number.isFinite(config.ttsSpeed)
+			? config.ttsSpeed
+			: 1.0;
+		const result = await sixtyDbSpeak({ text: chunk, voiceId, config, speed, signal });
+		// 60db REST returns a complete WAV blob (output_format=wav); the
+		// playback layer reads the sample rate from the WAV header.
+		return { wav: result.wav };
+	}
 	if (backend === "deepgram") {
 		const voiceId = typeof config.ttsDeepgramVoiceId === "string" && config.ttsDeepgramVoiceId
 			? config.ttsDeepgramVoiceId
@@ -291,6 +340,20 @@ async function synthesizeChunk(opts: SynthesizeChunkOpts): Promise<{ samples: Fl
 }
 
 // ─── Language resolution ──────────────────────────────────────────────────────
+
+/**
+ * Resolve the 60db voice id from config, throwing an actionable error when
+ * the user hasn't picked one. Unlike Deepgram, 60db has no fixed default
+ * voice — every account has its own cloned/professional voices.
+ */
+function resolveSixtyDbVoiceId(config: VoiceConfig): string {
+	const id = config.ttsSixtyDbVoiceId;
+	if (typeof id === "string" && id.trim()) return id.trim();
+	throw new Error(
+		"No 60db voice selected. Pick one via /voice-settings → Speak tab " +
+		"(it lists your voices from 60db), or set voice.ttsSixtyDbVoiceId in settings.json.",
+	);
+}
 
 function resolveLanguage(opts: SpeakOpts): string {
 	const candidate = opts.language ?? opts.config.ttsLanguage ?? opts.config.language ?? "en";
