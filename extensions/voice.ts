@@ -191,6 +191,25 @@ function voiceDebug(...args: unknown[]) {
 	process.stderr.write(line);
 }
 
+/**
+ * Run a session_start setup step in isolation. A throw inside any one
+ * step (migration, hint, notifier wiring, etc.) MUST NOT prevent the
+ * downstream `setupHoldToTalk()` call — otherwise the spacebar handler
+ * never installs and the user sees "voice doesn't respond" with no UI
+ * breadcrumb. Logs to the debug file when enabled, but always falls
+ * through silently so the rest of session_start can proceed.
+ */
+function safeStartupStep(name: string, fn: () => void): void {
+	try {
+		fn();
+	} catch (err) {
+		voiceDebug(`session_start step "${name}" threw — continuing`, {
+			error: String(err),
+			stack: err instanceof Error ? err.stack : undefined,
+		});
+	}
+}
+
 // Cache command existence checks — avoid sync spawnSync on every recording start
 const _cmdExistsCache = new Map<string, boolean>();
 function commandExists(cmd: string): boolean {
@@ -884,6 +903,18 @@ export default function (pi: ExtensionAPI) {
 		recordingStartedAt = 0;
 		lastStopTime = 0;
 		if (terminalInputUnsub) { terminalInputUnsub(); terminalInputUnsub = null; }
+		// Tear down the persistent TTS playback hub (long-lived ffplay /
+		// sox / paplay process kept alive across speak() calls). Without
+		// this, the player survives session_shutdown and either keeps
+		// playing buffered audio into the next session or zombies until
+		// process exit. Lazy-import to avoid pulling tts-playback into
+		// the cold-start hot path.
+		try {
+			const { cancelPlaybackHub } = require("./voice/tts-playback") as typeof import("./voice/tts-playback");
+			cancelPlaybackHub();
+		} catch (err) {
+			voiceDebug("cancelPlaybackHub threw during voiceCleanup", String(err));
+		}
 		hideWidget();
 		setVoiceState("idle");
 	}
@@ -981,6 +1012,11 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	// ─── Warmup Widget ──────────────────────────────────────────────────
+	//
+	// Minimal, non-distracting single-line indicator. No island chrome,
+	// no aurora gradient, no breathing title — the goal is "the voice
+	// recording indicator people already recognize" (Voice Memos /
+	// Discord / QuickTime), not an attention-grabbing widget.
 	function showWarmupWidget() {
 		if (!ctx?.hasUI) return;
 
@@ -994,52 +1030,33 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.setWidget("voice-recording", (_tui, theme) => {
 				return {
 					invalidate() {},
-					render(width: number): string[] {
-						// v7.2 world-class — Same Floating Island chrome
-						// as the active recording widget, with the
-						// progress bar inside. Establishes visual
-						// continuity between warmup → recording (same
-						// island, content shifts, no jump).
-						const { island, auroraColor, titleBreathe } = require("./voice/ui-aura") as typeof import("./voice/ui-aura");
+					render(_width: number): string[] {
 						const dim = (s: string) => theme.fg("dim", s);
 						const muted = (s: string) => theme.fg("muted", s);
 						const accent = (s: string) => theme.fg("accent", s);
-						const islandW = Math.max(36, Math.min(46, width - 2));
 
-						// Aurora gradient progress: ▰ filled / ▱ empty
-						// with truecolor across the filled portion.
-						const innerW = islandW - 2;
-						const fixedW = 3 /* " ○ " */ + 1 /* trail */;
-						const meterCells = Math.max(12, innerW - fixedW);
+						// 5-cell progress bar — `▰` filled / `░` empty,
+						// single accent color (no aurora). Familiar
+						// "hold to record" pattern.
+						const meterCells = 5;
 						const filled = Math.round(progress * meterCells);
 						let bar = "";
 						for (let i = 0; i < meterCells; i++) {
-							if (i < filled) {
-								// Color stop based on position along filled portion.
-								const t = filled === 0 ? 0 : i / Math.max(1, meterCells - 1);
-								bar += auroraColor(t) + "▰";
-							} else {
-								bar += dim("▱");
-							}
+							bar += i < filled ? accent("▰") : dim("░");
 						}
-						bar += "\x1b[0m";
 
 						const dot = progress < 1 ? muted("○") : accent("●");
-						const content = ` ${dot} ${bar} `;
-						// Breathing title — same aurora-cycle as recording widget
-						// so the warmup → recording transition feels seamless.
-						const titleStyled = titleBreathe(Date.now()) + "\x1b[1mVoice Mode\x1b[0m";
-						const footer = progress < 1
-							? dim("hold to record")
-							: accent("ready");
-						return island({ width: islandW, title: titleStyled, content, footer, dim });
+						const label = progress < 1 ? muted("Hold to record") : accent("Ready");
+						return [`  ${dot} ${label}  ${bar}`];
 					},
 				};
 			}, { placement: "belowEditor" });
 		};
 
 		renderWarmup();
-		warmupWidgetTimer = setInterval(renderWarmup, 90);
+		// 120ms is enough for the progress bar to look smooth without
+		// flooding the terminal redraw queue.
+		warmupWidgetTimer = setInterval(renderWarmup, 120);
 	}
 
 	// ─── Recording Widget ───────────────────────────────────────────────
@@ -1052,9 +1069,13 @@ export default function (pi: ExtensionAPI) {
 		// no gap between warmup and recording widgets (same widget ID).
 		clearWarmupWidget();
 
+		// 200ms cadence — fast enough for a gentle dot pulse and a
+		// responsive 3-bar level meter, slow enough that it isn't a
+		// distraction. The previous 150ms aurora-wave update is
+		// overkill for a minimal indicator.
 		_recWidgetAnimTimer = setInterval(() => {
 			showRecordingWidgetFrame();
-		}, 150);
+		}, 200);
 
 		showRecordingWidgetFrame();
 	}
@@ -1062,15 +1083,14 @@ export default function (pi: ExtensionAPI) {
 	function showRecordingWidgetFrame() {
 		if (!ctx?.hasUI) return;
 
-		// Minimal recording indicator below editor
+		// Minimal recording indicator below editor — single line, no
+		// island chrome, no aurora rainbow, no breathing title. Pattern
+		// matches QuickTime / Voice Memos / Discord: a `●` recording
+		// dot, a timer, and a tiny audio-level hint.
 		ctx.ui.setWidget("voice-recording", (_tui, theme) => {
 			return {
 				invalidate() {},
-				render(width: number): string[] {
-					// v7.2 world-class — Floating Island + Liquid Braille +
-					// Aurora gradient + breathing title + activity chip
-					// + 300 ms fade-in transition from warmup.
-					const { island, titleBreathe, activityTag } = require("./voice/ui-aura") as typeof import("./voice/ui-aura");
+				render(_width: number): string[] {
 					const now = Date.now();
 					const elapsed = (now - recordingStart) / 1000;
 					const mins = Math.floor(elapsed / 60);
@@ -1080,37 +1100,53 @@ export default function (pi: ExtensionAPI) {
 						: `${secs.toFixed(1)}s`;
 					const dim = (s: string) => theme.fg("dim", s);
 					const muted = (s: string) => theme.fg("muted", s);
-					const accent = (s: string) => theme.fg("accent", s);
 
-					// Activity chip — one-glance "is sound coming in?"
-					const chip = activityTag(audioLevelSmoothed, dim);
-					const chipPlain = chip.replace(/\x1b\[[\d;]*[A-Za-z]/g, "");
+					// Gentle 1.2s pulse on the recording dot — alternates
+					// between the "error" (red) accent and a dim shade so
+					// it feels alive without strobing.
+					const pulsePhase = (now % 1200) / 1200;
+					const pulseBright = pulsePhase < 0.5;
+					const dot = pulseBright
+						? theme.fg("error", "●")
+						: dim("●");
 
-					// Compact 36-48 cols. Reserved cells:
-					//   " ● "(3) + wave + " · TIME "(timer+4) + "  CHIP "(chip+3) + " "(1)
-					const islandW = Math.max(36, Math.min(48, width - 2));
-					const innerW = islandW - 2;
-					const fixedW = 3 + (4 + timeStr.length) + (3 + chipPlain.length) + 1;
-					const waveCells = Math.max(8, innerW - fixedW);
+					// 3-bar audio-level meter — single color, biased toward
+					// the live RMS. Provides "is the mic actually picking
+					// me up" feedback without dominating the line.
+					const bars = renderMinimalBars(audioLevelSmoothed);
 
-					// Fade-in over first 300 ms — wave amplitude
-					// scales 0→1 so the recording widget grows out
-					// of warmup rather than snapping in.
-					const sinceStart = Math.max(0, now - recordingStart);
-					const fade = Math.min(1, sinceStart / 300);
+					// "release ↑" hint, dim — same convention as the
+					// previous footer but inline so the indicator stays
+					// to a single row.
+					const hint = dim("release ↑");
 
-					const dot = theme.fg("error", getRecordDot());
-					const wave = buildAuroraWave(audioLevelSmoothed * fade, waveCells);
-
-					// Breathing title — slow aurora-color cycle.
-					const titleStyled = titleBreathe(now) + "\x1b[1mVoice Input\x1b[0m";
-
-					const content = ` ${dot} ${wave} ${dim("·")} ${muted(timeStr)}  ${chip} `;
-					const footerStyled = `${dim("release")} ${accent("↑")}`;
-					return island({ width: islandW, title: titleStyled, content, footer: footerStyled, dim });
+					return [`  ${dot} ${muted(timeStr)}  ${bars}  ${hint}`];
 				},
 			};
 		}, { placement: "belowEditor" });
+	}
+
+	/**
+	 * Render a 3-character audio-level meter using the standard
+	 * `▁▂▃▄▅▆▇` block scale. Each cell is biased slightly differently
+	 * so a steady tone produces a subtle "wave" rather than three
+	 * identical bars — but the bias is deterministic (sine-based on
+	 * wall clock) so there's no random jitter. Single accent color via
+	 * the `dim` palette keeps it from competing with the `●` dot.
+	 */
+	function renderMinimalBars(level: number): string {
+		const bars = ["▁", "▂", "▃", "▄", "▅", "▆", "▇"];
+		const t = Date.now() / 1000;
+		let out = "";
+		for (let i = 0; i < 3; i++) {
+			// Per-bar phase offset gives a gentle ripple at high level
+			// while keeping silence flat at `▁`.
+			const ripple = Math.sin(t * 5 + i * 1.2) * 0.15;
+			const v = Math.max(0, Math.min(0.999, level * (0.7 + ripple) + level * 0.3));
+			const idx = Math.floor(v * bars.length);
+			out += bars[Math.min(bars.length - 1, idx)];
+		}
+		return `\x1b[2m${out}\x1b[0m`; // ANSI dim
 	}
 
 
@@ -2392,19 +2428,21 @@ export default function (pi: ExtensionAPI) {
 
 		// Migration / setup runs on EVERY session_start, regardless of reason.
 		// Only the first-run notification is gated on isStartup.
+		//
+		// Each pre-handler call is isolated so a throw in migration / hint /
+		// notifier setup can never prevent setupHoldToTalk() from running.
+		// Without these guards, an unexpected throw upstream kills the
+		// spacebar input handler silently and the user sees "voice doesn't
+		// respond" with no UI breadcrumb.
 		if (config.onboarding.completed) {
-			// Always refresh the status bar — when voice is disabled,
-			// updateVoiceStatus() clears the entry so users don't see stale
-			// "MIC STREAM" text from a prior session. Hold-to-talk wiring
-			// only runs when enabled.
-			migratePersistedModelOnSessionStart();
-			maybeShowWhisperCppHint();
-			setupTranscribeDownloadNotifier();
-			updateVoiceStatus();
+			safeStartupStep("migratePersistedModelOnSessionStart", migratePersistedModelOnSessionStart);
+			safeStartupStep("maybeShowWhisperCppHint", maybeShowWhisperCppHint);
+			safeStartupStep("setupTranscribeDownloadNotifier", setupTranscribeDownloadNotifier);
+			safeStartupStep("updateVoiceStatus", updateVoiceStatus);
 			if (config.enabled) {
-				setupHoldToTalk();
-				warmupLocalRecognizerInBackground();
-				warmupTtsInBackground();
+				safeStartupStep("setupHoldToTalk", setupHoldToTalk);
+				safeStartupStep("warmupLocalRecognizerInBackground", warmupLocalRecognizerInBackground);
+				safeStartupStep("warmupTtsInBackground", warmupTtsInBackground);
 			}
 			return;
 		}
@@ -2430,12 +2468,12 @@ export default function (pi: ExtensionAPI) {
 				envDeepgramApiKey: process.env.DEEPGRAM_API_KEY,
 			});
 			saveConfig(configToSave, config.scope === "project" ? "project" : "global", currentCwd);
-			migratePersistedModelOnSessionStart();
-			setupTranscribeDownloadNotifier();
-			updateVoiceStatus();
-			setupHoldToTalk();
-			warmupLocalRecognizerInBackground();
-			warmupTtsInBackground();
+			safeStartupStep("migratePersistedModelOnSessionStart", migratePersistedModelOnSessionStart);
+			safeStartupStep("setupTranscribeDownloadNotifier", setupTranscribeDownloadNotifier);
+			safeStartupStep("updateVoiceStatus", updateVoiceStatus);
+			safeStartupStep("setupHoldToTalk", setupHoldToTalk);
+			safeStartupStep("warmupLocalRecognizerInBackground", warmupLocalRecognizerInBackground);
+			safeStartupStep("warmupTtsInBackground", warmupTtsInBackground);
 			if (!isStartup) return;
 			const backendLabel = hasLocalModel
 				? `Local model: ${LOCAL_MODELS.find(m => m.id === config.localModel)?.name || config.localModel} (offline, batch mode)`

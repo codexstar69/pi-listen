@@ -23,7 +23,7 @@
 
 import type { VoiceConfig } from "./config";
 import { synthesize, type TtsAudio } from "./tts-engine";
-import { openPlaybackStream, float32ToInt16, type PlaybackStream } from "./tts-playback";
+import { getPlaybackHub, scheduleHubIdleClose, cancelPlaybackHub, float32ToInt16, type PlaybackStream } from "./tts-playback";
 import { getTtsModel, type TtsLocalModelInfo } from "./tts-local-models";
 import {
 	deepgramSpeak,
@@ -166,7 +166,10 @@ export async function speak(opts: SpeakOpts): Promise<void> {
 	// conditions vs ~1-2s for REST/file path.
 	if (backend === "deepgram" && config.ttsDeepgramStreaming === true) {
 		const dgSampleRate = 24000;
-		const sink = openPlaybackStream({ sampleRate: dgSampleRate, signal });
+		// Hub keeps the player alive across speak() calls — eliminates
+		// the per-utterance ffplay spawn gap that caused ~1.7s drops
+		// between sentences in streaming auto-speak.
+		const sink = getPlaybackHub({ sampleRate: dgSampleRate, signal });
 		if (sink) {
 			try {
 				const voiceId = config.ttsDeepgramVoiceId || "aura-asteria-en";
@@ -181,11 +184,19 @@ export async function speak(opts: SpeakOpts): Promise<void> {
 						sink,
 					});
 				}
-				await sink.end();
-				await sink.done();
+				// Hub-managed: do NOT call sink.end()/done(). Schedule
+				// idle-close so the player exits gracefully after a few
+				// seconds of silence, staying warm for follow-up turns.
+				scheduleHubIdleClose();
 				return;
 			} catch (err) {
-				try { sink.cancel(); } catch {}
+				// Per-utterance error stops writing more PCM. On a
+				// caller-abort (user hit Esc / abortActiveSpeak), tear
+				// down the hub so buffered PCM stops audibly. Internal
+				// errors leave the hub warm.
+				if (signal?.aborted || (err as { name?: string })?.name === "AbortError") {
+					cancelPlaybackHub();
+				}
 				throw err;
 			} finally {
 				// Round-7 audit (GPT-5.5 Codex P1): the early-return
@@ -230,16 +241,27 @@ export async function speak(opts: SpeakOpts): Promise<void> {
 				queue.push(synthOne(chunks[lookahead]!));
 			}
 
-			// Streaming path: open the sink lazily on first chunk so we
+			// Streaming path: get the persistent hub on first chunk so we
 			// have the actual sample rate. PCM-yielding chunks (local
 			// `{ samples, sampleRate }`) are write-and-go; pre-encoded
 			// WAV chunks (Deepgram REST) cannot stream and fall through.
 			if ("samples" in audio && audio.sampleRate) {
 				if (stream === null && i === 0) {
-					stream = openPlaybackStream({ sampleRate: audio.sampleRate, signal });
+					stream = getPlaybackHub({ sampleRate: audio.sampleRate, signal });
 				}
 				if (stream) {
-					await stream.writePcm(float32ToInt16(audio.samples));
+					// Trim sherpa's trailing silence before streaming so
+					// chunk boundaries don't stack a synthetic pause on
+					// top of the natural sentence-end pause. Keep the
+					// final chunk's tail so the utterance doesn't sound
+					// clipped — `stream.end()` adds device-drain silence
+					// anyway.
+					const isLastChunk = i === chunks.length - 1;
+					const pcm = isLastChunk
+						? audio.samples
+						: trimTrailingSilence(audio.samples, audio.sampleRate);
+					publishPlaybackLevel(pcm);
+					await stream.writePcm(float32ToInt16(pcm));
 					continue;
 				}
 			}
@@ -250,13 +272,13 @@ export async function speak(opts: SpeakOpts): Promise<void> {
 			if (signal?.aborted) throw makeAbortError();
 		}
 
-		// Streaming path: tell the player no more PCM is coming and wait
-		// for it to drain. end() awaits all queued writes + appends a
-		// silence tail before signaling EOF (compensates for sox closing
-		// the audio device on EOF and dropping ~1s of buffered audio).
+		// Hub-managed: do NOT call stream.end()/done(). Schedule the
+		// idle-close so the persistent player exits cleanly after a
+		// few seconds of inactivity, but stays warm for the next
+		// speak() call. This is what eliminates the ~1.7s gap between
+		// sentences in streaming auto-speak.
 		if (stream) {
-			await stream.end();
-			await stream.done();
+			scheduleHubIdleClose();
 			stream = null;
 		}
 	} catch (err) {
@@ -265,6 +287,16 @@ export async function speak(opts: SpeakOpts): Promise<void> {
 		// computing audio nobody will play (CPU/GPU waste, contention).
 		pipelineAbort.abort();
 		cleanupStream();
+		// Caller-aborted (user hit Esc / abortActiveSpeak fired) →
+		// also tear down the playback hub so already-buffered PCM
+		// stops audibly. Otherwise the hub keeps playing whatever's
+		// queued (~250-1500ms of buffered audio), which feels like
+		// "Esc didn't work". Internal errors (synth failure etc.)
+		// leave the hub alone — buffered audio plays out and the
+		// hub stays warm for the next speak.
+		if (signal?.aborted || (err as { name?: string })?.name === "AbortError") {
+			cancelPlaybackHub();
+		}
 		throw err;
 	} finally {
 		// Detach the caller's abort listener so we don't accumulate
@@ -276,21 +308,94 @@ export async function speak(opts: SpeakOpts): Promise<void> {
 // ─── Pipeline tuning ───────────────────────────────────────────────────────────
 
 /**
- * Synth pipeline depth for `speak()`. Default 3 — keeps 3 chunks in flight
- * so playback never waits for one synth job to complete. Smooth even when
- * synth is slower than playback (common for Kokoro / Piper on multi-
- * sentence utterances). Bounded 1..8 to cap concurrent native compute.
+ * Synth pipeline depth for `speak()`. Default 2.
  *
- * Override via `PI_VOICE_SYNTH_PIPELINE_DEPTH` for power users who want
- * to trade memory for latency or vice versa.
+ * Why 2 (was 3): three concurrent synth jobs at startup contend for
+ * sherpa-onnx's internal threads, making the FIRST chunk synthesize
+ * slower — directly audible as a longer "thinking pause" before the
+ * voice starts and at every boundary where the queue catches up. Two
+ * still hides chunk-boundary latency (one chunk plays while the next
+ * synthesizes) without that startup contention. Bounded 1..8.
+ *
+ * Override via `PI_VOICE_SYNTH_PIPELINE_DEPTH`.
  */
 function resolvePipelineDepth(env: NodeJS.ProcessEnv = process.env): number {
 	const raw = env.PI_VOICE_SYNTH_PIPELINE_DEPTH;
-	if (!raw) return 3;
+	if (!raw) return 2;
 	const n = Number.parseInt(raw, 10);
-	if (!Number.isFinite(n) || n < 1) return 3;
+	if (!Number.isFinite(n) || n < 1) return 2;
 	if (n > 8) return 8;
 	return n;
+}
+
+/**
+ * Publish a coarse playback amplitude (RMS of the chunk just written
+ * to the sink) on a shared global so the playback indicator can render
+ * a level-reactive animation. This is the *real* per-chunk RMS — not a
+ * fake amplitude meter — so it satisfies the v7.1 honesty requirement.
+ *
+ * Updates only at writePcm cadence (~once per chunk = 0.5-3s), so the
+ * indicator should mostly use clock-driven motion and just modulate
+ * its amplitude by this published level. Reads via:
+ *   `(globalThis as any).__piListen?.playbackLevel ?? 0`
+ *
+ * Decays toward 0 between updates would belong in the reader, not
+ * here — this function only publishes the latest measurement.
+ */
+function publishPlaybackLevel(samples: Float32Array): void {
+	if (samples.length === 0) return;
+	let sumSq = 0;
+	const stride = Math.max(1, Math.floor(samples.length / 1024));
+	let count = 0;
+	for (let i = 0; i < samples.length; i += stride) {
+		const v = samples[i] ?? 0;
+		sumSq += v * v;
+		count++;
+	}
+	const rms = count > 0 ? Math.sqrt(sumSq / count) : 0;
+	const level = Math.min(1, rms * 4); // light gain so 0.25 RMS → 1.0
+	const shared = ((globalThis as any).__piListen ??= {});
+	shared.playbackLevel = level;
+	shared.playbackLevelAt = Date.now();
+}
+
+/**
+ * Strip trailing silence from a synthesized PCM buffer.
+ *
+ * Sherpa-onnx pads each generate() with ~0.4-0.6s of trailing silence
+ * (`silenceScale = 0.5` internal default; the legacy generateAsync
+ * shape we're stuck with — see tts-engine.ts:354 — doesn't expose the
+ * knob). When chunks are concatenated for streaming playback, that
+ * trailing silence stacks on top of the natural sentence-end pause →
+ * "huge stop at full stop" / "taking longer on full stops".
+ *
+ * We trim samples whose absolute amplitude is below `floor` (default
+ * ≈ -54 dBFS) from the end, leaving a small `tailMs` cushion so the
+ * voice doesn't sound clipped at the boundary. Conservative — we
+ * never trim more than `maxTrimMs` so a quiet ending of a real
+ * utterance can't be eaten.
+ */
+export function trimTrailingSilence(
+	samples: Float32Array,
+	sampleRate: number,
+	opts: { floor?: number; tailMs?: number; maxTrimMs?: number } = {},
+): Float32Array {
+	const floor = opts.floor ?? 0.002;
+	const tailMs = opts.tailMs ?? 60;
+	const maxTrimMs = opts.maxTrimMs ?? 450;
+	if (samples.length === 0) return samples;
+	const maxTrimSamples = Math.floor((maxTrimMs / 1000) * sampleRate);
+	const tailSamples = Math.floor((tailMs / 1000) * sampleRate);
+	let lastVoiced = samples.length - 1;
+	const limit = Math.max(0, samples.length - 1 - maxTrimSamples);
+	while (lastVoiced > limit) {
+		const v = samples[lastVoiced];
+		if (v !== undefined && Math.abs(v) >= floor) break;
+		lastVoiced--;
+	}
+	const cut = Math.min(samples.length, lastVoiced + 1 + tailSamples);
+	if (cut >= samples.length) return samples;
+	return samples.subarray(0, cut);
 }
 
 // ─── Backend dispatch ─────────────────────────────────────────────────────────
