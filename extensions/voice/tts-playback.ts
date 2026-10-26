@@ -218,6 +218,13 @@ export interface OpenPlaybackStreamOpts {
  *
  * Windows is intentionally unsupported here — PowerShell SoundPlayer
  * can't accept piped PCM. Windows users get the file-based fallback.
+ *
+ * Most callers should use `getPlaybackHub()` instead — it persists the
+ * player across speak() calls so consecutive utterances don't pay the
+ * spawn-and-tear-down gap (verified ~1.7s per boundary in the
+ * /tmp/pi-listen-stream.log diag trace). `openPlaybackStream` remains
+ * the low-level primitive used by the hub itself and by the smoke-test
+ * paths that explicitly want a one-shot sink.
  */
 export function openPlaybackStream(opts: OpenPlaybackStreamOpts): PlaybackStream | null {
 	const { sampleRate, signal } = opts;
@@ -368,17 +375,23 @@ export function openPlaybackStream(opts: OpenPlaybackStreamOpts): PlaybackStream
 			diagLog(`end() called — awaiting ${totalWrites} writes (${totalBytesAccepted} bytes)`);
 			// Drain all pending writes before signaling EOF.
 			try { await writeTail; } catch { /* swallowed */ }
-			// Sox closes the audio device immediately on EOF, dropping
+			// Sox closes the audio device immediately on EOF and drops
 			// any audio still in the OS hardware buffer (~1-2s on macOS
-			// CoreAudio). Append a tail of silence so the trailing real
-			// audio is fully flushed before sox tears down the device.
-			// 1.0 sec at sampleRate samples = sampleRate * 2 bytes.
-			const SILENCE_TAIL_SECS = 1;
-			const silence = new Int16Array(sampleRate * SILENCE_TAIL_SECS);
-			try {
-				await writeOne(new Uint8Array(silence.buffer, silence.byteOffset, silence.byteLength));
-			} catch { /* EPIPE ok */ }
-			diagLog(`end() — silence tail written, calling stdin.end()`);
+			// CoreAudio). Append a silence tail to compensate. ffplay
+			// drains its own buffers properly on EOF — no tail needed,
+			// and the tail just adds dead time before the player can
+			// exit (≈1s of audible silence at the end of every speak).
+			// paplay also drains correctly. Only sox needs the workaround.
+			if (player.cmd === "sox") {
+				const SILENCE_TAIL_SECS = 1;
+				const silence = new Int16Array(sampleRate * SILENCE_TAIL_SECS);
+				try {
+					await writeOne(new Uint8Array(silence.buffer, silence.byteOffset, silence.byteLength));
+				} catch { /* EPIPE ok */ }
+				diagLog(`end() — silence tail (sox) written, calling stdin.end()`);
+			} else {
+				diagLog(`end() — no silence tail (player=${player.cmd}), calling stdin.end()`);
+			}
 			try { proc.stdin?.end(); } catch { /* already closed */ }
 		},
 		cancel(): void {
@@ -398,6 +411,133 @@ export function openPlaybackStream(opts: OpenPlaybackStreamOpts): PlaybackStream
 function attachSafetyCatch<T>(p: Promise<T>): Promise<T> {
 	p.catch(() => { /* swallow — real awaiters see the rejection */ });
 	return p;
+}
+
+// ─── Persistent playback hub ─────────────────────────────────────────────────
+//
+// Keeps a single ffplay/sox/paplay process alive across `speak()` calls so
+// consecutive utterances don't pay the spawn-and-tear-down gap (verified
+// ~1.7s per boundary in /tmp/pi-listen-stream.log when the streaming
+// auto-speak path called `speak()` per sentence — each call opened a new
+// ffplay, wrote 0.5-2s of audio, appended a 1s silence tail, exited, then
+// the next sentence spawned a fresh ffplay). The hub eliminates that gap
+// entirely: speak writes its PCM into a long-lived stdin pipe, sentence
+// boundaries are inaudible.
+//
+// Lifecycle:
+//   - Created on first `getPlaybackHub()` call (lazily).
+//   - Reused on subsequent calls IF sample rate matches. Mismatched rate
+//     forces close+reopen (rare — the same TTS engine produces a stable
+//     rate for the whole session).
+//   - Idle-close: `scheduleHubIdleClose(ms)` arms a timer that flushes +
+//     ends the player after `ms` of no writes. Default 5s.
+//   - `cancelPlaybackHub()` forcibly tears it down (called from voice
+//     cleanup and on backend/sample-rate change).
+//
+// Per-utterance abort coupling: the hub does NOT take a per-utterance
+// signal. speak() handles per-utterance abort by checking its own signal
+// between writes and stopping further writePcm calls; whatever PCM was
+// already buffered into the hub plays out (≈250ms at most given chunked
+// writes). Killing the hub on every utterance abort would defeat the
+// purpose. Sessions teardown calls `cancelPlaybackHub()` to kill it.
+
+interface PlaybackHubState {
+	stream: PlaybackStream;
+	sampleRate: number;
+	abort: AbortController;
+	idleTimer: NodeJS.Timeout | null;
+}
+
+let _hub: PlaybackHubState | null = null;
+
+/**
+ * Get the persistent playback hub. Creates it lazily; reuses on rate
+ * match. Returns `null` when no streaming player is available — caller
+ * falls back to the file-based `play()` path (Windows, missing ffplay/
+ * sox/paplay).
+ *
+ * The returned PlaybackStream is OWNED by the hub. Callers MUST NOT
+ * call `.end()`, `.cancel()`, or `.done()` on it — those would tear
+ * down the shared player. Use `scheduleHubIdleClose()` if you want the
+ * player to gracefully shut down after a quiet period, or
+ * `cancelPlaybackHub()` to force teardown.
+ */
+export function getPlaybackHub(opts: OpenPlaybackStreamOpts): PlaybackStream | null {
+	const { sampleRate } = opts;
+	if (process.platform === "win32") return null;
+
+	// Existing hub with matching rate → reuse. Cancel any pending idle-
+	// close since we're about to write again.
+	if (_hub && _hub.sampleRate === sampleRate) {
+		if (_hub.idleTimer) {
+			clearTimeout(_hub.idleTimer);
+			_hub.idleTimer = null;
+		}
+		return wrapHubAsStream(_hub);
+	}
+
+	// Mismatched rate → tear down before opening fresh.
+	if (_hub) cancelPlaybackHub();
+
+	const abort = new AbortController();
+	const stream = openPlaybackStream({ sampleRate, signal: abort.signal });
+	if (!stream) return null;
+
+	_hub = { stream, sampleRate, abort, idleTimer: null };
+	return wrapHubAsStream(_hub);
+}
+
+/**
+ * Wrap the hub's underlying PlaybackStream so callers see a normal
+ * PlaybackStream interface but `end()` / `cancel()` / `done()` no-op
+ * on the shared instance. Lifecycle is managed via
+ * `scheduleHubIdleClose()` and `cancelPlaybackHub()` instead.
+ */
+function wrapHubAsStream(state: PlaybackHubState): PlaybackStream {
+	return {
+		writePcm: (int16) => state.stream.writePcm(int16),
+		// end()/cancel()/done() are intentionally inert at the per-
+		// utterance level. The hub owns the underlying stream.
+		end: async () => { /* no-op — see cancelPlaybackHub */ },
+		cancel: () => { /* no-op — see cancelPlaybackHub */ },
+		done: () => Promise.resolve(),
+	};
+}
+
+/**
+ * Schedule a graceful end of the hub's player after `idleMs` of no
+ * further writes. Subsequent `getPlaybackHub()` calls before the timer
+ * fires cancel the timer and reuse the player. The default 5s window
+ * is long enough to cover normal back-to-back assistant turns without
+ * leaving an unused process alive forever.
+ */
+export function scheduleHubIdleClose(idleMs = 5000): void {
+	if (!_hub) return;
+	if (_hub.idleTimer) clearTimeout(_hub.idleTimer);
+	const hub = _hub;
+	_hub.idleTimer = setTimeout(() => {
+		// Race: another speak() may have grabbed the hub right before
+		// the timer fired. Confirm we're still the same instance.
+		if (_hub !== hub) return;
+		// Graceful close: flush via end() + clear singleton. done()
+		// resolves once the player exits naturally.
+		const closing = hub.stream;
+		_hub = null;
+		closing.end().catch(() => {});
+	}, idleMs);
+}
+
+/**
+ * Force-tear-down the hub. Used by voiceCleanup() at session end and
+ * when the user changes TTS backend / sample rate mid-session.
+ */
+export function cancelPlaybackHub(): void {
+	const hub = _hub;
+	if (!hub) return;
+	_hub = null;
+	if (hub.idleTimer) clearTimeout(hub.idleTimer);
+	try { hub.abort.abort(); } catch { /* ok */ }
+	try { hub.stream.cancel(); } catch { /* ok */ }
 }
 
 interface StreamingPlayerSpec { cmd: string; args: string[]; }

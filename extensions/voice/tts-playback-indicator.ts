@@ -117,7 +117,56 @@ export function renderPlaybackLine(input: RenderInput): string[] {
 	const word = input.state === "synthesizing" ? "Synthesizing" : "Playing";
 	const elapsed = Math.max(0, Math.round((Date.now() - input.startedAt) / 1000));
 	const elapsedStr = `${elapsed}s`;
+
+	// Speaking-state animation: a 3-bar Siri-style wave whose height is
+	// modulated by the *real* RMS of the most recently written PCM
+	// chunk (published by `speak.publishPlaybackLevel`). Clock-driven
+	// per-bar phase so it looks alive even between chunk updates;
+	// amplitude scales with the published level so a long pause goes
+	// quiet instead of dancing dishonestly.
+	const wave = input.state === "playing"
+		? renderSpeakingWave(input.tick, dim, accent)
+		: "";
+
 	const showHint = input.width >= 60;
 	const hint = showHint ? ` ${dim("·")} ${dim("[esc] stop")}` : "";
-	return [` ${accent(spinner)} ${accent(word)} ${dim("·")} ${dim(elapsedStr)}${hint}`];
+	const wavePart = wave ? `  ${wave}` : "";
+	return [` ${accent(spinner)} ${accent(word)} ${dim("·")} ${dim(elapsedStr)}${wavePart}${hint}`];
+}
+
+/**
+ * 3-cell speaking wave. Each cell picks one of the standard block
+ * heights `▁▂▃▄▅▆▇` driven by `sin(t * speed + phase[i])`. Amplitude
+ * is gated by the real published playback RMS so the wave goes still
+ * during silence and animates during speech.
+ *
+ * Decays to 0 over 400ms after the last chunk write — sherpa generates
+ * full chunks at once so writes are bursty (~once per sentence). The
+ * decay keeps the wave moving smoothly between writes without claiming
+ * amplitude that doesn't exist long after the chunk has played out.
+ */
+function renderSpeakingWave(tick: number, dim: (s: string) => string, accent: (s: string) => string): string {
+	const bars = ["▁", "▂", "▃", "▄", "▅", "▆", "▇"];
+	const shared = (globalThis as any).__piListen as { playbackLevel?: number; playbackLevelAt?: number } | undefined;
+	const rawLevel = shared?.playbackLevel ?? 0;
+	const lastAt = shared?.playbackLevelAt ?? 0;
+	const ageMs = Date.now() - lastAt;
+	const decay = Math.max(0, 1 - ageMs / 400);
+	const level = rawLevel * decay;
+
+	// Tick advances every RenderTicker frame. Convert to a continuous
+	// "time" so the sine motion is smooth across frames.
+	const t = tick * 0.18;
+	let out = "";
+	for (let i = 0; i < 3; i++) {
+		const phase = i * 1.7;
+		const oscillation = (Math.sin(t + phase) + 1) * 0.5; // 0..1
+		const v = Math.max(0, Math.min(0.999, level * (0.5 + 0.5 * oscillation)));
+		const idx = Math.floor(v * bars.length);
+		const ch = bars[Math.min(bars.length - 1, idx)] ?? "▁";
+		// Tallest bar in accent, shorter ones dim — feels like a wave
+		// rolling across the cells without strobing color changes.
+		out += idx >= 4 ? accent(ch) : dim(ch);
+	}
+	return out;
 }
