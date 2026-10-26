@@ -704,6 +704,7 @@ export default function (pi: ExtensionAPI) {
 		resetHoldState(); // includes clearHoldTimer + clearReleaseTimer
 		_startingRecording = false;
 		lastSpacePressTime = 0;
+		lastNonSpaceKeyTime = 0;
 		errorCooldownUntil = 0;
 		editorTextBeforeVoice = "";
 		dictationMode = false;
